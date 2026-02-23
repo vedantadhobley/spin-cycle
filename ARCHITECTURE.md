@@ -563,6 +563,98 @@ spin-cycle-dev-adminer           :4502  ← Postgres web UI (Dracula theme)
 
 ---
 
+## Testing & Debugging
+
+### Submitting Claims via API
+
+```bash
+# Submit a claim
+curl -s -X POST http://localhost:4500/claims \
+  -H "Content-Type: application/json" \
+  -d '{"text": "The Great Wall of China is visible from space"}' | python3 -m json.tool
+
+# The response includes the claim ID
+# { "id": "abc123...", "text": "...", "status": "pending" }
+
+# Wait ~30s for the pipeline to finish, then fetch the result
+curl -s http://localhost:4500/claims/{id} | python3 -m json.tool
+
+# List claims with optional filters
+curl -s 'http://localhost:4500/claims?status=verified&limit=10' | python3 -m json.tool
+```
+
+### Submitting Claims via Temporal UI
+
+The Temporal UI at http://localhost:4501 lets you start workflows directly:
+
+1. Click **Start Workflow** (top right)
+2. Fill in:
+   - **Workflow Type**: `VerifyClaimWorkflow`
+   - **Workflow ID**: any unique string (e.g. `manual-test-1`)
+   - **Task Queue**: `spin-cycle-verify`
+   - **Input**: `["<claim-id>", "The claim text to verify"]`
+3. The first argument must be a valid claim UUID from the `claims` table (use the API to create one first, or insert directly in Adminer at http://localhost:4502)
+
+From the Temporal UI you can also:
+- **Inspect running workflows** — see each activity's input/output/duration in the Event History tab
+- **Debug failures** — failed activities show the full stack trace and retry attempts
+- **Terminate or cancel** workflows that are stuck
+
+### Watching Worker Logs
+
+```bash
+# Stream worker logs — shows every step of the pipeline in real time
+docker logs -f spin-cycle-dev-worker
+
+# Typical output:
+# decompose_claim.start    claim='...'
+# decompose_claim.done     num_sub_claims=2
+# research_claim.start     sub_claim='...'
+# research_claim.done      evidence_count=3
+# judge_subclaim.done       verdict=true confidence=0.95
+# synthesize_verdict.done   verdict=true confidence=0.95
+# store_result.done         claim_id=... sub_claims=2
+```
+
+### Inspecting the Database
+
+Adminer is available at http://localhost:4502:
+- **System**: PostgreSQL
+- **Server**: `postgres`
+- **Username**: `spincycle`
+- **Password**: `spincycle`
+- **Database**: `spincycle`
+
+Key queries:
+```sql
+-- See all claims and their status
+SELECT id, text, status, overall_verdict, created_at FROM claims ORDER BY created_at DESC;
+
+-- See sub-claims and their verdicts
+SELECT sc.text, v.verdict, v.confidence, v.reasoning
+FROM sub_claims sc
+JOIN verdicts v ON v.sub_claim_id = sc.id
+WHERE sc.claim_id = '<claim-id>';
+
+-- See evidence collected for a sub-claim
+SELECT source_type, source_url, snippet, relevance_score
+FROM evidence
+WHERE sub_claim_id = '<sub-claim-id>'
+ORDER BY relevance_score DESC;
+```
+
+### Running Unit Tests
+
+```bash
+# Run from inside the API container
+docker exec -it spin-cycle-dev-api pytest -v
+
+# Or locally (needs a running Postgres and env vars set)
+pytest -v
+```
+
+---
+
 ## Project Structure
 
 ```

@@ -150,19 +150,74 @@ docker compose -f docker-compose.dev.yml ps
 
 Adminer login: Server `spin-cycle-dev-postgres`, User `spincycle`, Password `spin-cycle-dev`, Database `spincycle`.
 
-### Verify It Works
+### Testing Claims
+
+There are three ways to submit claims and observe the pipeline.
+
+#### Via curl (API)
 
 ```bash
-# Health check
-curl http://localhost:4500/health
-
-# Submit a claim
-curl -X POST http://localhost:4500/claims \
+# Submit a claim for verification
+curl -s -X POST http://localhost:4500/claims \
   -H "Content-Type: application/json" \
-  -d '{"text": "The Eiffel Tower was completed in 1889"}'
+  -d '{"text": "The Great Wall of China is visible from space"}' | python3 -m json.tool
 
-# Wait ~30 seconds for verification, then check
-curl http://localhost:4500/claims/{id}
+# Returns something like:
+# { "id": "abc123...", "text": "...", "status": "pending", ... }
+
+# Wait ~30 seconds for the pipeline to finish, then check the result
+curl -s http://localhost:4500/claims/{id} | python3 -m json.tool
+
+# List all claims (with pagination and optional status filter)
+curl -s 'http://localhost:4500/claims?limit=10' | python3 -m json.tool
+curl -s 'http://localhost:4500/claims?status=verified' | python3 -m json.tool
+
+# Health check
+curl -s http://localhost:4500/health
+```
+
+You can also submit a claim with source attribution:
+```bash
+curl -s -X POST http://localhost:4500/claims \
+  -H "Content-Type: application/json" \
+  -d '{
+    "text": "UK spent £50 billion on HS2 before cancelling the northern leg",
+    "source": "https://example.com/article",
+    "source_name": "The Example Times"
+  }' | python3 -m json.tool
+```
+
+#### Via Temporal UI
+
+Open http://localhost:4501 and you can:
+
+1. **Watch workflows execute** — click any workflow to see the full activity history (decompose → research → judge → synthesize → store), including inputs, outputs, and timings for each step.
+
+2. **Start a workflow manually** — click "Start Workflow" in the top right:
+   - Workflow Type: `VerifyClaimWorkflow`
+   - Workflow ID: anything unique, e.g. `test-1`
+   - Task Queue: `spin-cycle-verify`
+   - Input: `["claim-id-from-db", "The claim text to verify"]`
+
+   Note: when starting from Temporal directly, the first argument should be a valid claim ID from the database (since `store_result` needs it). The easiest way is to insert a claim via the API first, then re-run its workflow from Temporal UI.
+
+3. **Replay and debug** — if a workflow fails, you can see exactly which activity failed, what it received, and what error it threw.
+
+#### Via worker logs
+
+Watch the verification pipeline in real-time:
+```bash
+# Follow worker logs (shows every step as it happens)
+docker logs -f spin-cycle-dev-worker
+
+# You'll see lines like:
+# decompose_claim.start    claim='...'
+# decompose_claim.done     num_sub_claims=2
+# research_claim.start     sub_claim='...'
+# research_claim.done      evidence_count=3
+# judge_subclaim.done      verdict=true confidence=0.95
+# synthesize_verdict.done  verdict=true confidence=0.95
+# store_result.done        claim_id=... sub_claims=2
 ```
 
 ## Environment Variables
