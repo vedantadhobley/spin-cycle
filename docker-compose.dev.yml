@@ -1,0 +1,187 @@
+# Development Docker Compose
+#
+# Port allocation: spin-cycle uses 4500-4509 (development)
+#   4500: FastAPI (with hot reload)
+#   4501: Temporal UI
+#   4502: Adminer (Postgres web UI)
+#
+# External services (joi via Docker DNS → systemd-resolved):
+#   - joi:3101 (LLM API - llama.cpp chat/vision)
+#   - joi:3102 (LLM API - llama.cpp embeddings)
+#
+# Internal ports (not exposed):
+#   - postgres:5432 (Application data)
+#   - temporal-postgres:5432 (Temporal metadata)
+#   - temporal:7233 (gRPC)
+
+name: spin-cycle-dev
+
+services:
+  # FASTAPI BACKEND - claim submission + query API
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: spin-cycle-dev-api
+    ports:
+      - "4500:4500"
+    env_file: .env
+    environment:
+      APP_ENV: development
+      APP_PORT: "4500"
+      POSTGRES_HOST: spin-cycle-dev-postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: spincycle
+      POSTGRES_USER: spincycle
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-spin-cycle-dev}
+      TEMPORAL_HOST: spin-cycle-dev-temporal:7233
+      LLAMA_URL: ${LLAMA_URL}
+      LLAMA_EMBED_URL: ${LLAMA_EMBED_URL}
+    volumes:
+      - .:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - spin-cycle-dev
+      - luv-dev
+
+  # TEMPORAL WORKER - runs verification workflows + LangGraph agents
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: spin-cycle-dev-worker
+    command: ["python", "-m", "src.worker"]
+    env_file: .env
+    environment:
+      APP_ENV: development
+      POSTGRES_HOST: spin-cycle-dev-postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: spincycle
+      POSTGRES_USER: spincycle
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-spin-cycle-dev}
+      TEMPORAL_HOST: spin-cycle-dev-temporal:7233
+      LLAMA_URL: ${LLAMA_URL}
+      LLAMA_EMBED_URL: ${LLAMA_EMBED_URL}
+    volumes:
+      - .:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - spin-cycle-dev
+      - luv-dev
+
+  # TEMPORAL SERVER - workflow orchestration
+  temporal:
+    image: temporalio/auto-setup:latest
+    container_name: spin-cycle-dev-temporal
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=temporal
+      - POSTGRES_PWD=temporal-dev
+      - POSTGRES_SEEDS=spin-cycle-dev-temporal-postgres
+      - BIND_ON_IP=0.0.0.0
+    depends_on:
+      temporal-postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "temporal", "operator", "cluster", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - spin-cycle-dev
+
+  # TEMPORAL UI - workflow management dashboard
+  temporal-ui:
+    image: temporalio/ui:latest
+    container_name: spin-cycle-dev-temporal-ui
+    ports:
+      - "4501:8080"
+    environment:
+      - TEMPORAL_ADDRESS=spin-cycle-dev-temporal:7233
+      - TEMPORAL_CORS_ORIGINS=http://localhost:4501
+    depends_on:
+      temporal:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - spin-cycle-dev
+
+  # TEMPORAL POSTGRES - metadata storage for Temporal
+  temporal-postgres:
+    image: postgres:16-alpine
+    container_name: spin-cycle-dev-temporal-postgres
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: temporal-dev
+      POSTGRES_DB: temporal
+    volumes:
+      - spin-cycle-dev-temporal-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal -d temporal"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - spin-cycle-dev
+
+  # APPLICATION POSTGRES - claims, verdicts, evidence
+  postgres:
+    image: postgres:16-alpine
+    container_name: spin-cycle-dev-postgres
+    environment:
+      POSTGRES_DB: spincycle
+      POSTGRES_USER: spincycle
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-spin-cycle-dev}
+    volumes:
+      - spin-cycle-dev-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U spincycle -d spincycle"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - spin-cycle-dev
+
+  # ADMINER - lightweight Postgres web UI
+  adminer:
+    image: adminer:latest
+    container_name: spin-cycle-dev-adminer
+    ports:
+      - "4502:8080"
+    environment:
+      ADMINER_DEFAULT_SERVER: spin-cycle-dev-postgres
+      ADMINER_DESIGN: dracula
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - spin-cycle-dev
+
+volumes:
+  spin-cycle-dev-postgres:
+    name: spin-cycle-dev-postgres
+  spin-cycle-dev-temporal-postgres:
+    name: spin-cycle-dev-temporal-postgres
+
+networks:
+  spin-cycle-dev:
+    name: spin-cycle-dev
+    driver: bridge
+  luv-dev:
+    external: true

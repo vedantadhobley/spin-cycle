@@ -1,0 +1,182 @@
+# Production Docker Compose
+#
+# Port allocation: spin-cycle uses 3500-3509 (production)
+#   3500: FastAPI (public API)
+#   3501: Temporal UI
+#   3502: Adminer (Postgres web UI)
+#
+# External services (joi via Docker DNS → systemd-resolved):
+#   - joi:3101 (LLM API - llama.cpp chat/vision)
+#   - joi:3102 (LLM API - llama.cpp embeddings)
+#
+# Internal ports (not exposed):
+#   - postgres:5432 (Application data)
+#   - temporal-postgres:5432 (Temporal metadata)
+#   - temporal:7233 (gRPC)
+
+name: spin-cycle-prod
+
+services:
+  # FASTAPI BACKEND - claim submission + query API
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: spin-cycle-prod-api:latest
+    container_name: spin-cycle-prod-api
+    ports:
+      - "3500:3500"
+    env_file: .env
+    environment:
+      APP_ENV: production
+      APP_PORT: "3500"
+      POSTGRES_HOST: spin-cycle-prod-postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: spincycle
+      POSTGRES_USER: spincycle
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      TEMPORAL_HOST: spin-cycle-prod-temporal:7233
+      LLAMA_URL: ${LLAMA_URL}
+      LLAMA_EMBED_URL: ${LLAMA_EMBED_URL}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - spin-cycle-prod
+      - luv-prod
+
+  # TEMPORAL WORKER - runs verification workflows + LangGraph agents
+  worker:
+    image: spin-cycle-prod-api:latest
+    container_name: spin-cycle-prod-worker
+    command: ["python", "-m", "src.worker"]
+    env_file: .env
+    environment:
+      APP_ENV: production
+      POSTGRES_HOST: spin-cycle-prod-postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: spincycle
+      POSTGRES_USER: spincycle
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      TEMPORAL_HOST: spin-cycle-prod-temporal:7233
+      LLAMA_URL: ${LLAMA_URL}
+      LLAMA_EMBED_URL: ${LLAMA_EMBED_URL}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - spin-cycle-prod
+      - luv-prod
+
+  # TEMPORAL SERVER - workflow orchestration
+  temporal:
+    image: temporalio/auto-setup:latest
+    container_name: spin-cycle-prod-temporal
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=temporal
+      - POSTGRES_PWD=${TEMPORAL_POSTGRES_PASSWORD:-temporal-prod}
+      - POSTGRES_SEEDS=spin-cycle-prod-temporal-postgres
+      - BIND_ON_IP=0.0.0.0
+    depends_on:
+      temporal-postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "temporal", "operator", "cluster", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - spin-cycle-prod
+
+  # TEMPORAL UI - workflow management dashboard
+  temporal-ui:
+    image: temporalio/ui:latest
+    container_name: spin-cycle-prod-temporal-ui
+    ports:
+      - "3501:8080"
+    environment:
+      - TEMPORAL_ADDRESS=spin-cycle-prod-temporal:7233
+      - TEMPORAL_CORS_ORIGINS=http://localhost:3501
+    depends_on:
+      temporal:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - spin-cycle-prod
+
+  # TEMPORAL POSTGRES - metadata storage for Temporal
+  temporal-postgres:
+    image: postgres:16-alpine
+    container_name: spin-cycle-prod-temporal-postgres
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: ${TEMPORAL_POSTGRES_PASSWORD:-temporal-prod}
+      POSTGRES_DB: temporal
+    volumes:
+      - spin-cycle-prod-temporal-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal -d temporal"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - spin-cycle-prod
+
+  # APPLICATION POSTGRES - claims, verdicts, evidence
+  postgres:
+    image: postgres:16-alpine
+    container_name: spin-cycle-prod-postgres
+    environment:
+      POSTGRES_DB: spincycle
+      POSTGRES_USER: spincycle
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - spin-cycle-prod-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U spincycle -d spincycle"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - spin-cycle-prod
+
+  # ADMINER - lightweight Postgres web UI
+  adminer:
+    image: adminer:latest
+    container_name: spin-cycle-prod-adminer
+    ports:
+      - "3502:8080"
+    environment:
+      ADMINER_DEFAULT_SERVER: spin-cycle-prod-postgres
+      ADMINER_DESIGN: dracula
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - spin-cycle-prod
+
+volumes:
+  spin-cycle-prod-postgres:
+    name: spin-cycle-prod-postgres
+  spin-cycle-prod-temporal-postgres:
+    name: spin-cycle-prod-temporal-postgres
+
+networks:
+  spin-cycle-prod:
+    name: spin-cycle-prod
+    driver: bridge
+  luv-prod:
+    external: true
