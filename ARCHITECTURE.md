@@ -400,13 +400,17 @@ All models use SQLAlchemy 2.0 declarative base (`src/db/models.py`):
 
 ## LLM Integration
 
-### Model
+### Models
 
-**Qwen3-VL-30B-A3B-Instruct** running on joi (a separate machine) via llama.cpp's OpenAI-compatible API.
+Two models running on joi via llama.cpp, each serving a different role:
 
-- Chat endpoint: `http://joi:3101/v1/chat/completions`
-- Model supports tool calling (function calling) natively
-- `/no_think` token disables chain-of-thought for structured output tasks (cleaner JSON)
+| Port | Model | Role | Used By |
+|------|-------|------|--------|
+| `:3101` | Qwen3-VL-30B-A3B-Instruct | Fast structured output | decompose, synthesize |
+| `:3102` | Qwen3-VL-30B-A3B-Thinking | Chain-of-thought reasoning | research, judge |
+| `:3103` | (embeddings — not yet used) | Semantic similarity | planned: evidence caching |
+
+Same base architecture (30B params, 3B active MoE), different fine-tunes. The instruct model uses `/no_think` for clean JSON. The thinking model produces `<think>...</think>` blocks that are stripped before parsing.
 
 ### Connection Path
 
@@ -423,12 +427,18 @@ All LLM calls go through `src/llm.py`:
 ```python
 from langchain_openai import ChatOpenAI
 
-def get_llm(temperature=0.1):
+def get_llm(temperature=0.1):           # Instruct — fast, structured
     return ChatOpenAI(
-        base_url=f"{LLAMA_URL}/v1",  # env var, default http://joi:3101
-        api_key="not-needed",         # local model, no auth
+        base_url=f"{LLAMA_URL}/v1",     # :3101
         model="Qwen3-VL-30B-A3B-Instruct",
-        temperature=temperature,       # low for fact-checking
+        temperature=temperature,
+    )
+
+def get_reasoning_llm(temperature=0.2):  # Thinking — slower, better reasoning
+    return ChatOpenAI(
+        base_url=f"{LLAMA_REASONING_URL}/v1",  # :3102
+        model="Qwen3-VL-30B-A3B-Thinking",
+        temperature=temperature,
     )
 ```
 
@@ -553,14 +563,18 @@ spin-cycle-dev-adminer           :4502  ← Postgres web UI (Dracula theme)
 
 ### What's Planned
 
+See [ROADMAP.md](ROADMAP.md) for the full prioritised improvement plan. Key next steps:
+
 | Component | Status | Details |
-|-----------|--------|---------|
-| Extraction pipeline | **Not started** | ExtractClaimsWorkflow, RSS fetching, LLM claim extraction |
-| source_feeds / articles models | **Not started** | New DB tables for extraction pipeline |
-| Alembic migrations | **Not started** | Dependency installed, no init |
-| Standalone LangGraph graph | **Stubbed** | `src/agent/graph.py` overlaps with Temporal — may consolidate |
-| Serper (Google search) tool | **Not started** | SERPER_API_KEY in .env, no tool implemented |
-| LangFuse integration | **Not started** | Self-hosted LLM observability |
+|-----------|--------|--------|
+| Serper (Google search) tool | **Next** | Biggest research quality win. SERPER_API_KEY in .env, needs `src/tools/serper.py` |
+| Alembic migrations | **Next** | Unblocks all future schema changes. Dependency installed, no init |
+| Source credibility scoring | **Planned** | Tier system for evidence sources (Reuters > blog) |
+| Calibration test suite | **Planned** | 100+ known claims, measure accuracy and confidence calibration |
+| RSS feed monitoring | **Planned** | `source_feeds` + `articles` tables, Temporal cron workflow |
+| Claim extraction pipeline | **Planned** | ExtractClaimsWorkflow, LLM reads articles → extracts claims |
+| Parallel sub-claim processing | **Planned** | Process sub-claims concurrently instead of sequentially |
+| LangFuse integration | **Planned** | Self-hosted LLM observability |
 
 ---
 
