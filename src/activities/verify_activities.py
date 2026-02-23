@@ -26,7 +26,7 @@ from temporalio import activity
 
 from src.db.session import async_session
 from src.db.models import Claim, SubClaim, Evidence, Verdict
-from src.llm import get_llm
+from src.llm import get_llm, get_reasoning_llm
 from src.prompts.verification import (
     DECOMPOSE_SYSTEM,
     DECOMPOSE_USER,
@@ -196,7 +196,7 @@ async def judge_subclaim(sub_claim: str, evidence: list[dict]) -> dict:
         evidence_parts.append(f"[{i}] Source: {source} | URL: {url}\n{content}")
     evidence_text = "\n\n".join(evidence_parts)
 
-    llm = get_llm()
+    llm = get_reasoning_llm()
     response = await llm.ainvoke([
         SystemMessage(content=JUDGE_SYSTEM),
         HumanMessage(content=JUDGE_USER.format(

@@ -225,7 +225,7 @@ docker logs -f spin-cycle-dev-worker
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `LLAMA_URL` | `http://joi:3101` | LLM chat API endpoint (OpenAI-compatible) |
-| `LLAMA_EMBED_URL` | `http://joi:3102` | LLM embeddings endpoint |
+| `LLAMA_EMBED_URL` | `http://joi:3103` | LLM embeddings endpoint |
 | `POSTGRES_PASSWORD` | `spin-cycle-dev` | Application Postgres password |
 | `NEWSAPI_KEY` | (empty) | NewsAPI key for news search evidence (optional) |
 | `SERPER_API_KEY` | (empty) | Serper key for Google search evidence (not yet implemented) |

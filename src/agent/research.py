@@ -57,7 +57,7 @@ import structlog
 from langchain_core.messages import HumanMessage, ToolMessage, AIMessage
 from langgraph.prebuilt import create_react_agent
 
-from src.llm import get_llm
+from src.llm import get_reasoning_llm
 from src.prompts.verification import RESEARCH_SYSTEM, RESEARCH_USER
 from src.tools.web_search import get_web_search_tool
 from src.tools.wikipedia import get_wikipedia_tool
@@ -76,7 +76,7 @@ def build_research_agent():
     how to research (search strategies, when to stop, what to report).
     See RESEARCH_SYSTEM in src/prompts/verification.py for the full prompt.
     """
-    llm = get_llm(temperature=0.2)
+    llm = get_reasoning_llm(temperature=0.2)
     tools = [get_web_search_tool(), get_wikipedia_tool()]
 
     return create_react_agent(

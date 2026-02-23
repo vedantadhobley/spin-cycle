@@ -523,7 +523,8 @@ spin-cycle-dev-adminer           :4502  ← Postgres web UI (Dracula theme)
 ### External Services
 
 - `joi:3101` — LLM chat/vision API (llama.cpp, via Tailscale)
-- `joi:3102` — LLM embeddings API (llama.cpp, via Tailscale)
+- `joi:3102` — LLM thinking/reasoning API (llama.cpp, via Tailscale)
+- `joi:3103` — LLM embeddings API (llama.cpp, via Tailscale)
 - DuckDuckGo — web search (no API key)
 - Wikipedia API — factual lookups (no API key)
 - NewsAPI — news search (requires key, optional)

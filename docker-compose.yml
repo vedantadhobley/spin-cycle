@@ -7,7 +7,8 @@
 #
 # External services (joi via Docker DNS → systemd-resolved):
 #   - joi:3101 (LLM API - llama.cpp chat/vision)
-#   - joi:3102 (LLM API - llama.cpp embeddings)
+#   - joi:3102 (LLM API - llama.cpp thinking/reasoning)
+#   - joi:3103 (LLM API - llama.cpp embeddings)
 #
 # Internal ports (not exposed):
 #   - postgres:5432 (Application data)
@@ -37,6 +38,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       TEMPORAL_HOST: spin-cycle-prod-temporal:7233
       LLAMA_URL: ${LLAMA_URL}
+      LLAMA_REASONING_URL: ${LLAMA_REASONING_URL}
       LLAMA_EMBED_URL: ${LLAMA_EMBED_URL}
     depends_on:
       postgres:
@@ -63,6 +65,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       TEMPORAL_HOST: spin-cycle-prod-temporal:7233
       LLAMA_URL: ${LLAMA_URL}
+      LLAMA_REASONING_URL: ${LLAMA_REASONING_URL}
       LLAMA_EMBED_URL: ${LLAMA_EMBED_URL}
     depends_on:
       postgres:

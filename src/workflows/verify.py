@@ -64,19 +64,19 @@ class VerifyClaimWorkflow:
         for i, sub_claim in enumerate(sub_claims):
             workflow.logger.info(f"Processing sub-claim {i+1}/{len(sub_claims)}: {sub_claim}")
 
-            # Research evidence (LangGraph agent)
+            # Research evidence (LangGraph agent — uses thinking model, needs more time)
             evidence = await workflow.execute_activity(
                 research_subclaim,
                 args=[sub_claim],
-                start_to_close_timeout=timedelta(seconds=120),
+                start_to_close_timeout=timedelta(seconds=300),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
 
-            # Judge based on evidence
+            # Judge based on evidence (uses thinking model for better reasoning)
             result = await workflow.execute_activity(
                 judge_subclaim,
                 args=[sub_claim, evidence],
-                start_to_close_timeout=timedelta(seconds=60),
+                start_to_close_timeout=timedelta(seconds=120),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
 
