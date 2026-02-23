@@ -242,9 +242,8 @@ Claim: {sub_claim}
 Evidence:
 {evidence_text}
 
-Return a JSON object with "verdict", "confidence", and "reasoning".
-
-/no_think\
+Think carefully about what the evidence says. Weigh conflicting sources. \
+Then return a JSON object with "verdict", "confidence", and "reasoning".\
 """
 
 # Why "Do NOT use your own knowledge"?

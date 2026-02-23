@@ -15,6 +15,7 @@ decompose, Temporal will retry just that activity — not the whole pipeline.
 """
 
 import json
+import re
 import uuid
 from datetime import datetime, timezone
 
@@ -205,6 +206,15 @@ async def judge_subclaim(sub_claim: str, evidence: list[dict]) -> dict:
     ])
 
     raw = response.content.strip()
+
+    # Strip <think>...</think> tags if the model used chain-of-thought
+    # We let the judge think (no /no_think token) for better reasoning,
+    # then extract just the JSON output after the thinking block.
+    think_match = re.search(r"<think>(.*?)</think>", raw, re.DOTALL)
+    if think_match:
+        logger.info("judge_subclaim.thinking", thinking=think_match.group(1)[:200])
+        raw = raw[think_match.end():].strip()
+
     logger.info("judge_subclaim.llm_response", raw=raw[:200])
 
     # Parse the JSON verdict from the LLM
