@@ -13,6 +13,7 @@ from temporalio.worker import Worker
 
 from src.workflows.verify import VerifyClaimWorkflow
 from src.activities.verify_activities import (
+    create_claim,
     decompose_claim,
     research_subclaim,
     judge_subclaim,
@@ -36,6 +37,7 @@ async def main():
         task_queue=TASK_QUEUE,
         workflows=[VerifyClaimWorkflow],
         activities=[
+            create_claim,
             decompose_claim,
             research_subclaim,
             judge_subclaim,

@@ -6,6 +6,7 @@ from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
     from src.activities.verify_activities import (
+        create_claim,
         decompose_claim,
         research_subclaim,
         judge_subclaim,
@@ -26,7 +27,26 @@ class VerifyClaimWorkflow:
     """
 
     @workflow.run
-    async def run(self, claim_id: str, claim_text: str) -> dict:
+    async def run(self, claim_id: str | None, claim_text: str) -> dict:
+        """Run the verification pipeline.
+
+        Args:
+            claim_id: Existing claim UUID from the database, or None.
+                      When None, the workflow creates the claim record itself.
+                      This lets you start workflows from Temporal UI with just
+                      the claim text — pass [null, "claim text here"].
+            claim_text: The claim to verify.
+        """
+        # Step 0: Create claim record if we don't have one
+        if not claim_id:
+            claim_id = await workflow.execute_activity(
+                create_claim,
+                args=[claim_text],
+                start_to_close_timeout=timedelta(seconds=15),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+            workflow.logger.info(f"Created claim record: {claim_id}")
+
         workflow.logger.info(f"Starting verification for claim: {claim_id}")
 
         # Step 1: Decompose into sub-claims

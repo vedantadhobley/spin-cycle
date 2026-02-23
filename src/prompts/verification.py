@@ -207,6 +207,23 @@ Verdict scale:
 (wrong numbers, missing context, etc.)
 - "unverifiable" — not enough evidence to judge either way
 
+Confidence scoring (USE THE FULL RANGE — do NOT default to 0.9+):
+- 0.95-1.0 — Multiple high-quality sources explicitly confirm/deny. No \
+ambiguity whatsoever. Reserve this for slam-dunk cases only.
+- 0.80-0.94 — Strong evidence from reliable sources, but minor gaps \
+(e.g., exact figures differ slightly, or only 1-2 strong sources).
+- 0.60-0.79 — Moderate evidence. Sources partially address the claim, or \
+there are conflicting signals between sources.
+- 0.40-0.59 — Weak evidence. Sources are tangential, low-quality, or \
+contradict each other roughly equally.
+- 0.20-0.39 — Very little relevant evidence found. Verdict is mostly a \
+best guess.
+- 0.0-0.19 — Essentially no usable evidence. Almost pure uncertainty.
+
+Be calibrated: if the evidence is decent but not overwhelming, use 0.7 \
+or 0.75 — not 0.95. Only use 0.9+ when the evidence is rock-solid from \
+multiple authoritative sources.
+
 Return a JSON object:
 {
   "verdict": "true|false|partially_true|unverifiable",
@@ -250,9 +267,11 @@ Return a JSON object with "verdict", "confidence", and "reasoning".
 #   ]
 #   Output: {
 #     "verdict": "true",
-#     "confidence": 0.95,
+#     "confidence": 0.85,
 #     "reasoning": "Two reliable sources (Wikipedia, NASA.gov) confirm the
-#                   $25.4 billion figure."
+#                   $25.4 billion figure. Confidence is 0.85 rather than
+#                   higher because the exact figure may vary depending on
+#                   whether inflation-adjusted."
 #   }
 
 
@@ -275,6 +294,15 @@ Rules:
 
 The overall confidence should reflect the weakest link — if one sub-claim \
 is very uncertain, your overall confidence should be lower.
+
+Confidence scoring (USE THE FULL RANGE):
+- 0.95-1.0 — All sub-claims have rock-solid verdicts. Reserve for slam-dunks.
+- 0.80-0.94 — Strong but not perfect. Most sub-claims well-supported.
+- 0.60-0.79 — Moderate. Some sub-claims uncertain or evidence is mixed.
+- 0.40-0.59 — Weak. Significant uncertainty in multiple sub-claims.
+- Below 0.40 — Very uncertain. Mostly guesswork.
+
+Do NOT default to 0.9+. Be honest about uncertainty.
 
 Return a JSON object:
 {

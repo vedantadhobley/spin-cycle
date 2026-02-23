@@ -39,6 +39,31 @@ logger = structlog.get_logger()
 
 
 @activity.defn
+async def create_claim(claim_text: str) -> str:
+    """Create a claim record in the database and return its ID.
+
+    This lets workflows be self-contained — you can start a VerifyClaimWorkflow
+    from Temporal UI with just the claim text, and it will create the DB record
+    automatically. When started via the API, the claim already exists so this
+    activity is skipped.
+    """
+    logger.info("create_claim.start", claim=claim_text[:80])
+
+    async with async_session() as session:
+        async with session.begin():
+            claim = Claim(
+                text=claim_text,
+                status="pending",
+            )
+            session.add(claim)
+            await session.flush()
+            claim_id = str(claim.id)
+
+    logger.info("create_claim.done", claim_id=claim_id)
+    return claim_id
+
+
+@activity.defn
 async def decompose_claim(claim_text: str) -> list[str]:
     """Break a claim into atomic, verifiable sub-claims using the LLM.
 

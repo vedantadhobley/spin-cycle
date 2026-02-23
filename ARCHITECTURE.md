@@ -592,8 +592,8 @@ The Temporal UI at http://localhost:4501 lets you start workflows directly:
    - **Workflow Type**: `VerifyClaimWorkflow`
    - **Workflow ID**: any unique string (e.g. `manual-test-1`)
    - **Task Queue**: `spin-cycle-verify`
-   - **Input**: `["<claim-id>", "The claim text to verify"]`
-3. The first argument must be a valid claim UUID from the `claims` table (use the API to create one first, or insert directly in Adminer at http://localhost:4502)
+   - **Input**: `[null, "The claim text you want to verify"]`
+3. The first argument is `null` — the workflow creates the claim record in the database automatically. (If you already have a claim ID from the API, pass it as a string instead of `null`.)
 
 From the Temporal UI you can also:
 - **Inspect running workflows** — see each activity's input/output/duration in the Event History tab

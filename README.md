@@ -197,9 +197,9 @@ Open http://localhost:4501 and you can:
    - Workflow Type: `VerifyClaimWorkflow`
    - Workflow ID: anything unique, e.g. `test-1`
    - Task Queue: `spin-cycle-verify`
-   - Input: `["claim-id-from-db", "The claim text to verify"]`
+   - Input: `[null, "The claim text you want to verify"]`
 
-   Note: when starting from Temporal directly, the first argument should be a valid claim ID from the database (since `store_result` needs it). The easiest way is to insert a claim via the API first, then re-run its workflow from Temporal UI.
+   The first argument is `null` — the workflow will create the claim record in the database automatically. (If you already have a claim ID from the API, you can pass it instead of `null`.)
 
 3. **Replay and debug** — if a workflow fails, you can see exactly which activity failed, what it received, and what error it threw.
 
