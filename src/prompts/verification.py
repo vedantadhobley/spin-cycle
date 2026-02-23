@@ -158,8 +158,11 @@ Find evidence about this claim:
 
 "{sub_claim}"
 
-Search for information that supports OR contradicts this claim. Use both \
-web search and Wikipedia when relevant.\
+Identify the KEY DETAIL that makes this claim specific and verifiable, then \
+search for THAT. Don't just search for the people or topic in general — \
+search for the specific event, action, number, or object mentioned.
+
+Use both web search and Wikipedia when relevant.\
 """
 
 # Why separate RESEARCH from JUDGE?
