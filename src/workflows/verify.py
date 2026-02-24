@@ -1,5 +1,6 @@
 """Temporal workflow for claim verification."""
 
+import asyncio
 from datetime import timedelta
 from temporalio import workflow
 from temporalio.common import RetryPolicy
@@ -65,14 +66,15 @@ class VerifyClaimWorkflow:
         log.info(workflow.logger, MODULE, "decomposed", "Claim decomposed into sub-claims",
                  claim_id=claim_id, num_sub_claims=len(sub_claims))
 
-        # Step 2: Research + judge each sub-claim
-        sub_results = []
-        for i, sub_claim in enumerate(sub_claims):
+        # Step 2: Research + judge each sub-claim (IN PARALLEL)
+        # Sub-claims are independent — no reason to wait for one before
+        # starting the next. This cuts total time from O(n * per_claim)
+        # to O(max_per_claim).
+        async def _process_subclaim(index: int, sub_claim: str) -> dict:
             log.info(workflow.logger, MODULE, "subclaim_start", "Processing sub-claim",
-                     claim_id=claim_id, index=i + 1, total=len(sub_claims),
+                     claim_id=claim_id, index=index + 1, total=len(sub_claims),
                      sub_claim=sub_claim[:80])
 
-            # Research evidence (LangGraph agent — uses thinking model, needs more time)
             evidence = await workflow.execute_activity(
                 research_subclaim,
                 args=[sub_claim],
@@ -80,15 +82,17 @@ class VerifyClaimWorkflow:
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
 
-            # Judge based on evidence (uses thinking model for better reasoning)
             result = await workflow.execute_activity(
                 judge_subclaim,
-                args=[sub_claim, evidence],
+                args=[claim_text, sub_claim, evidence],
                 start_to_close_timeout=timedelta(seconds=120),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
+            return result
 
-            sub_results.append(result)
+        sub_results = list(await asyncio.gather(
+            *[_process_subclaim(i, sc) for i, sc in enumerate(sub_claims)]
+        ))
 
         # Step 3: Synthesize overall verdict
         verdict = await workflow.execute_activity(

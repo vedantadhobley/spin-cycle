@@ -9,10 +9,19 @@ Where spin-cycle is, where it needs to go, and what each improvement actually do
 A working end-to-end claim verification pipeline:
 - Manual claim submission via API
 - LLM decomposes claims into sub-claims
-- LangGraph research agent gathers evidence (DuckDuckGo + Wikipedia)
+- LangGraph research agent gathers evidence with dynamically loaded tools
 - Thinking model evaluates evidence and renders verdicts
 - Results stored in Postgres with full reasoning chains
 - Temporal orchestrates everything with retries and durability
+- Production-grade structured logging (JSON for Loki, pretty for dev)
+
+**Search tools (env-var gated — set the key to enable):**
+- **SearXNG** (self-hosted meta-search, free, aggregates 70+ engines) — `SEARXNG_URL`
+- **Serper** (Google index via API, 2,500 one-time free) — `SERPER_API_KEY`
+- **Brave Search** (independent index, ~1k queries from $5/mo credit) — `BRAVE_API_KEY`
+- **DuckDuckGo** (free fallback, always available, no key needed)
+- **Wikipedia** (always available, no key needed)
+- **Page fetcher** (reads full page text from URLs, always available)
 
 **What's missing to make this legit:**
 
@@ -20,17 +29,25 @@ A working end-to-end claim verification pipeline:
 
 ## Phase 1: Research Quality
 
-The single biggest lever. The verdict is only as good as the evidence. Right now we have DuckDuckGo and Wikipedia — that's fine for well-known claims but falls apart on niche, recent, or regional topics.
+The single biggest lever. The verdict is only as good as the evidence.
 
-### 1.1 — Google Search via Serper API
+### 1.1 — Multi-Source Search (DONE)
 
-**Why:** DuckDuckGo's search quality is noticeably worse than Google's, especially for recent news and fact-check articles. Google indexes fact-checking sites (Snopes, PolitiFact, FullFact) better and surfaces them higher.
+**Status:** ✅ Implemented
 
-**What:** Add a `serper_search` tool that calls the Serper API (Google Search results as JSON). Keep DuckDuckGo as a fallback.
+Search tools are dynamically loaded based on configured API keys / services:
+- **SearXNG** — Self-hosted meta-search engine. Aggregates Google, Bing, DuckDuckGo, Brave, and dozens more. Free, unlimited, runs as a Docker container in the stack.
+- **Serper** — Google results via Serper API. Reliable paid option.
+- **Brave Search** — Independent search index. Finds things Google misses.
+- **DuckDuckGo** — Free fallback, always available.
+- **Wikipedia** — Established facts, always available.
+- **Page fetcher** — Fetches and extracts full text from URLs. Lets the agent actually read articles instead of relying on snippets.
 
-**Effort:** Small. SERPER_API_KEY is already in `.env.example`. Just need to implement `src/tools/serper.py` and register it with the research agent.
+The agent uses these tools in combination — it decides which tools to call, reads results, and loops until it has enough evidence.
 
-**Cost:** Serper free tier gives 2,500 queries/month. At ~3 searches per sub-claim × 2 sub-claims per claim, that's ~400 claims/month for free.
+### ~~1.1b — SearXNG Meta-Search~~ (Merged into 1.1)
+
+SearXNG is now the primary search tool, running self-hosted in the Docker stack.
 
 ### 1.2 — News API Integration
 
@@ -50,7 +67,7 @@ The single biggest lever. The verdict is only as good as the evidence. Right now
 |------|---------|--------|
 | **1 — Wire services** | Reuters, AP, AFP | Highest |
 | **2 — Major outlets** | BBC, NYT, Guardian, WSJ, etc. | High |
-| **3 — Fact-checkers** | Snopes, PolitiFact, FullFact, AFP Fact Check | High (specialised) |
+| **3 — Official records** | Government sites, court records, legislatures | High |
 | **4 — Quality press** | Reputable national/regional outlets | Medium |
 | **5 — Other** | Blogs, forums, unknown domains | Low |
 
@@ -289,8 +306,7 @@ What to build next, in order of impact:
 
 | Priority | Item | Why |
 |----------|------|-----|
-| **1** | Serper (Google search) | Biggest research quality win for minimal effort |
-| **2** | Alembic migrations | Unblocks all future schema changes |
+| **1** | Alembic migrations | Unblocks all future schema changes |
 | **3** | Source credibility scoring | Better evidence → better verdicts |
 | **4** | Calibration test suite | Can't improve without measuring |
 | **5** | RSS feed monitoring | First step toward automated intake |

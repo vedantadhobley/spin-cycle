@@ -33,6 +33,7 @@ class SubClaimResponse(BaseModel):
     verdict: Optional[Literal["true", "false", "partially_true", "unverifiable"]] = None
     confidence: Optional[float] = None
     reasoning: Optional[str] = None
+    nuance: Optional[str] = None
     evidence_count: int = 0
 
 
@@ -45,6 +46,7 @@ class VerdictResponse(BaseModel):
     source_name: Optional[str] = None
     verdict: Optional[Literal["true", "mostly_true", "mixed", "mostly_false", "false", "unverifiable"]] = None
     confidence: Optional[float] = None
+    nuance: Optional[str] = None
     sub_claims: list[SubClaimResponse] = []
     created_at: datetime
     updated_at: datetime

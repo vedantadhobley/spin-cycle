@@ -36,13 +36,25 @@ agentic AI pattern used across the LangChain/LangGraph ecosystem.
 
 Unlike a simple prompt→response, this agent:
   - Decides what to search for (based on the claim)
-  - Executes real web searches (DuckDuckGo, Wikipedia)
-  - Reads the results and decides if it needs more information
-  - Adapts its search strategy based on what it finds
+  - Executes real web searches (Serper/Google, Brave, DuckDuckGo, Wikipedia)
+  - Reads actual page content when search snippets aren't enough
+  - Decides if it needs more information and adapts its strategy
   - Stops when it has enough evidence (or gives up)
 
 The LLM is making autonomous decisions at each step — that's what makes
 it an agent rather than just a chatbot.
+
+## Tool selection
+
+Tools are dynamically registered based on which API keys are configured:
+  - searxng_search: Self-hosted meta-search aggregating many engines (needs SEARXNG_URL)
+  - serper_search: Google results via Serper API (needs SERPER_API_KEY)
+  - brave_search: Brave Search independent index (needs BRAVE_API_KEY)
+  - web_search: DuckDuckGo fallback (always available, no key needed)
+  - wikipedia_search: Wikipedia API (always available, no key needed)
+  - fetch_page_content: Read full page text from URLs (always available)
+
+Set API keys in .env to enable/disable tools. No key = tool not loaded.
 
 ## Integration with Temporal
 
@@ -62,25 +74,72 @@ from src.llm import get_reasoning_llm
 from src.prompts.verification import RESEARCH_SYSTEM, RESEARCH_USER
 from src.tools.web_search import get_web_search_tool
 from src.tools.wikipedia import get_wikipedia_tool
+from src.tools.page_fetcher import get_page_fetcher_tool
+from src.tools.serper import get_serper_tool, is_available as serper_available
+from src.tools.brave import get_brave_tool, is_available as brave_available
+from src.tools.searxng import get_searxng_tool, is_available as searxng_available
 from src.utils.logging import log, get_logger
 
 MODULE = "research"
 logger = get_logger()
 
 
+def _build_tool_list() -> list:
+    """Build the agent's tool list based on which API keys are configured.
+
+    Priority order for search tools:
+      1. SearXNG (self-hosted meta-search, free, aggregates many engines)
+      2. Serper (Google index, reliable paid API)
+      3. Brave (independent index, good for diversity)
+      4. DuckDuckGo (free fallback, no key needed)
+
+    Always included:
+      - Wikipedia (free, reliable for established facts)
+      - Page fetcher (reads URLs, no key needed)
+    """
+    tools = []
+
+    # Search tools — add based on availability
+    if searxng_available():
+        tools.append(get_searxng_tool())
+        log.info(logger, MODULE, "tool_enabled", "SearXNG meta-search enabled")
+
+    if serper_available():
+        tools.append(get_serper_tool())
+        log.info(logger, MODULE, "tool_enabled", "Serper search enabled")
+
+    if brave_available():
+        tools.append(get_brave_tool())
+        log.info(logger, MODULE, "tool_enabled", "Brave search enabled")
+
+    # DuckDuckGo — always available as fallback
+    tools.append(get_web_search_tool())
+
+    # Wikipedia — always available
+    tools.append(get_wikipedia_tool())
+
+    # Page fetcher — always available, lets agent read full articles
+    tools.append(get_page_fetcher_tool())
+
+    tool_names = [t.name for t in tools]
+    log.info(logger, MODULE, "tools_loaded", "Research agent tools configured",
+             tool_count=len(tools), tools=tool_names)
+
+    return tools
+
+
 def build_research_agent():
     """Build a ReAct agent for evidence gathering.
 
-    The agent has two tools:
-      - web_search: DuckDuckGo search for news, fact-checks, and general web
-      - wikipedia_search: Wikipedia for established facts and background
+    Tools are dynamically loaded based on configured API keys.
+    See _build_tool_list() for the full list and priority order.
 
     The `prompt` parameter injects a SystemMessage that tells the agent
     how to research (search strategies, when to stop, what to report).
     See RESEARCH_SYSTEM in src/prompts/verification.py for the full prompt.
     """
     llm = get_reasoning_llm(temperature=0.2)
-    tools = [get_web_search_tool(), get_wikipedia_tool()]
+    tools = _build_tool_list()
 
     return create_react_agent(
         llm,
@@ -117,8 +176,10 @@ def extract_evidence(messages: list) -> list[dict]:
         tool_name = getattr(msg, "name", "") or ""
         if "wikipedia" in tool_name.lower():
             source_type = "wikipedia"
+        elif "fetch_page" in tool_name.lower():
+            source_type = "web"  # Page content is still "web" evidence
         else:
-            source_type = "web"
+            source_type = "web"  # serper, brave, google, ddg → all "web"
 
         content = msg.content if isinstance(msg.content, str) else str(msg.content)
 
@@ -140,7 +201,7 @@ def extract_evidence(messages: list) -> list[dict]:
     return evidence
 
 
-async def research_claim(sub_claim: str, max_steps: int = 25) -> list[dict]:
+async def research_claim(sub_claim: str, max_steps: int = 25, timeout_secs: int = 180) -> list[dict]:
     """Run the research agent to gather evidence for a sub-claim.
 
     This is the main entry point called by the research_subclaim activity.
@@ -150,6 +211,10 @@ async def research_claim(sub_claim: str, max_steps: int = 25) -> list[dict]:
         max_steps: Maximum number of graph steps (prevents infinite loops).
                    Each tool call costs ~2 steps (agent node + tool node).
                    25 steps allows ~10-12 tool calls, which is generous.
+        timeout_secs: Soft timeout in seconds. If the agent exceeds this,
+                      we cancel it and return whatever evidence was gathered
+                      so far via the fallback. Default 180s (3 min) to stay
+                      well under the 300s Temporal activity timeout.
 
     Returns:
         List of evidence dicts, each with:
@@ -158,21 +223,26 @@ async def research_claim(sub_claim: str, max_steps: int = 25) -> list[dict]:
           - content: The evidence text/snippet
           - supports_claim: None (determined by the judge step later)
     """
+    import asyncio
+
     log.info(logger, MODULE, "start", "Starting research agent",
              sub_claim=sub_claim[:80])
 
     try:
         agent = build_research_agent()
 
-        result = await agent.ainvoke(
-            {
-                "messages": [
-                    HumanMessage(
-                        content=RESEARCH_USER.format(sub_claim=sub_claim)
-                    )
-                ]
-            },
-            config={"recursion_limit": max_steps},
+        result = await asyncio.wait_for(
+            agent.ainvoke(
+                {
+                    "messages": [
+                        HumanMessage(
+                            content=RESEARCH_USER.format(sub_claim=sub_claim)
+                        )
+                    ]
+                },
+                config={"recursion_limit": max_steps},
+            ),
+            timeout=timeout_secs,
         )
 
         # Extract evidence from tool results in the conversation
@@ -192,6 +262,12 @@ async def research_claim(sub_claim: str, max_steps: int = 25) -> list[dict]:
                  sub_claim=sub_claim[:50], evidence_count=len(evidence),
                  agent_steps=len(result["messages"]))
         return evidence
+
+    except asyncio.TimeoutError:
+        log.warning(logger, MODULE, "agent_timeout",
+                    "Research agent timed out, falling back to direct search",
+                    timeout_secs=timeout_secs, sub_claim=sub_claim[:50])
+        return await _research_fallback(sub_claim)
 
     except Exception as e:
         # If the ReAct agent fails, fall back to direct tool calls.
@@ -215,30 +291,81 @@ async def _research_fallback(sub_claim: str) -> list[dict]:
     we fall back to running search tools directly. No LLM reasoning about
     what to search — we just search for the claim text directly.
 
-    This still produces usable evidence; it's just less targeted than
-    the agent's approach.
+    Uses the best available search tool (SearXNG > Serper > Brave > DDG).
     """
     log.info(logger, MODULE, "fallback_start", "Running fallback direct search",
              sub_claim=sub_claim[:50])
     evidence = []
 
-    # DuckDuckGo search
-    try:
-        ddg_tool = get_web_search_tool()
-        results = ddg_tool.invoke(sub_claim)
-        if results and results.strip():
-            evidence.append({
-                "source_type": "web",
-                "source_url": None,
-                "content": results[:3000],
-                "supports_claim": None,
-            })
-    except Exception as e:
-        log.warning(logger, MODULE, "fallback_ddg_failed",
-                    "DuckDuckGo fallback search failed",
-                    error=str(e), error_type=type(e).__name__)
+    # Try SearXNG first (self-hosted meta-search)
+    if searxng_available():
+        try:
+            from src.tools.searxng import search_searxng
+            results = await search_searxng(sub_claim, max_results=8)
+            for r in results:
+                evidence.append({
+                    "source_type": "web",
+                    "source_url": r.get("url"),
+                    "content": f"{r['title']}: {r['snippet']}",
+                    "supports_claim": None,
+                })
+        except Exception as e:
+            log.warning(logger, MODULE, "fallback_searxng_failed",
+                        "SearXNG fallback search failed",
+                        error=str(e), error_type=type(e).__name__)
 
-    # Wikipedia search
+    # Try Serper (best paid results)
+    if serper_available():
+        try:
+            from src.tools.serper import search_serper
+            results = await search_serper(sub_claim, max_results=5)
+            for r in results:
+                evidence.append({
+                    "source_type": "web",
+                    "source_url": r.get("url"),
+                    "content": f"{r['title']}: {r['snippet']}",
+                    "supports_claim": None,
+                })
+        except Exception as e:
+            log.warning(logger, MODULE, "fallback_serper_failed",
+                        "Serper fallback search failed",
+                        error=str(e), error_type=type(e).__name__)
+
+    # Try Brave (different index = different results)
+    if brave_available():
+        try:
+            from src.tools.brave import search_brave
+            results = await search_brave(sub_claim, max_results=5)
+            for r in results:
+                evidence.append({
+                    "source_type": "web",
+                    "source_url": r.get("url"),
+                    "content": f"{r['title']}: {r['snippet']}",
+                    "supports_claim": None,
+                })
+        except Exception as e:
+            log.warning(logger, MODULE, "fallback_brave_failed",
+                        "Brave fallback search failed",
+                        error=str(e), error_type=type(e).__name__)
+
+    # DuckDuckGo fallback (always available)
+    if not evidence:
+        try:
+            ddg_tool = get_web_search_tool()
+            results = ddg_tool.invoke(sub_claim)
+            if results and results.strip():
+                evidence.append({
+                    "source_type": "web",
+                    "source_url": None,
+                    "content": results[:3000],
+                    "supports_claim": None,
+                })
+        except Exception as e:
+            log.warning(logger, MODULE, "fallback_ddg_failed",
+                        "DuckDuckGo fallback search failed",
+                        error=str(e), error_type=type(e).__name__)
+
+    # Wikipedia search (always available)
     try:
         from src.tools.wikipedia import search_wikipedia
         wiki_results = await search_wikipedia(sub_claim, max_results=3)
@@ -253,6 +380,14 @@ async def _research_fallback(sub_claim: str) -> list[dict]:
         log.warning(logger, MODULE, "fallback_wiki_failed",
                     "Wikipedia fallback search failed",
                     error=str(e), error_type=type(e).__name__)
+
+    # Cap evidence to avoid overwhelming the judge — 6 items is plenty
+    # for a verdict. More just means slower LLM inference.
+    if len(evidence) > 6:
+        log.info(logger, MODULE, "fallback_capped",
+                 "Capping fallback evidence",
+                 original=len(evidence), capped=6)
+        evidence = evidence[:6]
 
     log.info(logger, MODULE, "fallback_done", "Fallback search complete",
              sub_claim=sub_claim[:50], evidence_count=len(evidence))

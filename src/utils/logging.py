@@ -112,6 +112,7 @@ class StructuredFormatter(logging.Formatter):
 
     def _pretty(self, data: dict) -> str:
         """Human-readable format for development."""
+        ts = data["ts"][11:23]  # Extract HH:MM:SS.mmm from ISO timestamp
         lvl = data["level"][0]  # I/W/E/D
         mod = data["module"].upper()[:10].ljust(10)
         act = data["action"]
@@ -120,7 +121,7 @@ class StructuredFormatter(logging.Formatter):
         skip = {"ts", "level", "module", "action", "msg"}
         ctx = " ".join(f"{k}={v}" for k, v in data.items() if k not in skip)
 
-        return f"{lvl} [{mod}] {act}: {msg}" + (f" | {ctx}" if ctx else "")
+        return f"{ts} {lvl} [{mod}] {act}: {msg}" + (f" | {ctx}" if ctx else "")
 
 
 class StructuredLogger:

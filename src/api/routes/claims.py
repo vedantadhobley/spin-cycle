@@ -91,6 +91,7 @@ async def get_claim(
             verdict=sc.verdict,
             confidence=sc.confidence,
             reasoning=sc.reasoning,
+            nuance=sc.nuance,
             evidence_count=len(sc.evidence),
         )
         for sc in claim.sub_claims
@@ -104,6 +105,7 @@ async def get_claim(
         source_name=claim.source_name,
         verdict=claim.verdict.verdict if claim.verdict else None,
         confidence=claim.verdict.confidence if claim.verdict else None,
+        nuance=claim.verdict.nuance if claim.verdict else None,
         sub_claims=sub_claim_responses,
         created_at=claim.created_at,
         updated_at=claim.updated_at,
@@ -146,12 +148,14 @@ async def list_claims(
                 source_name=c.source_name,
                 verdict=c.verdict.verdict if c.verdict else None,
                 confidence=c.verdict.confidence if c.verdict else None,
+                nuance=c.verdict.nuance if c.verdict else None,
                 sub_claims=[
                     SubClaimResponse(
                         text=sc.text,
                         verdict=sc.verdict,
                         confidence=sc.confidence,
                         reasoning=sc.reasoning,
+                        nuance=sc.nuance,
                         evidence_count=len(sc.evidence),
                     )
                     for sc in c.sub_claims

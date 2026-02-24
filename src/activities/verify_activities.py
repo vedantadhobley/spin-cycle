@@ -152,7 +152,7 @@ async def research_subclaim(sub_claim: str) -> list[dict]:
 
 
 @activity.defn
-async def judge_subclaim(sub_claim: str, evidence: list[dict]) -> dict:
+async def judge_subclaim(claim_text: str, sub_claim: str, evidence: list[dict]) -> dict:
     """Judge a sub-claim based on collected evidence.
 
     This is the critical evaluation step. The LLM looks at the evidence
@@ -165,6 +165,10 @@ async def judge_subclaim(sub_claim: str, evidence: list[dict]) -> dict:
     The key constraint: the LLM must reason ONLY from the provided evidence,
     NOT from its own training data. This is what makes the verdict trustworthy
     — it's grounded in real, citable sources.
+
+    The original claim_text is passed for context so the judge can interpret
+    the sub-claim naturally (e.g., "has not been audited" in the context of
+    a claim about promised audits means the promised audit hasn't happened).
 
     If there's no evidence at all, we short-circuit to "unverifiable" without
     bothering the LLM.
@@ -197,6 +201,7 @@ async def judge_subclaim(sub_claim: str, evidence: list[dict]) -> dict:
     response = await llm.ainvoke([
         SystemMessage(content=JUDGE_SYSTEM),
         HumanMessage(content=JUDGE_USER.format(
+            claim_text=claim_text,
             sub_claim=sub_claim,
             evidence_text=evidence_text,
         )),
@@ -222,6 +227,7 @@ async def judge_subclaim(sub_claim: str, evidence: list[dict]) -> dict:
         verdict = result.get("verdict", "unverifiable")
         confidence = float(result.get("confidence", 0.0))
         reasoning = result.get("reasoning", "")
+        nuance = result.get("nuance") or None
 
         # Validate verdict is one of our expected values
         valid_verdicts = {"true", "false", "partially_true", "unverifiable"}
@@ -241,15 +247,18 @@ async def judge_subclaim(sub_claim: str, evidence: list[dict]) -> dict:
         verdict = "unverifiable"
         confidence = 0.0
         reasoning = f"Failed to parse LLM judgment: {raw[:200]}"
+        nuance = None
 
     log.info(activity.logger, "judge", "done", "Sub-claim judged",
-             sub_claim=sub_claim[:50], verdict=verdict, confidence=confidence)
+             sub_claim=sub_claim[:50], verdict=verdict, confidence=confidence,
+             nuance=nuance[:80] if nuance else None)
 
     return {
         "sub_claim": sub_claim,
         "verdict": verdict,
         "confidence": confidence,
         "reasoning": reasoning,
+        "nuance": nuance,
         "evidence": evidence,
     }
 
@@ -277,12 +286,15 @@ async def synthesize_verdict(claim_text: str, sub_results: list[dict]) -> dict:
     # Format sub-verdicts for the LLM prompt
     sub_verdict_parts = []
     for i, sub in enumerate(sub_results, 1):
-        sub_verdict_parts.append(
+        part = (
             f"[{i}] Sub-claim: {sub['sub_claim']}\n"
             f"    Verdict: {sub['verdict']}\n"
             f"    Confidence: {sub['confidence']}\n"
             f"    Reasoning: {sub['reasoning']}"
         )
+        if sub.get("nuance"):
+            part += f"\n    Nuance: {sub['nuance']}"
+        sub_verdict_parts.append(part)
     sub_verdicts_text = "\n\n".join(sub_verdict_parts)
 
     llm = get_llm()
@@ -304,6 +316,7 @@ async def synthesize_verdict(claim_text: str, sub_results: list[dict]) -> dict:
         verdict = result.get("verdict", "unverifiable")
         confidence = float(result.get("confidence", 0.0))
         reasoning = result.get("reasoning", "")
+        nuance = result.get("nuance") or None
 
         # Validate overall verdict
         valid_verdicts = {
@@ -324,14 +337,17 @@ async def synthesize_verdict(claim_text: str, sub_results: list[dict]) -> dict:
         verdict = "unverifiable"
         confidence = 0.0
         reasoning = f"Failed to parse LLM synthesis: {raw[:200]}"
+        nuance = None
 
     log.info(activity.logger, "synthesize", "done", "Overall verdict synthesized",
-             claim=claim_text[:50], verdict=verdict, confidence=confidence)
+             claim=claim_text[:50], verdict=verdict, confidence=confidence,
+             nuance=nuance[:80] if nuance else None)
 
     return {
         "verdict": verdict,
         "confidence": confidence,
         "reasoning_chain": [sub.get("reasoning", "") for sub in sub_results],
+        "nuance": nuance,
         "sub_results": sub_results,
     }
 
@@ -367,6 +383,7 @@ async def store_result(claim_id: str, verdict: dict, sub_results: list[dict]) ->
                     verdict=sub.get("verdict"),
                     confidence=sub.get("confidence"),
                     reasoning=sub.get("reasoning"),
+                    nuance=sub.get("nuance"),
                 )
                 session.add(sub_claim)
                 await session.flush()  # get sub_claim.id
@@ -392,6 +409,7 @@ async def store_result(claim_id: str, verdict: dict, sub_results: list[dict]) ->
                 verdict=verdict.get("verdict", "unverifiable"),
                 confidence=verdict.get("confidence", 0.0),
                 reasoning_chain=verdict.get("reasoning_chain"),
+                nuance=verdict.get("nuance"),
             )
             session.add(verdict_row)
 

@@ -1,0 +1,64 @@
+# SearXNG Configuration for spin-cycle
+# Minimal config — just what we need for the search API
+
+use_default_settings: true
+
+# Enable JSON API
+search:
+  formats:
+    - html
+    - json
+
+# Disable rate limiter (we're the only client)
+server:
+  limiter: false
+  secret_key: "spin-cycle-searxng-dev"
+
+# Engine configuration — enable the good ones, disable noisy ones
+engines:
+  # Major search engines
+  - name: google
+    engine: google
+    disabled: false
+  - name: bing
+    engine: bing
+    disabled: false
+  - name: duckduckgo
+    engine: duckduckgo
+    disabled: false
+  - name: brave
+    engine: brave
+    disabled: false
+  - name: mojeek
+    engine: mojeek
+    disabled: false
+  - name: qwant
+    engine: qwant
+    disabled: false
+
+  # News sources
+  - name: google news
+    engine: google_news
+    disabled: false
+  - name: bing news
+    engine: bing_news
+    disabled: false
+
+  # Reference
+  - name: wikipedia
+    engine: wikipedia
+    disabled: false
+  - name: wikidata
+    engine: wikidata
+    disabled: false
+
+  # Disable social/entertainment engines (noisy for fact-checking)
+  - name: reddit
+    engine: reddit
+    disabled: true
+  - name: 9gag
+    engine: 9gag
+    disabled: true
+  - name: piratebay
+    engine: piratebay
+    disabled: true
