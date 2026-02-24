@@ -5,14 +5,15 @@ Activities can be retried independently if they fail.
 
 The verification pipeline has 6 activities:
   0. create_claim      — creates a claim record in the DB (when started from Temporal UI)
-  1. decompose_claim   — LLM breaks a complex claim into atomic sub-claims
+  1. decompose_claim   — LLM breaks a claim into simpler sub-claims (one level)
   2. research_subclaim — LangGraph agent gathers evidence using tools
   3. judge_subclaim    — LLM evaluates evidence for/against a sub-claim
-  4. synthesize_verdict — LLM combines sub-verdicts into overall verdict
-  5. store_result       — writes everything to Postgres
+  4. synthesize_verdict — LLM combines child verdicts (intermediate or final)
+  5. store_result       — writes full result tree to Postgres
 
-Each activity is independent and retryable. If the LLM times out during
-decompose, Temporal will retry just that activity — not the whole pipeline.
+The workflow calls decompose_claim recursively at each level of the tree.
+synthesize_verdict is unified — it works for both intermediate and final
+synthesis, adapting its prompt based on context.
 """
 
 import json
@@ -34,8 +35,6 @@ from src.prompts.verification import (
     JUDGE_USER,
     SYNTHESIZE_SYSTEM,
     SYNTHESIZE_USER,
-    GROUP_SYNTHESIZE_SYSTEM,
-    GROUP_SYNTHESIZE_USER,
 )
 from src.utils.logging import log
 
@@ -69,26 +68,17 @@ async def create_claim(claim_text: str) -> str:
 
 @activity.defn
 async def decompose_claim(claim_text: str) -> list[dict]:
-    """Break a claim into a tree of atomic, verifiable sub-claims using the LLM.
+    """Break a claim into simpler sub-claims using the LLM (one level).
 
-    Returns a tree structure as a list of nodes. Each node is either:
-      - A LEAF: {"text": "verifiable assertion"}
-      - A GROUP: {"label": "aspect name", "children": [...]}
+    Called recursively by the workflow at each level of the tree.
+    Returns a flat list of {"text": "..."} dicts.
 
-    Example output for "Fort Knox not audited despite Trump + Musk promises":
-      [
-        {"text": "The gold in Fort Knox has not been audited recently"},
-        {"label": "Audit promises", "children": [
-          {"text": "Donald Trump promised to audit Fort Knox"},
-          {"text": "Elon Musk or DOGE promised to audit Fort Knox"}
-        ]}
-      ]
+    If the claim is atomic, returns [{"text": "the original claim"}].
+    If the claim is compound, returns 2-6 simpler sub-claims.
 
-    If the claim is atomic, returns a single leaf: [{"text": "the claim"}]
-
-    Falls back to a single leaf if JSON parsing fails.
+    Falls back to a single item if JSON parsing fails.
     """
-    log.info(activity.logger, "decompose", "start", "Decomposing claim into sub-claim tree",
+    log.info(activity.logger, "decompose", "start", "Decomposing claim",
              claim=claim_text)
     llm = get_llm()
 
@@ -101,68 +91,48 @@ async def decompose_claim(claim_text: str) -> list[dict]:
     log.debug(activity.logger, "decompose", "llm_response", "LLM response received",
               raw=raw)
 
-    # Parse the JSON tree from the LLM response
+    # Parse the JSON list from the LLM response
     try:
-        tree = json.loads(raw)
-        if not isinstance(tree, list):
-            raise ValueError(f"Expected list, got: {type(tree)}")
-        tree = _normalize_tree(tree, claim_text)
-        if not tree:
-            raise ValueError("LLM returned empty tree")
+        items = json.loads(raw)
+        if not isinstance(items, list):
+            raise ValueError(f"Expected list, got: {type(items)}")
+        result = _normalize_flat(items)
+        if not result:
+            raise ValueError("LLM returned empty list")
     except (json.JSONDecodeError, ValueError) as e:
         log.warning(activity.logger, "decompose", "parse_failed",
-                    "Failed to parse LLM decomposition tree, using original claim",
+                    "Failed to parse LLM decomposition, using original claim",
                     error=str(e), raw=raw)
-        tree = [{"text": claim_text}]
+        result = [{"text": claim_text}]
 
-    leaf_count = _count_leaves(tree)
-    log.info(activity.logger, "decompose", "done", "Claim decomposed into tree",
-             claim=claim_text, leaf_count=leaf_count,
-             top_level_nodes=len(tree))
-    return tree
-
-
-def _normalize_tree(nodes: list, claim_text: str) -> list[dict]:
-    """Normalize and validate the LLM's tree output.
-
-    Handles backwards compatibility with flat string arrays:
-      ["sub-claim 1", "sub-claim 2"]  →  [{"text": "sub-claim 1"}, {"text": "sub-claim 2"}]
-
-    Also validates structure — groups need label + children, leaves need text.
-    """
-    result = []
-    for node in nodes:
-        if isinstance(node, str):
-            # Backwards compat: flat string → leaf
-            if node.strip():
-                result.append({"text": node.strip()})
-        elif isinstance(node, dict):
-            if "label" in node and "children" in node:
-                # Group node — recurse into children
-                children = _normalize_tree(node["children"], claim_text)
-                if children:
-                    result.append({"label": node["label"], "children": children})
-                # Empty group → discard silently
-            elif "text" in node:
-                # Leaf node
-                text = node["text"].strip() if isinstance(node["text"], str) else ""
-                if text:
-                    result.append({"text": text})
-            else:
-                # Unknown structure — skip
-                pass
+    log.info(activity.logger, "decompose", "done", "Claim decomposed",
+             claim=claim_text, sub_count=len(result))
     return result
 
 
-def _count_leaves(nodes: list[dict]) -> int:
-    """Count leaf nodes in the tree."""
-    count = 0
-    for node in nodes:
-        if "children" in node:
-            count += _count_leaves(node["children"])
-        else:
-            count += 1
-    return count
+def _normalize_flat(items: list) -> list[dict]:
+    """Normalize LLM decompose output to a flat list of {"text": "..."} dicts.
+
+    Handles:
+    - Bare strings: "sub-claim" → {"text": "sub-claim"}
+    - Dicts with text: {"text": "sub-claim"} → kept as-is
+    - Groups (legacy): {"label": "...", "children": [...]} → flattened to children
+    """
+    result = []
+    for item in items:
+        if isinstance(item, str):
+            text = item.strip()
+            if text:
+                result.append({"text": text})
+        elif isinstance(item, dict):
+            if "text" in item:
+                text = item["text"].strip() if isinstance(item["text"], str) else ""
+                if text:
+                    result.append({"text": text})
+            elif "label" in item and "children" in item:
+                # Legacy group output — flatten children
+                result.extend(_normalize_flat(item["children"]))
+    return result
 
 
 @activity.defn
@@ -308,28 +278,28 @@ async def judge_subclaim(claim_text: str, sub_claim: str, evidence: list[dict]) 
 
 
 @activity.defn
-async def synthesize_verdict(claim_text: str, sub_results: list[dict]) -> dict:
-    """Combine sub-claim verdicts into an overall claim verdict.
+async def synthesize_verdict(
+    claim_text: str,
+    node_text: str,
+    child_results: list[dict],
+    is_final: bool = True,
+) -> dict:
+    """Combine child verdicts into a single verdict for a tree node.
 
-    This is the final reasoning step. The LLM looks at all the sub-claim
-    verdicts and produces an overall assessment:
-      - "true" if all sub-claims are well-supported
-      - "mostly_true" if most are supported with minor issues
-      - "mixed" if roughly half true, half false
-      - "mostly_false" if most are contradicted
-      - "false" if all sub-claims are clearly wrong
-      - "unverifiable" if evidence is insufficient
+    Unified synthesis — works for both intermediate (one aspect of the claim)
+    and final (overall verdict). The prompt adapts via context parameters:
+      - Final: "This is the FINAL OVERALL verdict for the original claim."
+      - Intermediate: "This is an INTERMEDIATE verdict for one aspect..."
 
-    The LLM also explains HOW it arrived at the overall verdict by
-    referencing the sub-claim verdicts. This reasoning chain is stored
-    and can be displayed to users.
+    Both use the full 6-level verdict scale.
     """
-    log.info(activity.logger, "synthesize", "start", "Synthesizing overall verdict",
-             claim=claim_text, num_sub_results=len(sub_results))
+    log.info(activity.logger, "synthesize", "start", "Synthesizing verdict",
+             claim=claim_text, node=node_text, is_final=is_final,
+             num_children=len(child_results))
 
     # Format sub-verdicts for the LLM prompt
     sub_verdict_parts = []
-    for i, sub in enumerate(sub_results, 1):
+    for i, sub in enumerate(child_results, 1):
         part = (
             f"[{i}] Sub-claim: {sub['sub_claim']}\n"
             f"    Verdict: {sub['verdict']}\n"
@@ -341,11 +311,31 @@ async def synthesize_verdict(claim_text: str, sub_results: list[dict]) -> dict:
         sub_verdict_parts.append(part)
     sub_verdicts_text = "\n\n".join(sub_verdict_parts)
 
+    # Adapt prompt context based on whether this is final or intermediate
+    if is_final:
+        synthesis_context = (
+            "This is the FINAL OVERALL verdict for the original claim. "
+            "Your verdict is the definitive assessment."
+        )
+        synthesis_framing = f"Original claim: {claim_text}"
+    else:
+        synthesis_context = (
+            f'This is an INTERMEDIATE verdict for one aspect of a larger claim: '
+            f'"{node_text}". This verdict will be combined with other aspect '
+            f'verdicts in a later synthesis step.'
+        )
+        synthesis_framing = (
+            f"Aspect being synthesized: {node_text}\n"
+            f"Original claim (for context): {claim_text}"
+        )
+
     llm = get_llm()
     response = await llm.ainvoke([
-        SystemMessage(content=SYNTHESIZE_SYSTEM),
+        SystemMessage(content=SYNTHESIZE_SYSTEM.format(
+            synthesis_context=synthesis_context,
+        )),
         HumanMessage(content=SYNTHESIZE_USER.format(
-            claim_text=claim_text,
+            synthesis_framing=synthesis_framing,
             sub_verdicts_text=sub_verdicts_text,
         )),
     ])
@@ -362,7 +352,7 @@ async def synthesize_verdict(claim_text: str, sub_results: list[dict]) -> dict:
         reasoning = result.get("reasoning", "")
         nuance = result.get("nuance") or None
 
-        # Validate overall verdict
+        # Validate verdict — full 6-level scale at every level
         valid_verdicts = {
             "true", "mostly_true", "mixed", "mostly_false", "false", "unverifiable"
         }
@@ -383,134 +373,57 @@ async def synthesize_verdict(claim_text: str, sub_results: list[dict]) -> dict:
         reasoning = f"Failed to parse LLM synthesis: {raw}"
         nuance = None
 
-    log.info(activity.logger, "synthesize", "done", "Overall verdict synthesized",
-             claim=claim_text, verdict=verdict, confidence=confidence,
-             reasoning=reasoning if reasoning else None,
-             nuance=nuance if nuance else None)
+    log.info(activity.logger, "synthesize", "done", "Verdict synthesized",
+             node=node_text, is_final=is_final, verdict=verdict,
+             confidence=confidence)
 
     return {
-        "verdict": verdict,
-        "confidence": confidence,
-        "reasoning": reasoning,
-        "reasoning_chain": [sub.get("reasoning", "") for sub in sub_results],
-        "nuance": nuance,
-        "sub_results": sub_results,
-    }
-
-
-@activity.defn
-async def synthesize_group(claim_text: str, group_label: str, child_results: list[dict]) -> dict:
-    """Synthesize child verdicts into an intermediate group verdict.
-
-    This is like synthesize_verdict but for intermediate tree nodes.
-    A group like "Audit promises" might contain:
-      - "Trump promised audit" → true (0.9)
-      - "Musk/DOGE promised audit" → true (0.85)
-    And this activity produces: "Both promised" → true (0.85)
-
-    The group result looks like a leaf result but also carries child_results
-    so the final synthesis and storage can see the full tree.
-    """
-    log.info(activity.logger, "synthesize_group", "start",
-             "Synthesizing group verdict",
-             claim=claim_text, group_label=group_label,
-             num_children=len(child_results))
-
-    # Format child verdicts for the prompt
-    sub_verdict_parts = []
-    for i, sub in enumerate(child_results, 1):
-        part = (
-            f"[{i}] Sub-claim: {sub['sub_claim']}\n"
-            f"    Verdict: {sub['verdict']}\n"
-            f"    Confidence: {sub['confidence']}\n"
-            f"    Reasoning: {sub['reasoning']}"
-        )
-        if sub.get("nuance"):
-            part += f"\n    Nuance: {sub['nuance']}"
-        sub_verdict_parts.append(part)
-    sub_verdicts_text = "\n\n".join(sub_verdict_parts)
-
-    llm = get_llm()
-    response = await llm.ainvoke([
-        SystemMessage(content=GROUP_SYNTHESIZE_SYSTEM.format(group_label=group_label)),
-        HumanMessage(content=GROUP_SYNTHESIZE_USER.format(
-            group_label=group_label,
-            claim_text=claim_text,
-            sub_verdicts_text=sub_verdicts_text,
-        )),
-    ])
-
-    raw = response.content.strip()
-    log.debug(activity.logger, "synthesize_group", "llm_response",
-              "LLM response received", raw=raw)
-
-    try:
-        result = json.loads(raw)
-        verdict = result.get("verdict", "unverifiable")
-        confidence = float(result.get("confidence", 0.0))
-        reasoning = result.get("reasoning", "")
-        nuance = result.get("nuance") or None
-
-        valid_verdicts = {"true", "false", "partially_true", "unverifiable"}
-        if verdict not in valid_verdicts:
-            log.warning(activity.logger, "synthesize_group", "invalid_verdict",
-                        "Invalid group verdict, falling back to unverifiable",
-                        verdict=verdict)
-            verdict = "unverifiable"
-
-        confidence = max(0.0, min(1.0, confidence))
-
-    except (json.JSONDecodeError, ValueError, TypeError) as e:
-        log.warning(activity.logger, "synthesize_group", "parse_failed",
-                    "Failed to parse group synthesis",
-                    error=str(e), raw=raw)
-        verdict = "unverifiable"
-        confidence = 0.0
-        reasoning = f"Failed to parse group synthesis: {raw}"
-        nuance = None
-
-    log.info(activity.logger, "synthesize_group", "done",
-             "Group verdict synthesized",
-             group_label=group_label, verdict=verdict, confidence=confidence)
-
-    return {
-        "sub_claim": group_label,
+        "sub_claim": node_text,
         "verdict": verdict,
         "confidence": confidence,
         "reasoning": reasoning,
         "nuance": nuance,
         "evidence": [],
         "child_results": child_results,
+        "reasoning_chain": (
+            [sub.get("reasoning", "") for sub in child_results]
+            if is_final else None
+        ),
     }
 
 
 @activity.defn
-async def store_result(claim_id: str, verdict: dict, sub_results: list[dict], tree: list[dict] | None = None) -> None:
-    """Store verification result in the database.
+async def store_result(claim_id: str, result: dict) -> None:
+    """Store the full verification result tree in the database.
 
-    Handles both flat and tree-structured results. For tree structures,
-    group nodes get parent_id set on their children.
+    The result dict is the output of the recursive _process function in the
+    workflow. It's either:
+      - A leaf: {"sub_claim": "...", "verdict": "...", "evidence": [...]}
+      - A synthesis: {"sub_claim": "...", "verdict": "...", "child_results": [...]}
+
+    The tree is stored recursively — synthesis nodes get is_leaf=False,
+    leaf nodes get is_leaf=True, and parent_id links children to parents.
     """
     log.info(activity.logger, "store", "start", "Storing verification result",
-             claim_id=claim_id, verdict=verdict.get("verdict"))
+             claim_id=claim_id, verdict=result.get("verdict"))
 
     async with async_session() as session:
         async with session.begin():
             # Fetch the claim
             claim_uuid = uuid.UUID(claim_id)
-            result = await session.execute(
+            db_result = await session.execute(
                 select(Claim).where(Claim.id == claim_uuid)
             )
-            claim = result.scalar_one_or_none()
+            claim = db_result.scalar_one_or_none()
             if not claim:
                 log.error(activity.logger, "store", "claim_not_found",
                           "Claim not found in database",
                           error="claim_not_found", claim_id=claim_id)
                 return
 
-            # Write sub-claims + evidence recursively
+            # Recursive storage of the result tree
             async def _store_node(sub: dict, parent_id=None):
-                """Store a sub-result node (leaf or group) with its evidence and children."""
+                """Store a sub-result node (leaf or synthesis) with evidence and children."""
                 has_children = "child_results" in sub and sub["child_results"]
                 sub_claim = SubClaim(
                     claim_id=claim_uuid,
@@ -525,7 +438,7 @@ async def store_result(claim_id: str, verdict: dict, sub_results: list[dict], tr
                 session.add(sub_claim)
                 await session.flush()  # get sub_claim.id
 
-                # Store evidence (leaves have evidence, groups don't)
+                # Store evidence (leaves have evidence, synthesis nodes don't)
                 for ev in sub.get("evidence", []):
                     source_type = ev.get("source_type", "web")
                     if source_type not in ("web", "wikipedia", "news_api"):
@@ -539,22 +452,29 @@ async def store_result(claim_id: str, verdict: dict, sub_results: list[dict], tr
                     )
                     session.add(evidence)
 
-                # Recurse into children for group nodes
+                # Recurse into children for synthesis nodes
                 if has_children:
                     for child in sub["child_results"]:
                         await _store_node(child, parent_id=sub_claim.id)
 
-            for sub in sub_results:
-                await _store_node(sub)
+            # Store sub-claims recursively
+            child_results = result.get("child_results")
+            if child_results:
+                # Complex claim — top-level children are the first level of sub-claims
+                for sub in child_results:
+                    await _store_node(sub)
+            else:
+                # Simple atomic claim — result itself is the only sub-claim
+                await _store_node(result)
 
             # Write verdict
             verdict_row = Verdict(
                 claim_id=claim_uuid,
-                verdict=verdict.get("verdict", "unverifiable"),
-                confidence=verdict.get("confidence", 0.0),
-                reasoning=verdict.get("reasoning"),
-                reasoning_chain=verdict.get("reasoning_chain"),
-                nuance=verdict.get("nuance"),
+                verdict=result.get("verdict", "unverifiable"),
+                confidence=result.get("confidence", 0.0),
+                reasoning=result.get("reasoning"),
+                reasoning_chain=result.get("reasoning_chain"),
+                nuance=result.get("nuance"),
             )
             session.add(verdict_row)
 
@@ -563,5 +483,4 @@ async def store_result(claim_id: str, verdict: dict, sub_results: list[dict], tr
             claim.updated_at = datetime.now(timezone.utc)
 
         log.info(activity.logger, "store", "done", "Result stored in database",
-                 claim_id=claim_id, verdict=verdict.get("verdict"),
-                 sub_claims=len(sub_results))
+                 claim_id=claim_id, verdict=result.get("verdict"))

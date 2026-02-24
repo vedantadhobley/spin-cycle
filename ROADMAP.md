@@ -4,20 +4,23 @@ Where spin-cycle is, where it needs to go, and what each improvement actually do
 
 ---
 
-## What We Have (v0.2)
+## What We Have (v0.3)
 
-A working end-to-end claim verification pipeline with tree decomposition:
+A working end-to-end claim verification pipeline with **recursive decomposition**:
 - Manual claim submission via API
-- LLM decomposes claims into **hierarchical trees** (groups + leaves)
-- Leaves researched + judged **in parallel** via `asyncio.gather`
-- Groups get intermediate synthesis before final verdict
+- LLM decomposes claims **recursively** — one level at a time, tree structure emerges from claim complexity
+- Atomic sub-claims researched + judged **in parallel** via `asyncio.gather`
+- Compound nodes synthesized bottom-up at every tree level
+- **Unified 6-level verdict scale** at all tree levels: `true | mostly_true | mixed | mostly_false | false | unverifiable`
+- **Single synthesis activity** handles both intermediate and final synthesis (adapts via `is_final` parameter)
 - LangGraph research agent gathers evidence with dynamically loaded tools
 - **Source quality filtering** — domain blocklist (~40 domains) silently drops Reddit, Quora, social media, content farms from all search results
 - Thinking model evaluates evidence and renders verdicts
 - **Importance-weighted synthesis** — verdicts weighed by significance, not count
-- Results stored in Postgres with full tree structure (parent_id, is_leaf) and reasoning chains
+- Results stored in Postgres with full recursive tree structure (parent_id, is_leaf) and reasoning chains
 - Top-level synthesis reasoning exposed in API responses
-- Temporal orchestrates everything with retries and durability (7 activities, 1 workflow)
+- Temporal orchestrates everything with retries and durability (6 activities, 1 workflow)
+- **MAX_DEPTH = 3** safety limit prevents unbounded recursion
 - Production-grade structured logging (JSON for Loki, pretty for dev)
 - LLM max_tokens configured to prevent truncated output (2048 instruct, 4096 reasoning)
 
@@ -99,6 +102,96 @@ Tag each evidence item with its tier. Pass the tier to the judge so it can weigh
 | Policy/legislation | Government websites, legislative records |
 
 **Effort:** Medium. New activity `classify_claim` before research, adds ~5s per claim.
+
+---
+
+## Phase 1.5: Verification Methodology
+
+Improvements to the core recursive decomposition and synthesis pipeline. These refine how claims are broken down, researched, and reassembled into verdicts.
+
+### 1.5.1 — Confidence-Weighted Synthesis
+
+**Why:** Right now synthesis sees child verdicts and their confidence scores, but treats them somewhat equally. The LLM prompt mentions importance weighting, but the model has to intuit how much a child's low confidence should affect the parent verdict. A sub-claim with 0.6 confidence should count less than one with 0.95.
+
+**What:**
+- Pass explicit confidence scores and their interpretation to the synthesis prompt
+- Add structured guidance: "A child verdict with confidence < 0.7 is uncertain — its contribution to the overall assessment should be discounted"
+- Consider a pre-synthesis step that computes a weighted score as a hint (LLM still makes the final call)
+- Track confidence propagation through the tree — does the final confidence reflect the weakest link?
+
+**Effort:** Small. Mostly prompt engineering. The data is already available in `child_results`.
+
+### 1.5.2 — Adaptive Research Depth
+
+**Why:** Every leaf sub-claim currently gets the same research treatment — one ReAct agent, same timeout (240s agent, 360s total), same tool set. A sub-claim like "The US has a president" doesn't need 4 minutes of web search. Meanwhile, a nuanced economic claim might benefit from deeper research.
+
+**What:**
+- Have the decompose step tag each sub-claim with a complexity/controversiality estimate (e.g., `"complexity": "low"` / `"medium"` / `"high"`)
+- Low complexity: short agent timeout, fewer search tools, quick verification
+- High complexity: full agent timeout, all tools, potentially multiple research rounds
+- This reduces total pipeline time for claims with simple sub-parts while allocating more effort where needed
+
+**Effort:** Medium. Requires decompose prompt update, activity parameter changes, and timeout logic in the workflow.
+
+### 1.5.3 — Sibling Contradiction Detection
+
+**Why:** When children of the same parent produce conflicting evidence, the synthesis prompt doesn't explicitly see the raw evidence — only the verdicts and reasoning. If one child found "GDP is increasing" and another found "GDP is shrinking," the synthesizer should be able to reason about the contradiction directly.
+
+**What:**
+- After all children are processed, run a lightweight "cross-reference" step that checks for contradictions between sibling findings
+- Pass contradiction flags and relevant evidence excerpts to synthesis
+- The synthesizer can then reason about inter-claim tensions rather than just aggregating independent verdicts
+- Could also detect when two siblings cite the same source with different interpretations
+
+**Effort:** Medium. New activity or prompt augmentation, plus evidence comparison logic.
+
+### 1.5.4 — Sub-Claim Deduplication & Caching
+
+**Why:** If two different compound nodes decompose into overlapping sub-claims (e.g., "US military spending is increasing" appears as a sub-part of multiple parent claims), the system currently researches them independently. Within a single verification run, this wastes time. Across runs over time, it's even more wasteful.
+
+**What:**
+- **Within-run dedup**: Before researching a leaf, check if an identical (or semantically similar) leaf has already been processed in this workflow run. If so, reuse its result.
+- **Cross-run caching**: Cache research results by sub-claim text with a TTL (evidence goes stale). Use embeddings (joi:3103) to find semantically similar sub-claims that have already been verified.
+- Start simple (exact text match within a run) and evolve to semantic similarity with TTL.
+
+**Effort:** Medium-Large. Within-run dedup is straightforward (dict lookup in workflow). Cross-run caching needs a caching layer and embedding similarity search.
+
+### 1.5.5 — Dynamic Depth Budget
+
+**Why:** The current `MAX_DEPTH = 3` is a static safety limit. A simple factual claim ("Bitcoin was created in 2009") doesn't need depth 3. A complex policy claim comparing multiple countries across multiple dimensions might benefit from going deeper. A fixed limit either wastes decomposition calls on simple claims or constrains complex ones.
+
+**What:**
+- After the initial decomposition (depth 0), estimate the overall complexity of the claim based on the number and nature of sub-parts
+- Set a per-claim `depth_budget` based on this estimate (1-4)
+- Simple claims (1-2 straightforward sub-parts): budget=1, skip further decomposition
+- Complex claims (4+ sub-parts with nested logic): budget=3 or 4
+- This makes the recursion even more adaptive — not just in tree shape but in depth
+
+**Effort:** Small-Medium. One additional LLM call or heuristic after the first decomposition.
+
+### 1.5.6 — Evidence Quality Signals for Judges
+
+**Why:** The judge currently receives raw evidence text and has to infer source reliability from URLs embedded in the content. Making source quality explicit would help the judge weigh evidence more accurately — especially when evidence from different sources conflicts.
+
+**What:**
+- Tag each evidence item with metadata before passing to the judge: `source_domain`, `credibility_tier` (from 1.3), `freshness` (how recent)
+- Format evidence in the judge prompt with explicit quality signals: "[Tier 1 — Reuters, 2026-02-24] ..."
+- The judge can then explicitly reason about source quality in its verdict
+- Pairs well with 1.3 (Source Credibility Scoring) — the tiers become actionable in the judge prompt
+
+**Effort:** Small (once 1.3 is done). Mostly prompt formatting changes.
+
+### 1.5.7 — Decomposition Quality Feedback Loop
+
+**Why:** Sometimes the decompose step produces sub-claims that are too vague, overlapping, or not independently verifiable. The current approach falls back gracefully (single sub-claim), but doesn't improve over time.
+
+**What:**
+- After research + judge, check if any sub-claims were `unverifiable` due to vagueness (not due to lack of evidence)
+- If so, flag the decomposition as suboptimal — store this signal for analysis
+- Eventually: re-decompose problematic sub-claims with more specific instructions
+- Long-term: use accumulated signals to improve the decompose prompt (few-shot examples of good vs bad decompositions)
+
+**Effort:** Medium. Requires tracking decomposition quality metrics and potentially a re-decompose retry path.
 
 ---
 
@@ -219,18 +312,19 @@ For this to be legitimate, people need to trust the verdicts. Trust comes from t
 
 **Effort:** Medium. Need a caching layer (Redis or just Postgres with TTL) and embedding similarity search.
 
-### 4.2 — Parallel Sub-Claim Processing (DONE)
+### 4.2 — Parallel Recursive Processing (DONE)
 
 **Status:** ✅ Implemented
 
-Sub-claims are now processed in parallel using `asyncio.gather` within the Temporal workflow. The tree decomposition enables natural parallelism:
+Sub-claims are processed in parallel at every level of the recursive tree using `asyncio.gather`:
 
-- All leaf nodes within a group are researched + judged concurrently
-- All top-level nodes are processed in parallel
-- Group synthesis waits for children to complete, then runs
-- Temporal handles the per-activity retries and timeouts (research: 360s, judge: 120s, synthesis: 60s)
-
-Additionally, tree decomposition groups related sub-claims, enabling intermediate synthesis that produces more nuanced verdicts than flat list processing.
+- The workflow recursively decomposes claims via `_process(node_text, depth)` — tree shape emerges from claim complexity
+- At each level, sibling sub-parts are processed concurrently
+- Atomic parts (decompose returns 1 item) go straight to research + judge
+- Compound parts (decompose returns 2+ items) recurse deeper, then synthesize
+- A single `synthesize_verdict` activity handles both intermediate (depth > 0) and final (depth = 0) synthesis
+- Temporal handles per-activity retries and timeouts (research: 360s, judge: 120s, synthesis: 60s)
+- MAX_DEPTH = 3 prevents unbounded recursion
 
 ### 4.3 — LangFuse Observability
 
@@ -320,17 +414,23 @@ What to build next, in order of impact:
 | Priority | Item | Why |
 |----------|------|-----|
 | **1** | Alembic migrations | Unblocks all future schema changes |
-| **2** | Source credibility scoring | Tiered weighting (basic filtering already done) |
-| **3** | Calibration test suite | Can't improve without measuring |
-| **4** | RSS feed monitoring | First step toward automated intake |
-| **5** | Claim extraction from articles | Enables fully automated pipeline |
-| **6** | Evidence caching | Reduces redundant work at scale |
-| **7** | LangFuse observability | Visibility into LLM performance |
-| **8** | Speaker profiles | Product differentiation |
-| **9** | Article highlighting UI | Core product experience |
-| **10** | Human review loop | Trust + quality assurance |
-| **11** | Public API | Distribution |
-| **12** | Speech transcripts | Expand beyond articles |
+| **2** | Confidence-weighted synthesis (1.5.1) | Low effort, immediately improves verdict quality |
+| **3** | Source credibility scoring (1.3) | Tiered weighting (basic filtering already done) |
+| **4** | Adaptive research depth (1.5.2) | Cuts pipeline time in half for simple claims |
+| **5** | Calibration test suite (3.1) | Can't improve without measuring |
+| **6** | Evidence quality signals for judges (1.5.6) | Makes source tiers actionable in verdicts |
+| **7** | RSS feed monitoring (2.1) | First step toward automated intake |
+| **8** | Claim extraction from articles (2.2) | Enables fully automated pipeline |
+| **9** | Sub-claim dedup & caching (1.5.4) | Reduces redundant work at scale |
+| **10** | Sibling contradiction detection (1.5.3) | Catches inter-claim tensions synthesis misses |
+| **11** | LangFuse observability (4.3) | Visibility into LLM performance |
+| **12** | Dynamic depth budget (1.5.5) | Further optimises recursion depth per claim |
+| **13** | Decomposition quality feedback (1.5.7) | Long-term prompt improvement signal |
+| **14** | Speaker profiles (5.3) | Product differentiation |
+| **15** | Article highlighting UI (5.1) | Core product experience |
+| **16** | Human review loop (3.4) | Trust + quality assurance |
+| **17** | Public API (5.2) | Distribution |
+| **18** | Speech transcripts (2.3) | Expand beyond articles |
 
 ---
 

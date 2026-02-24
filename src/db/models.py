@@ -38,9 +38,11 @@ class SubClaim(Base):
     claim_id = Column(UUID(as_uuid=True), ForeignKey("claims.id"), nullable=False)
     parent_id = Column(UUID(as_uuid=True), ForeignKey("sub_claims.id"), nullable=True)
     is_leaf = Column(Boolean, default=True, nullable=False)
-    text = Column(Text, nullable=False)  # leaf: verifiable assertion, group: label
+    text = Column(Text, nullable=False)  # leaf: verifiable assertion, group: decomposed text
     verdict = Column(
-        Enum("true", "false", "partially_true", "unverifiable", name="sub_claim_verdict"),
+        Enum("true", "false", "partially_true", "unverifiable",
+             "mostly_true", "mixed", "mostly_false",
+             name="sub_claim_verdict"),
         nullable=True,
     )
     confidence = Column(Float, nullable=True)

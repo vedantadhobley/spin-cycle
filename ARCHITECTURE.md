@@ -101,7 +101,7 @@ Temporal handles the **macro orchestration** (decompose → research → judge �
 
 **Where it's used:**
 - `src/workflows/verify.py` — `VerifyClaimWorkflow` definition
-- `src/activities/verify_activities.py` — all 7 Temporal activities (including create_claim and synthesize_group)
+- `src/activities/verify_activities.py` — all 6 Temporal activities
 - `src/worker.py` — worker entrypoint that registers workflows + activities
 - `docker-compose.dev.yml` — Temporal server + Temporal UI containers
 
@@ -109,32 +109,28 @@ Temporal handles the **macro orchestration** (decompose → research → judge �
 
 ## The Verification Pipeline (what's working now)
 
-A claim enters the system (via API or extraction) and is processed as a **tree of sub-claims**, orchestrated by Temporal with 7 activities:
+A claim enters the system (via API or extraction) and is processed as a **recursively decomposed tree of sub-claims**, orchestrated by Temporal with 6 activities:
 
-### Step 1: decompose_claim (tree decomposition)
+### Step 1: decompose_claim (single-level decomposition)
 
 **File:** `src/activities/verify_activities.py`
 **Prompt:** `src/prompts/verification.py` → `DECOMPOSE_SYSTEM` / `DECOMPOSE_USER`
 
-The LLM breaks a complex claim into a **hierarchical tree** of sub-claims. Groups contain related sub-claims; leaves are atomic, independently verifiable assertions.
+The LLM breaks a text into its **immediate sub-parts** — one level at a time. This is called recursively by the workflow, so the tree structure emerges naturally from the claim's complexity rather than being planned upfront.
 
 ```
 Input:  "The US and China are both increasing military spending while cutting foreign aid"
 Output: [
-  { "label": "US Policy", "children": [
-      { "text": "The US is increasing military spending" },
-      { "text": "The US is cutting foreign aid" }
-  ]},
-  { "label": "China Policy", "children": [
-      { "text": "China is increasing military spending" },
-      { "text": "China is cutting foreign aid" }
-  ]}
+  { "text": "The US is increasing military spending" },
+  { "text": "The US is cutting foreign aid" },
+  { "text": "China is increasing military spending" },
+  { "text": "China is cutting foreign aid" }
 ]
 ```
 
-Why a tree instead of a flat list? Because claims often have **natural groupings** — comparing two countries, before/after, cause/effect. Tree decomposition lets the system synthesize intermediate verdicts per group before combining them, which produces more nuanced overall verdicts. A flat list of 6 sub-claims averaging to "mixed" misses that one country's claims are all true while the other's are all false.
+The key design insight: **decomposition is lazy and recursive.** Instead of asking the LLM to architect an entire tree in one shot (which requires planning ahead and often produces suboptimal structures), each call handles only one level. The workflow calls decompose again on each sub-part — if it returns 1 item, the part is atomic (research it). If it returns 2+ items, the part is compound (recurse deeper). The tree shape adapts to the claim's actual complexity.
 
-The tree is normalized after decomposition: bare strings become `{"text": "..."}` leaf nodes, single-child groups are preserved (not flattened), and the structure is validated.
+The output is normalized via `_normalize_flat()`: bare strings become `{"text": "..."}` dicts, and legacy group structures are flattened into their leaves.
 
 The prompt uses `/no_think` to disable Qwen3's chain-of-thought — we want clean JSON, not reasoning. If JSON parsing fails, we fall back to the original claim as a single sub-claim.
 
@@ -191,79 +187,81 @@ Sub-claim verdicts: `true` | `false` | `partially_true` | `unverifiable`
 
 If there's no evidence, we short-circuit to "unverifiable" without calling the LLM.
 
-### Step 3.5: synthesize_group (intermediate synthesis)
-
-**File:** `src/activities/verify_activities.py`
-**Prompt:** `src/prompts/verification.py` → `GROUP_SYNTHESIZE_SYSTEM` / `GROUP_SYNTHESIZE_USER`
-
-For **group nodes** in the tree, after all children are processed, the LLM synthesizes an intermediate verdict for the group. This happens recursively — nested groups are synthesized bottom-up.
-
-```
-Input:  claim = "The US and China are both increasing military..."
-        label = "US Policy"
-        child_results = [{"text": "US increasing military spending", "verdict": "true"},
-                         {"text": "US cutting foreign aid", "verdict": "true"}]
-Output: {"verdict": "true", "confidence": 0.92,
-         "reasoning": "Both US-related sub-claims are well-supported..."}
-```
-
-The prompt instructs the LLM to **weigh by importance, not by count** — if one sub-claim is the core assertion and another is incidental, the core claim should dominate the group verdict.
-
-### Step 4: synthesize_verdict (final synthesis)
+### Step 4: synthesize_verdict (unified synthesis)
 
 **File:** `src/activities/verify_activities.py`
 **Prompt:** `src/prompts/verification.py` → `SYNTHESIZE_SYSTEM` / `SYNTHESIZE_USER`
 
-The LLM combines top-level results (which may be leaf verdicts or group syntheses) into an overall verdict. Also weighted by importance.
+A single, unified synthesis activity used at **every level** of the tree. After a compound node's children are all processed, this activity combines their results into a verdict for that node. The same activity handles both intermediate synthesis (depth > 0) and final synthesis (depth = 0) — the prompt adapts via an `is_final` parameter that controls framing and context.
 
 ```
-Input:  claim = "The US and China are both increasing military..."
-        top_results = [{"verdict": "true", "text": "US Policy: ..."}, 
-                       {"verdict": "mostly_false", "text": "China Policy: ..."}]
-Output: {"verdict": "mostly_false", "confidence": 0.88,
-         "reasoning": "While the US claims are supported, the China claims..."
+Input:  claim_text = "The US and China are both increasing military..."
+        node_text = "The US and China are both increasing military..."  (same at depth 0)
+        child_results = [
+            {"sub_claim": "US increasing military spending", "verdict": "true", ...},
+            {"sub_claim": "US cutting foreign aid", "verdict": "true", ...},
+            {"sub_claim": "China increasing military spending", "verdict": "true", ...},
+            {"sub_claim": "China cutting foreign aid", "verdict": "false", ...}
+        ]
+        is_final = True
+Output: {"verdict": "mostly_false", "confidence": 0.95,
+         "reasoning": "While the US claims are supported, China is NOT cutting foreign aid...",
+         "child_results": [...], "reasoning_chain": [...]}
 ```
 
-The `reasoning` field is stored in the verdicts table and exposed via the API, giving visibility into the top-level synthesis logic.
+The prompt instructs the LLM to **weigh by importance, not by count** — if one sub-claim is the core assertion and another is incidental, the core claim should dominate the verdict. When `is_final=True`, the prompt adds framing for a definitive public-facing verdict with a reasoning chain.
 
 Why use LLM instead of averaging? Because "X happened in 2019 and cost $50M" where the event DID happen but in 2020 and cost $48M is "mostly true" — the core claim is right, details are slightly off. An LLM makes this nuance call better than math.
 
-Overall verdicts: `true` | `mostly_true` | `mixed` | `mostly_false` | `false` | `unverifiable`
+The **unified 6-level verdict scale** is used at all tree levels:
+`true` | `mostly_true` | `mixed` | `mostly_false` | `false` | `unverifiable`
+
+Previously, intermediate groups used a coarser 4-level scale that lost expressiveness. Now a group can be `mostly_true` instead of being forced into `true` or `partially_true`.
 
 ### Step 5: store_result (structure-aware)
 
 **File:** `src/activities/verify_activities.py`
 
-Writes the full tree structure to Postgres:
-- One `SubClaim` row per node in the tree (both groups and leaves)
-  - Group nodes: `is_leaf=False`, text is the group label
+Takes the full recursive result dict and writes it to Postgres:
+- One `SubClaim` row per node in the tree (both compound nodes and leaves)
+  - Compound nodes: `is_leaf=False`, text is the node/group text
   - Leaf nodes: `is_leaf=True`, text is the verifiable assertion
-  - `parent_id` links children to their parent group (self-referential FK)
+  - `parent_id` links children to their parent node (self-referential FK)
 - One `Evidence` row per evidence item (source_type, content, URL) — linked to leaf sub-claims
 - One `Verdict` row (overall verdict, confidence, reasoning, reasoning_chain as JSONB)
 - Updates `Claim.status` to "verified"
 
-The tree is stored recursively via `_store_node()` — groups are stored first, then children with `parent_id` set. This preserves the hierarchical structure for API responses.
+The result tree is stored recursively via `_store_node()` — parent nodes are stored first, then children with `parent_id` set. For atomic results (single leaf, no `child_results`), the leaf is stored directly.
 
 Evidence records with `source_type` not in the DB enum (`web`, `wikipedia`, `news_api`) are filtered out — the agent_summary doesn't get stored.
 
-### Workflow Orchestration (tree processing)
+### Workflow Orchestration (recursive processing)
 
-The workflow processes the tree recursively using `asyncio.gather` for parallelism:
+The workflow processes claims recursively using a `_process()` function that calls decompose at each level. The tree emerges from recursion — it's not planned upfront.
 
 ```
 VerifyClaimWorkflow
 ├── create_claim (if needed)
-├── decompose_claim → returns tree of groups + leaves
-├── _process_node (recursive, parallel)
-│   ├── LEAF: research_subclaim (360s timeout) → judge_subclaim (120s timeout)
-│   └── GROUP: gather(*[_process_node(child) for child in children])
-│              → synthesize_group (60s timeout)
-├── synthesize_verdict (60s timeout) ← top-level results
-└── store_result (30s timeout) ← tree + verdict
+├── _process(claim_text, depth=0)   ← recursive entry point
+│   ├── decompose_claim (60s timeout) → sub-parts for this level
+│   │
+│   ├── IF ≤1 item (atomic): → leaf path
+│   │   ├── research_subclaim (360s timeout)
+│   │   └── judge_subclaim (120s timeout)
+│   │
+│   └── IF 2+ items (compound): → branch path
+│       ├── asyncio.gather(*[_process(child, depth+1) for child in sub_parts])
+│       └── synthesize_verdict (60s timeout, is_final=(depth==0))
+│
+└── store_result (30s timeout) ← full result tree
 ```
 
-All leaf nodes within a group are processed in parallel. All top-level nodes are also processed in parallel. Groups wait for their children to complete, then synthesize.
+Key properties:
+- **MAX_DEPTH = 3** — safety limit. At max depth, items are forced to be leaves regardless of complexity.
+- **Depth-adaptive** — simple claims stay flat (depth 0 → atomic). Complex claims go to depth 2 or 3 naturally.
+- **Parallel at every level** — siblings are always processed concurrently via `asyncio.gather`.
+- **Single synthesis activity** — `synthesize_verdict` handles both intermediate (depth > 0) and final (depth = 0) synthesis, adapting its prompt via `is_final`.
+- **Temporal retries per activity** — if one research call fails, only that activity retries (max 3 attempts).
 
 ---
 
@@ -400,8 +398,8 @@ Key decisions:
 └────────┬────────┘       │ reasoning (text) │       └────────────────────┘
          │                   └──────────────────┘
          │       ┌──────────────────┐      parent_id is self-referential:
-         │       │    verdicts      │      groups link to their parent group,
-         │       │──────────────────│      leaves link to their parent group,
+         │       │    verdicts      │      compound nodes link to their parent,
+         │       │──────────────────│      leaves link to their parent node,
          └──────▶│ id (uuid) PK     │      top-level nodes have parent_id = NULL
                  │ claim_id (FK) UQ  │
                  │ verdict (enum)    │
@@ -435,23 +433,23 @@ The top-level entity. One row per claim submitted (manually or via extraction).
 
 ### Table: `sub_claims`
 
-Atomic sub-claims and group nodes decomposed from the parent claim by the LLM. Forms a tree structure via self-referential `parent_id`.
+Atomic sub-claims and compound nodes decomposed from the parent claim by the LLM. Forms a tree structure via self-referential `parent_id`.
 
 | Column | Type | Constraints | Description |
 |--------|------|-------------|-------------|
 | `id` | `UUID` | PK, default uuid4 | Unique identifier |
 | `claim_id` | `UUID` | FK → claims.id, NOT NULL | Parent claim |
-| `parent_id` | `UUID` | FK → sub_claims.id, nullable | Parent group node (NULL for top-level nodes) |
-| `is_leaf` | `BOOLEAN` | NOT NULL, default true | Leaf (researched+judged) vs group (synthesized from children) |
-| `text` | `TEXT` | NOT NULL | Leaf: verifiable assertion. Group: descriptive label |
-| `verdict` | `ENUM('true','false','partially_true','unverifiable')` | nullable | LLM's verdict on this sub-claim |
+| `parent_id` | `UUID` | FK → sub_claims.id, nullable | Parent compound node (NULL for top-level nodes) |
+| `is_leaf` | `BOOLEAN` | NOT NULL, default true | Leaf (researched+judged) vs compound (synthesized from children) |
+| `text` | `TEXT` | NOT NULL | Leaf: verifiable assertion. Compound: decomposed text |
+| `verdict` | `ENUM(...)` | nullable | LLM's verdict on this sub-claim (7-level scale) |
 | `confidence` | `FLOAT` | nullable | 0.0 to 1.0 confidence score |
 | `reasoning` | `TEXT` | nullable | LLM's explanation of the verdict |
 
 **Relationships:**
 - Belongs to one `claim`
 - Has many `evidence` (cascade delete)
-- Self-referential: has optional `parent` (group node) and many `children`
+- Self-referential: has optional `parent` (compound node) and many `children`
 
 ### Table: `evidence`
 
@@ -492,7 +490,7 @@ The overall verdict for a claim, produced by the synthesize step.
 | Enum Name | Values | Used By |
 |-----------|--------|---------|
 | `claim_status` | pending, processing, verified, flagged | claims.status |
-| `sub_claim_verdict` | true, false, partially_true, unverifiable | sub_claims.verdict |
+| `sub_claim_verdict` | true, false, partially_true, unverifiable, mostly_true, mixed, mostly_false | sub_claims.verdict |
 | `evidence_source_type` | web, wikipedia, news_api | evidence.source_type |
 | `verdict_type` | true, mostly_true, mixed, mostly_false, false, unverifiable | verdicts.verdict |
 
@@ -562,12 +560,11 @@ All prompts live in `src/prompts/verification.py` with extensive inline document
 - Example inputs and outputs
 - Design constraints (e.g., "Do NOT use your own knowledge")
 
-Four prompt pairs (system + user), plus group synthesis:
-1. `DECOMPOSE_SYSTEM` / `DECOMPOSE_USER` — break claims into a tree of sub-claims (groups + leaves)
+Four prompt pairs (system + user):
+1. `DECOMPOSE_SYSTEM` / `DECOMPOSE_USER` — break text into immediate sub-parts (single level, called recursively)
 2. `RESEARCH_SYSTEM` / `RESEARCH_USER` — guide the research agent (includes source quality rules)
 3. `JUDGE_SYSTEM` / `JUDGE_USER` — evaluate evidence for a sub-claim
-4. `SYNTHESIZE_SYSTEM` / `SYNTHESIZE_USER` — combine sub-verdicts (importance-weighted)
-5. `GROUP_SYNTHESIZE_SYSTEM` / `GROUP_SYNTHESIZE_USER` — synthesize intermediate group verdicts
+4. `SYNTHESIZE_SYSTEM` / `SYNTHESIZE_USER` — combine child verdicts (importance-weighted, adapts via `is_final` parameter)
 
 ---
 
@@ -803,16 +800,15 @@ Config: `~/workspace/monitor/promtail/promtail.yml`
 | Docker infrastructure | **Done** | 7 containers, health checks, volume persistence |
 | PostgreSQL schema | **Done** | 4 tables: claims, sub_claims (with tree structure), evidence, verdicts |
 | FastAPI API | **Done** | POST/GET claims, health check, lifespan management |
-| Temporal workflow | **Done** | VerifyClaimWorkflow with 7 activities (including create_claim + synthesize_group), retry policies |
-| Temporal worker | **Done** | Registers workflow + activities, structured logging configured |
-| `decompose_claim` | **Done** | LLM decomposes claims into **tree structure** (groups + leaves) |
+| Temporal workflow | **Done** | VerifyClaimWorkflow with 6 activities, recursive _process pattern, MAX_DEPTH=3, retry policies |
+| Temporal worker | **Done** | Registers workflow + 6 activities, structured logging configured |
+| `decompose_claim` | **Done** | LLM decomposes text into immediate sub-parts (single level, called recursively by workflow) |
 | `research_subclaim` | **Done** | LangGraph ReAct agent with SearXNG + DuckDuckGo + Serper + Brave + Wikipedia + page_fetcher |
 | `judge_subclaim` | **Done** | LLM evaluates evidence, returns structured verdict |
-| `synthesize_group` | **Done** | LLM synthesizes intermediate group verdicts (importance-weighted) |
-| `synthesize_verdict` | **Done** | LLM combines top-level results into overall verdict (importance-weighted) |
-| `store_result` | **Done** | Writes full tree structure to Postgres (parent_id, is_leaf) |
+| `synthesize_verdict` | **Done** | Unified synthesis — handles both intermediate and final levels via `is_final` parameter (importance-weighted) |
+| `store_result` | **Done** | Writes full recursive result tree to Postgres (parent_id, is_leaf) |
 | Source quality filtering | **Done** | Domain blocklist (~40 domains) filters all search results + page fetches |
-| Prompts | **Done** | 5 prompt pairs documented in `src/prompts/verification.py` |
+| Prompts | **Done** | 4 prompt pairs documented in `src/prompts/verification.py` |
 | LLM connectivity | **Done** | Dual-model: instruct (:3101, max_tokens=2048) + thinking (:3102, max_tokens=4096) on joi |
 | Logging | **Done** | Structured JSON logging via `src/utils/logging.py`, Promtail → Loki → Grafana |
 | Tests | **Done** | Graph compilation, health endpoint, schema validation |
@@ -877,18 +873,19 @@ docker logs -f spin-cycle-dev-worker
 
 # With LOG_FORMAT=pretty (default in dev), output looks like:
 # I [WORKER    ] starting: Connecting to Temporal | temporal_host=spin-cycle-dev-temporal:7233 task_queue=spin-cycle-verify
-# I [WORKER    ] ready: Worker listening | task_queue=spin-cycle-verify activity_count=7 workflow_count=1
+# I [WORKER    ] ready: Worker listening | task_queue=spin-cycle-verify activity_count=6 workflow_count=1
 # I [CREATE    ] start: Creating claim record | claim=The Great Wall of China is visible from ...
-# I [DECOMPOSE ] start: Decomposing claim into sub-claims | claim=The Great Wall of China is visible from ...
-# I [DECOMPOSE ] done: Claim decomposed | num_sub_claims=1
+# I [DECOMPOSE ] start: Decomposing claim | claim=The Great Wall of China is visible from ...
+# I [DECOMPOSE ] done: Claim decomposed | sub_count=1
+# I [WORKFLOW  ] leaf_start: Processing leaf sub-claim | sub_claim=The Great Wall of China is visible from space depth=1
 # I [RESEARCH  ] start: Starting research agent | sub_claim=The Great Wall of China is visible from space
-# I [RESEARCH  ] done: Research agent complete | evidence_count=3 agent_steps=8
+# I [RESEARCH  ] done: Research complete | evidence_count=6
 # I [JUDGE     ] done: Sub-claim judged | verdict=false confidence=0.95
-# I [SYNTHESIZE] done: Overall verdict synthesized | verdict=false confidence=0.95
-# I [STORE     ] done: Result stored in database | claim_id=abc123... sub_claims=1
+# I [SYNTHESIZE] done: Verdict synthesized | verdict=false confidence=0.95
+# I [STORE     ] done: Result stored in database | claim_id=abc123... verdict=false
 
 # With LOG_FORMAT=json (default in prod), output is JSON for Loki:
-# {"ts":"2025-01-15T12:00:00.123Z","level":"INFO","module":"decompose","action":"done","msg":"Claim decomposed","num_sub_claims":2}
+# {"ts":"2025-01-15T12:00:00.123Z","level":"INFO","module":"decompose","action":"done","msg":"Claim decomposed","sub_count":4}
 ```
 
 ### Inspecting the Database
@@ -981,7 +978,7 @@ spin-cycle/
 │   │   └── verify.py               # VerifyClaimWorkflow
 │   │
 │   ├── activities/                 # Temporal activity implementations
-│   │   └── verify_activities.py    # All 7 verification activities (including create_claim + synthesize_group)
+│   │   └── verify_activities.py    # All 6 verification activities
 │   │
 │   ├── db/                         # Database layer
 │   │   ├── models.py               # SQLAlchemy models (Claim, SubClaim, Evidence, Verdict)

@@ -72,79 +72,79 @@ Verdict scale (6 levels):
 
 
 # =============================================================================
-# STEP 1: DECOMPOSE
+# STEP 1: DECOMPOSE (single-level, called recursively by the workflow)
 # =============================================================================
 
 DECOMPOSE_SYSTEM = """\
-You are a fact-checker's assistant. Your job is to break down complex claims \
-into a TREE of simple, independently verifiable sub-claims.
+You are a fact-checker's assistant. Your job is to break a claim into \
+simpler sub-claims, ONE LEVEL at a time.
 
 Rules:
-- Each LEAF sub-claim must be a single factual assertion
-- Each leaf must be verifiable on its own (without needing the others)
-- Each leaf must be specific (include numbers, dates, names when present)
+- Split the claim into 2-6 simpler sub-claims
+- Each sub-claim must be a specific, verifiable factual assertion
+- Each sub-claim must stand on its own (understandable without context)
+- Include specific numbers, dates, names when present in the original
 - Do NOT include opinions, predictions, or subjective statements
-- Do NOT rephrase the claim — preserve the original wording where possible
-- If the claim is already atomic (a single fact), return it as a single leaf
+- Preserve original wording where possible
+- Each sub-claim MUST cover a DIFFERENT aspect — do NOT rephrase the \
+same fact multiple ways
+- Sub-claims CAN still be compound — they will be decomposed further in \
+later passes if needed. You do NOT need to fully atomize everything in \
+one shot.
 
-TREE STRUCTURE:
-Group RELATED sub-claims together under a parent node. Each parent node \
-has a label describing the aspect it covers, and children that are either \
-leaf claims (to be researched) or further groups.
+If the claim is ALREADY a single, atomic fact that cannot be meaningfully \
+split further, return it unchanged as a single-item array.
 
-Why a tree? Because related sub-claims should be evaluated together. \
-If two sub-claims are about "promises made by politicians", their \
-individual verdicts should be synthesized into an intermediate verdict \
-before being combined with other unrelated sub-claims.
+SPLITTING STRATEGY:
+Think about the NATURAL fault lines in the claim. What are the distinct \
+aspects or subjects? Split along those lines FIRST:
+- Different subjects/entities → split by subject
+- Different time periods → split by time
+- Different actions or outcomes → split by action
+- Cause and effect → split cause from effect
 
-Structure rules:
-- A LEAF is: {"text": "verifiable assertion"}
-- A GROUP is: {"label": "aspect name", "children": [...]}
-- The root is always an array of top-level items (leaves or groups)
-- Groups can have 1+ children — even a single child benefits from the \
-intermediate synthesis that adds contextual framing before passing upstream
-- Aim for 2-4 top-level items. Use groups when related claims cluster together.
-- Maximum depth: 2 levels (root → group → leaves). Do NOT nest groups.
+Do NOT over-split. If the claim has 2 natural parts, return 2 sub-claims, \
+not 6. Later passes will split further if needed.
 
 HYPERBOLE AND EXAGGERATION:
-When a claim uses obviously exaggerated or hyperbolic language ("a million \
-times", "literally everyone", "the biggest ever", "never in history"), \
-you MUST split it into:
-  1. The CORE factual assertion (what the person is really claiming)
+When a claim uses exaggerated language ("a million times", "literally \
+everyone", "the biggest ever"), split it into:
+  1. The CORE factual assertion (what they're really claiming)
   2. The SPECIFIC quantitative/superlative claim (the exact exaggerated part)
 
-EXAMPLE 1 — Simple claim (no groups needed):
+EXAMPLES:
+
+Atomic claim (cannot be split):
 "NASA landed on the moon 6 times"
-→ [{"text": "NASA landed on the moon 6 times"}]
+→ ["NASA landed on the moon 6 times"]
 
-EXAMPLE 2 — Complex claim with related sub-claims:
+Two distinct subjects (split by entity, each part may be further split):
+"The US and China are both increasing military spending while cutting \
+foreign aid"
+→ ["The US is increasing military spending while cutting foreign aid", \
+"China is increasing military spending while cutting foreign aid"]
+
+Multiple distinct assertions (fully decomposed in one pass):
 "Fort Knox gold has not been audited despite promises by Trump and Musk"
-→ [
-    {"text": "The gold in Fort Knox has not been audited recently"},
-    {"label": "Audit promises", "children": [
-      {"text": "Donald Trump promised to audit Fort Knox"},
-      {"text": "Elon Musk or DOGE promised to audit Fort Knox"}
-    ]}
-  ]
+→ ["The gold in Fort Knox has not been audited recently", \
+"Donald Trump promised to audit Fort Knox", \
+"Elon Musk or DOGE promised to audit Fort Knox"]
 
-EXAMPLE 3 — Hyperbolic claim:
+Hyperbolic claim:
 "Trump was mentioned in the Epstein files a million times"
-→ [
-    {"text": "Trump is mentioned in the Epstein files"},
-    {"text": "Trump is mentioned approximately one million times in the \
-Epstein files"}
-  ]
+→ ["Trump is mentioned in the Epstein files", \
+"Trump is mentioned approximately one million times in the Epstein files"]
 
-Return ONLY the JSON array. No markdown, no explanation, no wrapping.\
+Return ONLY a JSON array of strings. No markdown, no explanation, no wrapping.\
 """
 
 DECOMPOSE_USER = """\
-Break this claim into a tree of independently verifiable sub-claims.
+Break this claim into simpler sub-claims. If it's already atomic, return \
+it unchanged as a single-item array.
 
 Claim: {claim_text}
 
-Return a JSON array of leaves and groups. Leaves: {{"text": "..."}}. \
-Groups: {{"label": "...", "children": [...]}}.
+Return a JSON array of strings.
 
 /no_think\
 """
@@ -156,21 +156,26 @@ Groups: {{"label": "...", "children": [...]}}.
 #   This reduces latency and avoids the model wrapping its answer in <think>
 #   tags.
 #
-# Why a system + user message split?
-#   The system message sets the persona and rules (stable across all calls).
-#   The user message provides the specific claim (changes every call).
-#   This follows the ChatML format that OpenAI-compatible APIs expect.
+# Why single-level decomposition?
+#   Instead of asking the LLM to plan a whole tree structure in one shot
+#   (groups, children, nesting), we ask for ONE level of splitting. The
+#   workflow calls decompose recursively — each child gets decomposed again,
+#   and the tree emerges naturally from recursion. This is better because:
+#     1. The LLM only has to think about one kind of split at a time
+#     2. Depth adapts automatically — simple claims stay shallow
+#     3. Every level of the tree is the same operation
 #
-# Why "Return ONLY a JSON array"?
-#   LLMs love to be helpful and add explanations. Without this instruction,
-#   you'll get "Sure! Here are the sub-claims: ..." which breaks JSON parsing.
-#
-# Example input/output:
-#   Input:  "NASA spent $25.4 billion on the Apollo program and landed
-#            humans on the moon 6 times between 1969 and 1972"
-#   Output: ["NASA spent $25.4 billion on the Apollo program",
-#            "NASA landed humans on the moon 6 times",
-#            "The moon landings occurred between 1969 and 1972"]
+# Example of recursive decomposition:
+#   depth=0: "US and China increasing military spending while cutting aid"
+#            → ["US increasing spending while cutting aid",
+#               "China increasing spending while cutting aid"]
+#   depth=1: "US increasing spending while cutting aid"
+#            → ["US is increasing military spending",
+#               "US is cutting foreign aid"]
+#   depth=1: "China increasing spending while cutting aid"
+#            → ["China is increasing military spending",
+#               "China is cutting foreign aid"]
+#   depth=2: each of these returns itself (atomic) → research + judge
 
 
 # =============================================================================
@@ -386,13 +391,14 @@ and "nuance".\
 
 
 # =============================================================================
-# STEP 4: SYNTHESIZE
+# STEP 4: SYNTHESIZE (unified — works for both intermediate and final)
 # =============================================================================
 
 SYNTHESIZE_SYSTEM = """\
-You are an impartial fact-checker. You have received verdicts for each \
-sub-claim that makes up a larger claim. Your job is to combine them into \
-a single overall verdict.
+You are an impartial fact-checker. You have received verdicts for sub-claims \
+and must combine them into a single verdict.
+
+{synthesis_context}
 
 CRITICAL — WEIGH BY IMPORTANCE, NOT BY COUNT:
 Do NOT simply count true vs false sub-claims. Instead:
@@ -452,20 +458,20 @@ Confidence scoring (USE THE FULL RANGE):
 Do NOT default to 0.9+. Be honest about uncertainty.
 
 Return a JSON object:
-{
+{{
   "verdict": "true|mostly_true|mixed|mostly_false|false|unverifiable",
   "confidence": 0.0 to 1.0,
   "reasoning": "Brief summary of how the sub-verdicts combine",
   "nuance": "Overall context note synthesizing sub-claim nuances. Null if not needed."
-}
+}}
 
 Return ONLY the JSON object. No markdown, no explanation, no wrapping.\
 """
 
 SYNTHESIZE_USER = """\
-Combine these sub-claim verdicts into an overall verdict for the original claim.
+Combine these sub-claim verdicts into a single verdict.
 
-Original claim: {claim_text}
+{synthesis_framing}
 
 Sub-claim verdicts:
 {sub_verdicts_text}
@@ -475,63 +481,20 @@ Return a JSON object with "verdict", "confidence", "reasoning", and "nuance".
 /no_think\
 """
 
-# Why synthesize with an LLM instead of just averaging?
-#   Because verdict logic isn't simple math. If someone claims "X happened
-#   in 2019 and cost $50M" and the event DID happen but in 2020 and cost
-#   $48M, a human would say "mostly true" — the core claim is right, the
-#   details are slightly off. An LLM can make this nuanced judgment better
-#   than a simple "2 of 3 sub-claims are true → 66% → mostly_true".
-
-
-# =============================================================================
-# STEP 4b: GROUP SYNTHESIZE (intermediate tree nodes)
-# =============================================================================
-
-GROUP_SYNTHESIZE_SYSTEM = """\
-You are an impartial fact-checker. You are synthesizing verdicts for a GROUP \
-of related sub-claims that belong together under the aspect: "{group_label}".
-
-This is an INTERMEDIATE synthesis — you are combining related sub-claim \
-verdicts into a single group-level verdict. This group verdict will then \
-be combined with other group/leaf verdicts in the final synthesis.
-
-WEIGH BY IMPORTANCE within this group:
-Do NOT simply count true vs false children. Identify which children carry \
-the most weight for this aspect and let those drive the group verdict.
-
-Verdict scale for groups (sub-claim level):
-- "true" — The core of this aspect is well-supported
-- "false" — The core of this aspect is contradicted
-- "partially_true" — The core is right but details are off, or it's mixed
-- "unverifiable" — Not enough evidence for this aspect
-
-The confidence should reflect the weakest link in the group.
-
-NUANCE:
-If the children have important nuance notes, synthesize them into a \
-group-level nuance that captures the combined context for this aspect.
-
-Return a JSON object:
-{{
-  "verdict": "true|false|partially_true|unverifiable",
-  "confidence": 0.0 to 1.0,
-  "reasoning": "How the child verdicts combine for this aspect",
-  "nuance": "Group-level context note. Null if not needed."
-}}
-
-Return ONLY the JSON object. No markdown, no explanation, no wrapping.\
-"""
-
-GROUP_SYNTHESIZE_USER = """\
-Synthesize these related sub-claim verdicts for the "{group_label}" aspect \
-of the original claim.
-
-Original claim: {claim_text}
-
-Sub-claim verdicts for this group:
-{sub_verdicts_text}
-
-Return a JSON object with "verdict", "confidence", "reasoning", and "nuance".
-
-/no_think\
-"""
+# Why a unified synthesis prompt?
+#   The same operation happens at every level of the tree: "here are child
+#   verdicts, combine them." The only difference is context framing:
+#   - Final: "This is the overall verdict for the claim."
+#   - Intermediate: "This is a verdict for one aspect. It will be combined
+#     with other aspects later."
+#
+#   The activity formats {synthesis_context} and {synthesis_framing} based
+#   on whether it's a final or intermediate synthesis. The core reasoning
+#   (importance weighting, confidence scoring, nuance) is identical.
+#
+# Why the full 6-level scale at every level?
+#   The old approach used 4 levels (true/false/partially_true/unverifiable)
+#   for intermediate nodes and 6 for final. This lost expressiveness — an
+#   intermediate node couldn't distinguish "mostly true with minor issues"
+#   from "genuinely mixed." Now every level uses the same scale, so nuance
+#   is preserved as it flows up the tree.

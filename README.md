@@ -68,33 +68,33 @@ curl -X POST http://localhost:4500/claims \
 
 ### 2. Verification Pipeline (Temporal workflow)
 
-The claim triggers `VerifyClaimWorkflow` — 7 activities orchestrated as a tree:
+The claim triggers `VerifyClaimWorkflow` — 6 activities orchestrated recursively:
 
 ```
 create_claim          Creates DB record (skipped if called via API)
     ↓
-decompose_claim       LLM splits claim into a tree of sub-claims
-    ↓                 (groups for related assertions, leaves for atomic facts)
+_process(claim_text, depth=0)    Recursive processing function
+    │
+    ├── decompose_claim       LLM splits text into sub-parts (one level)
+    │
+    ├── IF ≤1 item (atomic):   → leaf path
+    │     research_subclaim   LangGraph ReAct agent searches
+    │        ↓                SearXNG + DuckDuckGo + Serper +
+    │        ↓                Brave + Wikipedia + page_fetcher
+    │        ↓                (all filtered for source quality)
+    │     judge_subclaim      LLM evaluates evidence
+    │
+    ├── IF 2+ items (compound): → branch path
+    │     → asyncio.gather(*[_process(child, depth+1)])
+    │     → synthesize_verdict  LLM synthesizes children's verdicts
+    │                           (adapts prompt for final vs intermediate)
+    │
+    └── MAX_DEPTH=3 safety limit (forces leaf at max depth)
     ↓
-┌─── _process_node (recursive, parallel via asyncio.gather) ───┐
-│                                                           │
-│  LEAF NODE:                                               │
-│    research_subclaim   LangGraph ReAct agent searches     │
-│       ↓                SearXNG + DuckDuckGo + Serper +    │
-│       ↓                Brave + Wikipedia + page_fetcher   │
-│       ↓                (all filtered for source quality)  │
-│    judge_subclaim      LLM evaluates evidence             │
-│                                                           │
-│  GROUP NODE:                                              │
-│    → process children in parallel                         │
-│    → synthesize_group  LLM synthesizes children's verdicts│
-│                                                           │
-└───────────────────────────────────────────────────────┘
-    ↓
-synthesize_verdict    LLM combines top-level results (importance-weighted)
-    ↓
-store_result          Writes tree structure + verdict to Postgres
+store_result          Writes recursive result tree to Postgres
 ```
+
+The tree structure **emerges from recursion** — it's not planned upfront. Simple claims stay flat, complex claims go deeper naturally.
 
 ### 3. Result
 
@@ -226,15 +226,14 @@ docker logs -f spin-cycle-dev-worker
 
 # With LOG_FORMAT=pretty (default in dev), you'll see:
 # I [WORKER    ] starting: Connecting to Temporal | temporal_host=... task_queue=spin-cycle-verify
-# I [WORKER    ] ready: Worker listening | task_queue=spin-cycle-verify activity_count=7
-# I [DECOMPOSE ] done: Claim decomposed into tree | top_level_nodes=2
-# I [WORKFLOW  ] group_start: Processing group node | label=US Policy num_children=2
+# I [WORKER    ] ready: Worker listening | task_queue=spin-cycle-verify activity_count=6
+# I [DECOMPOSE ] done: Claim decomposed | sub_count=4
+# I [WORKFLOW  ] branch: Processing compound node | depth=0 num_children=4
 # I [RESEARCH  ] start: Starting research agent | sub_claim=The US is increasing military spending
-# I [RESEARCH  ] done: Research agent complete | evidence_count=4 agent_steps=8
-# I [JUDGE     ] done: Sub-claim judged | verdict=true confidence=0.92
-# I [WORKFLOW  ] group_done: Group node synthesized | label=US Policy verdict=true
-# I [SYNTHESIZE] done: Overall verdict synthesized | verdict=mostly_false confidence=0.88
-# I [STORE     ] done: Result stored in database | claim_id=... sub_claims=6
+# I [RESEARCH  ] done: Research complete | evidence_count=6
+# I [JUDGE     ] done: Sub-claim judged | verdict=true confidence=0.95
+# I [SYNTHESIZE] done: Verdict synthesized | is_final=True verdict=mostly_false confidence=0.95
+# I [STORE     ] done: Result stored in database | claim_id=... verdict=mostly_false
 
 # With LOG_FORMAT=json (default in prod), output is JSON for Grafana Loki
 ```
@@ -243,8 +242,8 @@ docker logs -f spin-cycle-dev-worker
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LLAMA_URL` | `http://joi:3101` | Instruct LLM endpoint (fast, structured output) |
-| `LLAMA_REASONING_URL` | `http://joi:3102` | Thinking LLM endpoint (chain-of-thought reasoning) |
+| `LLAMA_URL` | `http://joi:3101` | Instruct LLM endpoint (fast, structured output: decompose, synthesize) |
+| `LLAMA_REASONING_URL` | `http://joi:3102` | Thinking LLM endpoint (chain-of-thought: research, judge) |
 | `LLAMA_EMBED_URL` | `http://joi:3103` | Embeddings endpoint (not yet used) |
 | `POSTGRES_PASSWORD` | `spin-cycle-dev` | Application Postgres password |
 | `LOG_FORMAT` | `json` (prod) / `pretty` (dev) | Log output format — `json` for Grafana Loki, `pretty` for terminal |
@@ -320,7 +319,7 @@ spin-cycle/
 │   │   └── verify.py               # VerifyClaimWorkflow
 │   │
 │   ├── activities/
-│   │   └── verify_activities.py    # 7 Temporal activities (including create_claim + synthesize_group)
+│   │   └── verify_activities.py    # 6 Temporal activities
 │   │
 │   ├── db/
 │   │   ├── models.py               # SQLAlchemy models
@@ -339,8 +338,9 @@ spin-cycle/
 
 1. **Alembic migrations** — proper database schema versioning (currently using raw SQL ALTER TABLE)
 2. **Extraction pipeline** — automated claim ingestion from RSS feeds via scheduled Temporal workflows
-3. **Source credibility scoring** — tiered scoring system (Reuters > random blog) for evidence weighting
-4. **Calibration test suite** — benchmark against known claims to measure accuracy
-5. **LangFuse** — self-hosted LLM observability for prompt debugging
+3. **Adaptive research depth** — scale research effort based on sub-claim complexity
+4. **Source credibility scoring** — tiered scoring system (Reuters > random blog) for evidence weighting
+5. **Calibration test suite** — benchmark against known claims to measure accuracy
+6. **LangFuse** — self-hosted LLM observability for prompt debugging
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full technical deep dive, including the extraction pipeline design, database schema details, and how LangChain/LangGraph/Temporal fit together.

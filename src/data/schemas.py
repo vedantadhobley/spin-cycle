@@ -31,7 +31,10 @@ class SubClaimResponse(BaseModel):
     """A verified sub-claim (leaf) or group node in the response."""
     text: str  # leaf: verifiable assertion, group: label
     is_leaf: bool = True
-    verdict: Optional[Literal["true", "false", "partially_true", "unverifiable"]] = None
+    verdict: Optional[Literal[
+        "true", "mostly_true", "mixed", "mostly_false",
+        "false", "partially_true", "unverifiable"
+    ]] = None
     confidence: Optional[float] = None
     reasoning: Optional[str] = None
     nuance: Optional[str] = None
