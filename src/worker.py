@@ -33,6 +33,7 @@ from src.activities.verify_activities import (  # noqa: E402
     research_subclaim,
     judge_subclaim,
     synthesize_verdict,
+    synthesize_group,
     store_result,
 )
 
@@ -58,12 +59,13 @@ async def main():
             research_subclaim,
             judge_subclaim,
             synthesize_verdict,
+            synthesize_group,
             store_result,
         ],
     )
 
     log.info(logger, MODULE, "ready", "Worker listening",
-             task_queue=TASK_QUEUE, activity_count=6, workflow_count=1)
+             task_queue=TASK_QUEUE, activity_count=7, workflow_count=1)
     await worker.run()
 
 

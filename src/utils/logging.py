@@ -33,10 +33,10 @@ from src.utils.logging import log, get_logger, configure_logging
 
 # In activities (pass activity.logger for Temporal context):
 log.info(activity.logger, "decompose", "start", "Decomposing claim",
-         claim_id=claim_id, claim=claim_text[:80])
+         claim_id=claim_id, claim=claim_text)
 
 log.error(activity.logger, "judge", "parse_failed", "Failed to parse verdict",
-          error=str(e), raw=raw[:200])
+          error=str(e), raw=raw)
 
 # In workflows (pass workflow.logger):
 log.info(workflow.logger, "workflow", "started", "Verification started",

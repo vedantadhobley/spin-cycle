@@ -15,6 +15,7 @@ import os
 import httpx
 from langchain_core.tools import tool
 
+from src.tools.source_filter import filter_results
 from src.utils.logging import log, get_logger
 
 MODULE = "tools"
@@ -46,7 +47,7 @@ async def search_searxng(
         return []
 
     log.debug(logger, MODULE, "searxng_start", "SearXNG search starting",
-              query=query[:80], max_results=max_results, categories=categories)
+              query=query, max_results=max_results, categories=categories)
 
     async with httpx.AsyncClient() as client:
         try:
@@ -65,7 +66,7 @@ async def search_searxng(
             data = resp.json()
 
             results = []
-            for item in data.get("results", [])[:max_results]:
+            for item in data.get("results", [])[:max_results + 5]:
                 results.append({
                     "title": item.get("title", ""),
                     "snippet": item.get("content", ""),
@@ -73,14 +74,16 @@ async def search_searxng(
                     "engines": item.get("engines", []),
                 })
 
+            results = filter_results(results)[:max_results]
+
             log.debug(logger, MODULE, "searxng_done", "SearXNG search complete",
-                      query=query[:50], result_count=len(results))
+                      query=query, result_count=len(results))
             return results
 
         except Exception as e:
             log.warning(logger, MODULE, "searxng_failed", "SearXNG search failed",
                         error=str(e), error_type=type(e).__name__,
-                        query=query[:80])
+                        query=query)
             return []
 
 
@@ -106,7 +109,7 @@ def get_searxng_tool():
             log.warning(logger, MODULE, "searxng_tool_failed",
                         "SearXNG search tool failed",
                         error=str(e), error_type=type(e).__name__,
-                        query=query[:80])
+                        query=query)
             return "SearXNG search failed. Try web_search as a fallback."
 
         if not results:

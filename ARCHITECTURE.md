@@ -77,7 +77,7 @@ Temporal is the **scheduler and reliability layer**. It handles:
 
 - **Durable execution**: if a container crashes mid-workflow, Temporal replays from the last completed activity
 - **Retries**: each activity has a `RetryPolicy` (max 3 attempts). If the LLM times out, Temporal retries just that activity
-- **Timeouts**: activities have `start_to_close_timeout` (60-120s). Agent loops that run forever get killed
+- **Timeouts**: activities have `start_to_close_timeout` (30-360s). Agent loops that run forever get killed
 - **Scheduling**: extraction workflows will run on a Temporal cron schedule (every 15 min)
 - **Visibility**: Temporal UI shows every workflow, its state, its history. Debug anything
 
@@ -85,11 +85,14 @@ The key insight: **LangGraph runs inside Temporal activities, not instead of the
 
 ```
 Temporal Workflow
-└── Activity: research_subclaim (retryable, timeout: 120s)
+└── Activity: research_subclaim (retryable, timeout: 360s)
     └── LangGraph ReAct Agent (cycles between LLM and tools)
         ├── LLM call (via LangChain ChatOpenAI)
-        ├── DuckDuckGo search (via LangChain tool)
+        ├── SearXNG search (via LangChain tool, filtered by source_filter)
+        ├── DuckDuckGo search (via LangChain tool, filtered by source_filter)
+        ├── Serper / Brave search (via LangChain tool, filtered by source_filter)
         ├── Wikipedia search (via LangChain tool)
+        ├── Page fetcher (URL → text extraction, blocked URLs rejected)
         ├── LLM call (sees results, decides next action)
         └── ... (until LLM decides it has enough)
 ```
@@ -98,7 +101,7 @@ Temporal handles the **macro orchestration** (decompose → research → judge �
 
 **Where it's used:**
 - `src/workflows/verify.py` — `VerifyClaimWorkflow` definition
-- `src/activities/verify_activities.py` — all 6 Temporal activities (including create_claim)
+- `src/activities/verify_activities.py` — all 7 Temporal activities (including create_claim and synthesize_group)
 - `src/worker.py` — worker entrypoint that registers workflows + activities
 - `docker-compose.dev.yml` — Temporal server + Temporal UI containers
 
@@ -106,22 +109,32 @@ Temporal handles the **macro orchestration** (decompose → research → judge �
 
 ## The Verification Pipeline (what's working now)
 
-A claim enters the system (via API or extraction) and goes through 6 activities, orchestrated by Temporal:
+A claim enters the system (via API or extraction) and is processed as a **tree of sub-claims**, orchestrated by Temporal with 7 activities:
 
-### Step 1: decompose_claim
+### Step 1: decompose_claim (tree decomposition)
 
 **File:** `src/activities/verify_activities.py`
 **Prompt:** `src/prompts/verification.py` → `DECOMPOSE_SYSTEM` / `DECOMPOSE_USER`
 
-The LLM breaks a complex claim into atomic, independently verifiable sub-claims.
+The LLM breaks a complex claim into a **hierarchical tree** of sub-claims. Groups contain related sub-claims; leaves are atomic, independently verifiable assertions.
 
 ```
-Input:  "Bitcoin was created by Satoshi Nakamoto in 2009 and the first block was mined on January 3rd"
-Output: ["Bitcoin was created by Satoshi Nakamoto in 2009",
-         "The first block of Bitcoin was mined on January 3rd, 2009"]
+Input:  "The US and China are both increasing military spending while cutting foreign aid"
+Output: [
+  { "label": "US Policy", "children": [
+      { "text": "The US is increasing military spending" },
+      { "text": "The US is cutting foreign aid" }
+  ]},
+  { "label": "China Policy", "children": [
+      { "text": "China is increasing military spending" },
+      { "text": "China is cutting foreign aid" }
+  ]}
+]
 ```
 
-Why decompose? Because each part might have a different truth value. The overall claim is "mostly true" if 2 of 3 sub-claims check out but one has the wrong date.
+Why a tree instead of a flat list? Because claims often have **natural groupings** — comparing two countries, before/after, cause/effect. Tree decomposition lets the system synthesize intermediate verdicts per group before combining them, which produces more nuanced overall verdicts. A flat list of 6 sub-claims averaging to "mixed" misses that one country's claims are all true while the other's are all false.
+
+The tree is normalized after decomposition: bare strings become `{"text": "..."}` leaf nodes, single-child groups are preserved (not flattened), and the structure is validated.
 
 The prompt uses `/no_think` to disable Qwen3's chain-of-thought — we want clean JSON, not reasoning. If JSON parsing fails, we fall back to the original claim as a single sub-claim.
 
@@ -131,17 +144,26 @@ The prompt uses `/no_think` to disable Qwen3's chain-of-thought — we want clea
 **Called from:** `src/activities/verify_activities.py`
 **Prompt:** `src/prompts/verification.py` → `RESEARCH_SYSTEM` / `RESEARCH_USER`
 
-This is where the LangGraph ReAct agent runs. For each sub-claim:
+This is where the LangGraph ReAct agent runs. For each **leaf** sub-claim:
 
 1. Agent receives: "Find evidence about: {sub-claim}"
-2. LLM decides what to search → calls `web_search` or `wikipedia_search`
+2. LLM decides what to search → calls any of the available tools
 3. Tool executes the search → returns results as text
 4. LLM reads results → decides if it needs more → calls another tool or stops
-5. Typically: 2-3 tool calls per sub-claim, 6 agent steps, ~8 seconds
+5. Typically: 2-4 tool calls per sub-claim, 6-10 agent steps
+6. Agent timeout: 240s
 
 **Tools available to the agent:**
-- `web_search` — DuckDuckGo search (news, fact-checks, general web). No API key needed.
-- `wikipedia_search` — Wikipedia API search (established facts, background). Custom async tool with User-Agent header.
+- `searxng_search` — SearXNG meta-search (news, general web). Self-hosted, no API key.
+- `web_search` — DuckDuckGo search (fallback/supplementary). No API key needed.
+- `serper_search` — Google search via Serper API. Requires `SERPER_API_KEY`.
+- `brave_search` — Brave Search API. Requires `BRAVE_API_KEY`.
+- `wikipedia_search` — Wikipedia API search (established facts, background).
+- `page_fetcher` — Fetches and extracts text from URLs found in search results.
+
+All search tools pass results through `source_filter.py` before returning — low-quality sources (Reddit, Quora, social media, content farms, etc.) are silently dropped. See **Source Quality Filtering** below.
+
+The RESEARCH_SYSTEM prompt explicitly instructs the agent to prefer authoritative sources: government databases, wire services, established news outlets, academic institutions, official statistics agencies.
 
 After the agent finishes, we extract evidence from the conversation:
 - Each `ToolMessage` becomes an evidence record (source_type: web/wikipedia)
@@ -169,35 +191,116 @@ Sub-claim verdicts: `true` | `false` | `partially_true` | `unverifiable`
 
 If there's no evidence, we short-circuit to "unverifiable" without calling the LLM.
 
-### Step 4: synthesize_verdict
+### Step 3.5: synthesize_group (intermediate synthesis)
+
+**File:** `src/activities/verify_activities.py`
+**Prompt:** `src/prompts/verification.py` → `GROUP_SYNTHESIZE_SYSTEM` / `GROUP_SYNTHESIZE_USER`
+
+For **group nodes** in the tree, after all children are processed, the LLM synthesizes an intermediate verdict for the group. This happens recursively — nested groups are synthesized bottom-up.
+
+```
+Input:  claim = "The US and China are both increasing military..."
+        label = "US Policy"
+        child_results = [{"text": "US increasing military spending", "verdict": "true"},
+                         {"text": "US cutting foreign aid", "verdict": "true"}]
+Output: {"verdict": "true", "confidence": 0.92,
+         "reasoning": "Both US-related sub-claims are well-supported..."}
+```
+
+The prompt instructs the LLM to **weigh by importance, not by count** — if one sub-claim is the core assertion and another is incidental, the core claim should dominate the group verdict.
+
+### Step 4: synthesize_verdict (final synthesis)
 
 **File:** `src/activities/verify_activities.py`
 **Prompt:** `src/prompts/verification.py` → `SYNTHESIZE_SYSTEM` / `SYNTHESIZE_USER`
 
-The LLM combines sub-claim verdicts into an overall verdict. Also a single LLM call:
+The LLM combines top-level results (which may be leaf verdicts or group syntheses) into an overall verdict. Also weighted by importance.
 
 ```
-Input:  claim = "Bitcoin was created by Satoshi Nakamoto in 2009 and..."
-        sub_verdicts = [{"verdict": "true", "confidence": 0.95}, ...]
-Output: {"verdict": "true", "confidence": 0.95,
-         "reasoning": "Both sub-claims are independently verified..."}
+Input:  claim = "The US and China are both increasing military..."
+        top_results = [{"verdict": "true", "text": "US Policy: ..."}, 
+                       {"verdict": "mostly_false", "text": "China Policy: ..."}]
+Output: {"verdict": "mostly_false", "confidence": 0.88,
+         "reasoning": "While the US claims are supported, the China claims..."
 ```
+
+The `reasoning` field is stored in the verdicts table and exposed via the API, giving visibility into the top-level synthesis logic.
 
 Why use LLM instead of averaging? Because "X happened in 2019 and cost $50M" where the event DID happen but in 2020 and cost $48M is "mostly true" — the core claim is right, details are slightly off. An LLM makes this nuance call better than math.
 
 Overall verdicts: `true` | `mostly_true` | `mixed` | `mostly_false` | `false` | `unverifiable`
 
-### Step 5: store_result
+### Step 5: store_result (structure-aware)
 
 **File:** `src/activities/verify_activities.py`
 
-Writes everything to Postgres:
-- One `SubClaim` row per sub-claim (text, verdict, confidence, reasoning)
-- One `Evidence` row per evidence item (source_type, content, URL)
-- One `Verdict` row (overall verdict, confidence, reasoning_chain as JSONB)
+Writes the full tree structure to Postgres:
+- One `SubClaim` row per node in the tree (both groups and leaves)
+  - Group nodes: `is_leaf=False`, text is the group label
+  - Leaf nodes: `is_leaf=True`, text is the verifiable assertion
+  - `parent_id` links children to their parent group (self-referential FK)
+- One `Evidence` row per evidence item (source_type, content, URL) — linked to leaf sub-claims
+- One `Verdict` row (overall verdict, confidence, reasoning, reasoning_chain as JSONB)
 - Updates `Claim.status` to "verified"
 
+The tree is stored recursively via `_store_node()` — groups are stored first, then children with `parent_id` set. This preserves the hierarchical structure for API responses.
+
 Evidence records with `source_type` not in the DB enum (`web`, `wikipedia`, `news_api`) are filtered out — the agent_summary doesn't get stored.
+
+### Workflow Orchestration (tree processing)
+
+The workflow processes the tree recursively using `asyncio.gather` for parallelism:
+
+```
+VerifyClaimWorkflow
+├── create_claim (if needed)
+├── decompose_claim → returns tree of groups + leaves
+├── _process_node (recursive, parallel)
+│   ├── LEAF: research_subclaim (360s timeout) → judge_subclaim (120s timeout)
+│   └── GROUP: gather(*[_process_node(child) for child in children])
+│              → synthesize_group (60s timeout)
+├── synthesize_verdict (60s timeout) ← top-level results
+└── store_result (30s timeout) ← tree + verdict
+```
+
+All leaf nodes within a group are processed in parallel. All top-level nodes are also processed in parallel. Groups wait for their children to complete, then synthesize.
+
+---
+
+## Source Quality Filtering
+
+**File:** `src/tools/source_filter.py`
+
+All search results pass through a domain blocklist before reaching the research agent. This is a hard filter — blocked domains are silently dropped.
+
+### Why?
+
+Search engines return Reddit comments, Quora answers, Medium blogs, and other user-generated content that isn't citable for fact-checking. The LLM prompt also instructs the agent to prefer authoritative sources, but the code-level filter catches what the LLM might miss.
+
+### Blocked Categories (~40 domains)
+
+| Category | Examples | Reason |
+|----------|----------|--------|
+| Social media / forums | reddit.com, quora.com, twitter.com, facebook.com | User-generated, unvetted |
+| Content farms | ehow.com, answers.com, reference.com | SEO-driven, not authoritative |
+| Video platforms | youtube.com, vimeo.com, tiktok.com | Not citable text sources |
+| Fact-check sites | snopes.com, politifact.com, factcheck.org | We do our own verification |
+| Blog platforms | medium.com, substack.com | Mostly unvetted |
+| AI aggregators | perplexity.ai, you.com | Not primary sources |
+
+### How It's Wired
+
+- `filter_results(results)` — called in all 4 search tools (SearXNG, Serper, Brave, DuckDuckGo) on the result list before returning
+- `is_blocked(url)` — called in `page_fetcher.py` to reject blocked URLs before fetching
+- Handles subdomains: `old.reddit.com` matches the `reddit.com` block
+- Search tools request extra results (e.g., 15 instead of 10) to compensate for filtering losses
+
+### Prompt-Level Reinforcement
+
+The `RESEARCH_SYSTEM` prompt explicitly lists acceptable and forbidden source types:
+
+- **ACCEPTABLE:** Government databases, wire services (Reuters, AP), established newspapers, official statistics, academic institutions
+- **NEVER USE:** Reddit, Quora, social media, personal blogs, forums, YouTube comments, AI-generated summaries
 
 ---
 
@@ -288,21 +391,22 @@ Key decisions:
 │     claims      │       │    sub_claims     │       │     evidence       │
 │─────────────────│       │──────────────────│       │────────────────────│
 │ id (uuid) PK    │───┐   │ id (uuid) PK     │───┐   │ id (uuid) PK      │
-│ text (text)     │   │   │ claim_id (uuid)FK │   │   │ sub_claim_id (FK) │
-│ source_url      │   └──▶│ text (text)       │   └──▶│ source_type (enum)│
-│ source_name     │       │ verdict (enum)    │       │ source_url        │
-│ status (enum)   │       │ confidence (float)│       │ content (text)    │
-│ created_at      │       │ reasoning (text)  │       │ supports_claim    │
-│ updated_at      │       └──────────────────┘       │ retrieved_at      │
-└────────┬────────┘                                   └────────────────────┘
-         │
-         │       ┌──────────────────┐
-         │       │    verdicts      │
-         │       │──────────────────│
-         └──────▶│ id (uuid) PK     │
+│ text (text)     │   │   │ claim_id (uuid)FK│   │   │ sub_claim_id (FK) │
+│ source_url      │   └──▶│ parent_id (FK)   │   └──▶│ source_type (enum)│
+│ source_name     │       │ is_leaf (bool)   │       │ source_url        │
+│ status (enum)   │       │ text (text)      │       │ content (text)    │
+│ created_at      │       │ verdict (enum)   │       │ supports_claim    │
+│ updated_at      │       │ confidence (float)│       │ retrieved_at      │
+└────────┬────────┘       │ reasoning (text) │       └────────────────────┘
+         │                   └──────────────────┘
+         │       ┌──────────────────┐      parent_id is self-referential:
+         │       │    verdicts      │      groups link to their parent group,
+         │       │──────────────────│      leaves link to their parent group,
+         └──────▶│ id (uuid) PK     │      top-level nodes have parent_id = NULL
                  │ claim_id (FK) UQ  │
                  │ verdict (enum)    │
                  │ confidence (float)│
+                 │ reasoning (text)  │
                  │ reasoning_chain   │
                  │   (jsonb)         │
                  │ created_at        │
@@ -331,13 +435,15 @@ The top-level entity. One row per claim submitted (manually or via extraction).
 
 ### Table: `sub_claims`
 
-Atomic sub-claims decomposed from the parent claim by the LLM.
+Atomic sub-claims and group nodes decomposed from the parent claim by the LLM. Forms a tree structure via self-referential `parent_id`.
 
 | Column | Type | Constraints | Description |
 |--------|------|-------------|-------------|
 | `id` | `UUID` | PK, default uuid4 | Unique identifier |
 | `claim_id` | `UUID` | FK → claims.id, NOT NULL | Parent claim |
-| `text` | `TEXT` | NOT NULL | The sub-claim text |
+| `parent_id` | `UUID` | FK → sub_claims.id, nullable | Parent group node (NULL for top-level nodes) |
+| `is_leaf` | `BOOLEAN` | NOT NULL, default true | Leaf (researched+judged) vs group (synthesized from children) |
+| `text` | `TEXT` | NOT NULL | Leaf: verifiable assertion. Group: descriptive label |
 | `verdict` | `ENUM('true','false','partially_true','unverifiable')` | nullable | LLM's verdict on this sub-claim |
 | `confidence` | `FLOAT` | nullable | 0.0 to 1.0 confidence score |
 | `reasoning` | `TEXT` | nullable | LLM's explanation of the verdict |
@@ -345,6 +451,7 @@ Atomic sub-claims decomposed from the parent claim by the LLM.
 **Relationships:**
 - Belongs to one `claim`
 - Has many `evidence` (cascade delete)
+- Self-referential: has optional `parent` (group node) and many `children`
 
 ### Table: `evidence`
 
@@ -373,6 +480,7 @@ The overall verdict for a claim, produced by the synthesize step.
 | `claim_id` | `UUID` | FK → claims.id, UNIQUE, NOT NULL | Parent claim (one verdict per claim) |
 | `verdict` | `ENUM('true','mostly_true','mixed','mostly_false','false','unverifiable')` | NOT NULL | Overall verdict |
 | `confidence` | `FLOAT` | NOT NULL | 0.0 to 1.0 confidence score |
+| `reasoning` | `TEXT` | nullable | Top-level synthesis reasoning explaining the verdict |
 | `reasoning_chain` | `JSONB` | nullable | Array of reasoning strings from sub-claim judgments |
 | `created_at` | `TIMESTAMPTZ` | default now() | When the verdict was produced |
 
@@ -432,6 +540,7 @@ def get_llm(temperature=0.1):           # Instruct — fast, structured
         base_url=f"{LLAMA_URL}/v1",     # :3101
         model="Qwen3-VL-30B-A3B-Instruct",
         temperature=temperature,
+        max_tokens=2048,
     )
 
 def get_reasoning_llm(temperature=0.2):  # Thinking — slower, better reasoning
@@ -439,8 +548,11 @@ def get_reasoning_llm(temperature=0.2):  # Thinking — slower, better reasoning
         base_url=f"{LLAMA_REASONING_URL}/v1",  # :3102
         model="Qwen3-VL-30B-A3B-Thinking",
         temperature=temperature,
+        max_tokens=4096,
     )
 ```
+
+`max_tokens` is set explicitly to prevent llama.cpp's default `n_predict` from cutting off LLM output mid-JSON. The reasoning model gets a higher limit (4096) because it produces `<think>` blocks before the actual answer.
 
 ### Prompt Design
 
@@ -450,11 +562,12 @@ All prompts live in `src/prompts/verification.py` with extensive inline document
 - Example inputs and outputs
 - Design constraints (e.g., "Do NOT use your own knowledge")
 
-Four prompt pairs (system + user):
-1. `DECOMPOSE_SYSTEM` / `DECOMPOSE_USER` — break claims into sub-claims
-2. `RESEARCH_SYSTEM` / `RESEARCH_USER` — guide the research agent
+Four prompt pairs (system + user), plus group synthesis:
+1. `DECOMPOSE_SYSTEM` / `DECOMPOSE_USER` — break claims into a tree of sub-claims (groups + leaves)
+2. `RESEARCH_SYSTEM` / `RESEARCH_USER` — guide the research agent (includes source quality rules)
 3. `JUDGE_SYSTEM` / `JUDGE_USER` — evaluate evidence for a sub-claim
-4. `SYNTHESIZE_SYSTEM` / `SYNTHESIZE_USER` — combine sub-verdicts
+4. `SYNTHESIZE_SYSTEM` / `SYNTHESIZE_USER` — combine sub-verdicts (importance-weighted)
+5. `GROUP_SYNTHESIZE_SYSTEM` / `GROUP_SYNTHESIZE_USER` — synthesize intermediate group verdicts
 
 ---
 
@@ -483,8 +596,8 @@ The app uses a lifespan context manager for startup/shutdown:
 |--------|---------|------------|
 | `ClaimSubmit` | POST request body | `text` (required, non-empty), `source` (optional URL), `source_name` (optional) |
 | `ClaimResponse` | POST response | `id`, `text`, `status`, `created_at` |
-| `SubClaimResponse` | Sub-claim in verdict | `text`, `verdict`, `confidence`, `reasoning`, `evidence_count` |
-| `VerdictResponse` | Full claim detail | All claim fields + `verdict`, `confidence`, `sub_claims[]` |
+| `SubClaimResponse` | Sub-claim in verdict | `text`, `verdict`, `confidence`, `reasoning`, `evidence_count`, `children[]` (recursive) |
+| `VerdictResponse` | Full claim detail | All claim fields + `verdict`, `confidence`, `reasoning`, `sub_claims[]` (tree) |
 | `ClaimListResponse` | Paginated list | `claims[]`, `total`, `limit`, `offset` |
 
 ### Claim Lifecycle via API
@@ -532,10 +645,13 @@ spin-cycle-dev-adminer           :4502  ← Postgres web UI (Dracula theme)
 
 ### External Services
 
-- `joi:3101` — LLM chat/vision API (llama.cpp, via Tailscale)
+- `joi:3101` — LLM instruct API (llama.cpp, via Tailscale)
 - `joi:3102` — LLM thinking/reasoning API (llama.cpp, via Tailscale)
 - `joi:3103` — LLM embeddings API (llama.cpp, via Tailscale)
+- SearXNG — self-hosted meta-search (configured via `SEARXNG_URL`)
 - DuckDuckGo — web search (no API key)
+- Serper — Google search API (requires `SERPER_API_KEY`)
+- Brave Search — web search API (requires `BRAVE_API_KEY`)
 - Wikipedia API — factual lookups (no API key)
 - NewsAPI — news search (requires key, optional)
 
@@ -685,17 +801,19 @@ Config: `~/workspace/monitor/promtail/promtail.yml`
 | Component | Status | Details |
 |-----------|--------|---------|
 | Docker infrastructure | **Done** | 7 containers, health checks, volume persistence |
-| PostgreSQL schema | **Done** | 4 tables: claims, sub_claims, evidence, verdicts |
+| PostgreSQL schema | **Done** | 4 tables: claims, sub_claims (with tree structure), evidence, verdicts |
 | FastAPI API | **Done** | POST/GET claims, health check, lifespan management |
-| Temporal workflow | **Done** | VerifyClaimWorkflow with 6 activities (including create_claim), retry policies |
+| Temporal workflow | **Done** | VerifyClaimWorkflow with 7 activities (including create_claim + synthesize_group), retry policies |
 | Temporal worker | **Done** | Registers workflow + activities, structured logging configured |
-| `decompose_claim` | **Done** | LLM decomposes claims into sub-claims |
-| `research_subclaim` | **Done** | LangGraph ReAct agent with DuckDuckGo + Wikipedia |
+| `decompose_claim` | **Done** | LLM decomposes claims into **tree structure** (groups + leaves) |
+| `research_subclaim` | **Done** | LangGraph ReAct agent with SearXNG + DuckDuckGo + Serper + Brave + Wikipedia + page_fetcher |
 | `judge_subclaim` | **Done** | LLM evaluates evidence, returns structured verdict |
-| `synthesize_verdict` | **Done** | LLM combines sub-verdicts into overall verdict |
-| `store_result` | **Done** | Writes all results to Postgres |
-| Prompts | **Done** | All 4 prompt pairs documented in `src/prompts/verification.py` |
-| LLM connectivity | **Done** | Dual-model: instruct (:3101) + thinking (:3102) on joi |
+| `synthesize_group` | **Done** | LLM synthesizes intermediate group verdicts (importance-weighted) |
+| `synthesize_verdict` | **Done** | LLM combines top-level results into overall verdict (importance-weighted) |
+| `store_result` | **Done** | Writes full tree structure to Postgres (parent_id, is_leaf) |
+| Source quality filtering | **Done** | Domain blocklist (~40 domains) filters all search results + page fetches |
+| Prompts | **Done** | 5 prompt pairs documented in `src/prompts/verification.py` |
+| LLM connectivity | **Done** | Dual-model: instruct (:3101, max_tokens=2048) + thinking (:3102, max_tokens=4096) on joi |
 | Logging | **Done** | Structured JSON logging via `src/utils/logging.py`, Promtail → Loki → Grafana |
 | Tests | **Done** | Graph compilation, health endpoint, schema validation |
 
@@ -705,13 +823,11 @@ See [ROADMAP.md](ROADMAP.md) for the full prioritised improvement plan. Key next
 
 | Component | Status | Details |
 |-----------|--------|--------|
-| Serper (Google search) tool | **Next** | Biggest research quality win. SERPER_API_KEY in .env, needs `src/tools/serper.py` |
 | Alembic migrations | **Next** | Unblocks all future schema changes. Dependency installed, no init |
-| Source credibility scoring | **Planned** | Tier system for evidence sources (Reuters > blog) |
+| Source credibility scoring | **Planned** | Tiered scoring (Reuters > blog) — basic domain filtering already done |
 | Calibration test suite | **Planned** | 100+ known claims, measure accuracy and confidence calibration |
 | RSS feed monitoring | **Planned** | `source_feeds` + `articles` tables, Temporal cron workflow |
 | Claim extraction pipeline | **Planned** | ExtractClaimsWorkflow, LLM reads articles → extracts claims |
-| Parallel sub-claim processing | **Planned** | Process sub-claims concurrently instead of sequentially |
 | LangFuse integration | **Planned** | Self-hosted LLM observability |
 
 ---
@@ -761,7 +877,7 @@ docker logs -f spin-cycle-dev-worker
 
 # With LOG_FORMAT=pretty (default in dev), output looks like:
 # I [WORKER    ] starting: Connecting to Temporal | temporal_host=spin-cycle-dev-temporal:7233 task_queue=spin-cycle-verify
-# I [WORKER    ] ready: Worker listening | task_queue=spin-cycle-verify activity_count=6 workflow_count=1
+# I [WORKER    ] ready: Worker listening | task_queue=spin-cycle-verify activity_count=7 workflow_count=1
 # I [CREATE    ] start: Creating claim record | claim=The Great Wall of China is visible from ...
 # I [DECOMPOSE ] start: Decomposing claim into sub-claims | claim=The Great Wall of China is visible from ...
 # I [DECOMPOSE ] done: Claim decomposed | num_sub_claims=1
@@ -843,14 +959,19 @@ spin-cycle/
 │   │       └── claims.py          # POST + GET claims
 │   │
 │   ├── agent/                      # LangGraph agents
-│   │   ├── research.py             # ReAct research agent (DuckDuckGo + Wikipedia)
+│   │   ├── research.py             # ReAct research agent (multi-source search)
 │   │   ├── graph.py                # Standalone verification graph (stubbed)
 │   │   ├── nodes.py                # Graph node functions (stubbed)
 │   │   └── state.py                # VerificationState TypedDict
 │   │
 │   ├── tools/                      # LangChain tools for the agent
+│   │   ├── source_filter.py        # Domain blocklist — filters junk sources from all tools
+│   │   ├── searxng.py              # SearXNG meta-search (self-hosted)
+│   │   ├── serper.py               # Serper (Google Search API)
+│   │   ├── brave.py                # Brave Search API
 │   │   ├── web_search.py           # DuckDuckGo search wrapper
 │   │   ├── wikipedia.py            # Wikipedia API with @tool decorator
+│   │   ├── page_fetcher.py         # URL → text extraction (respects blocklist)
 │   │   └── news_api.py             # NewsAPI client (requires key)
 │   │
 │   ├── prompts/                    # All LLM prompts with documentation
@@ -860,7 +981,7 @@ spin-cycle/
 │   │   └── verify.py               # VerifyClaimWorkflow
 │   │
 │   ├── activities/                 # Temporal activity implementations
-│   │   └── verify_activities.py    # All 6 verification activities (including create_claim)
+│   │   └── verify_activities.py    # All 7 verification activities (including create_claim + synthesize_group)
 │   │
 │   ├── db/                         # Database layer
 │   │   ├── models.py               # SQLAlchemy models (Claim, SubClaim, Evidence, Verdict)

@@ -77,15 +77,34 @@ Verdict scale (6 levels):
 
 DECOMPOSE_SYSTEM = """\
 You are a fact-checker's assistant. Your job is to break down complex claims \
-into simple, independently verifiable sub-claims.
+into a TREE of simple, independently verifiable sub-claims.
 
 Rules:
-- Each sub-claim must be a single factual assertion
-- Each sub-claim must be verifiable on its own (without needing the others)
-- Each sub-claim must be specific (include numbers, dates, names when present)
+- Each LEAF sub-claim must be a single factual assertion
+- Each leaf must be verifiable on its own (without needing the others)
+- Each leaf must be specific (include numbers, dates, names when present)
 - Do NOT include opinions, predictions, or subjective statements
 - Do NOT rephrase the claim — preserve the original wording where possible
-- If the claim is already atomic (a single fact), return it as-is in the array
+- If the claim is already atomic (a single fact), return it as a single leaf
+
+TREE STRUCTURE:
+Group RELATED sub-claims together under a parent node. Each parent node \
+has a label describing the aspect it covers, and children that are either \
+leaf claims (to be researched) or further groups.
+
+Why a tree? Because related sub-claims should be evaluated together. \
+If two sub-claims are about "promises made by politicians", their \
+individual verdicts should be synthesized into an intermediate verdict \
+before being combined with other unrelated sub-claims.
+
+Structure rules:
+- A LEAF is: {"text": "verifiable assertion"}
+- A GROUP is: {"label": "aspect name", "children": [...]}
+- The root is always an array of top-level items (leaves or groups)
+- Groups can have 1+ children — even a single child benefits from the \
+intermediate synthesis that adds contextual framing before passing upstream
+- Aim for 2-4 top-level items. Use groups when related claims cluster together.
+- Maximum depth: 2 levels (root → group → leaves). Do NOT nest groups.
 
 HYPERBOLE AND EXAGGERATION:
 When a claim uses obviously exaggerated or hyperbolic language ("a million \
@@ -94,28 +113,38 @@ you MUST split it into:
   1. The CORE factual assertion (what the person is really claiming)
   2. The SPECIFIC quantitative/superlative claim (the exact exaggerated part)
 
-Example: "Trump was mentioned in the Epstein files a million times"
-→ ["Trump is mentioned in the Epstein files", \
-   "The number of times Trump is mentioned in the Epstein files is \
-approximately one million"]
+EXAMPLE 1 — Simple claim (no groups needed):
+"NASA landed on the moon 6 times"
+→ [{"text": "NASA landed on the moon 6 times"}]
 
-Example: "NASA wasted literally billions on a rocket that never flew"
-→ ["NASA spent billions of dollars on a rocket", \
-   "The rocket in question never flew"]
+EXAMPLE 2 — Complex claim with related sub-claims:
+"Fort Knox gold has not been audited despite promises by Trump and Musk"
+→ [
+    {"text": "The gold in Fort Knox has not been audited recently"},
+    {"label": "Audit promises", "children": [
+      {"text": "Donald Trump promised to audit Fort Knox"},
+      {"text": "Elon Musk or DOGE promised to audit Fort Knox"}
+    ]}
+  ]
 
-This ensures the factual core gets a fair verdict even when the specific \
-language is exaggerated.
+EXAMPLE 3 — Hyperbolic claim:
+"Trump was mentioned in the Epstein files a million times"
+→ [
+    {"text": "Trump is mentioned in the Epstein files"},
+    {"text": "Trump is mentioned approximately one million times in the \
+Epstein files"}
+  ]
 
-Return ONLY a JSON array of strings. No markdown, no explanation, no wrapping.\
+Return ONLY the JSON array. No markdown, no explanation, no wrapping.\
 """
 
 DECOMPOSE_USER = """\
-Break this claim into independently verifiable sub-claims.
+Break this claim into a tree of independently verifiable sub-claims.
 
 Claim: {claim_text}
 
-Return a JSON array of strings. Example:
-["sub-claim 1", "sub-claim 2"]
+Return a JSON array of leaves and groups. Leaves: {{"text": "..."}}. \
+Groups: {{"label": "...", "children": [...]}}.
 
 /no_think\
 """
@@ -155,13 +184,26 @@ factual claim. You have access to search tools and a page reader.
 Your goal: find 2-5 pieces of evidence from PRIMARY ORIGINAL SOURCES that \
 either SUPPORT or CONTRADICT the claim. Quality over quantity.
 
-Source priority (most to least valuable):
+ACCEPTABLE sources (use ONLY these):
 1. Official documents, government records, court filings, legislation
 2. Press releases, official statements from named organisations
-3. Major news outlets reporting firsthand (Reuters, AP, BBC, etc.)
+3. Major news outlets reporting firsthand (Reuters, AP, BBC, NPR, \
+NY Times, Washington Post, The Guardian, Al Jazeera, CNBC, etc.)
 4. Academic papers, scientific journals, published research
-5. Wikipedia for established background facts
-6. Other published sources with clear attribution
+5. Think tanks and policy institutes (Brookings, CSIS, Heritage, RAND, etc.)
+6. Wikipedia for established background facts
+7. Official data sources (USAFacts, World Bank, SIPRI, BLS, etc.)
+
+NEVER cite these — they are NOT credible sources:
+- Reddit, Quora, Stack Exchange, or any forum/comment section
+- Social media (Twitter/X, Facebook, Instagram, TikTok)
+- YouTube videos or video transcripts
+- Medium, Substack, or personal blogs
+- Content farms (eHow, WikiHow, Answers.com)
+- Other fact-check sites (Snopes, PolitiFact) — we verify independently
+
+If a search result points to Reddit, a forum, or social media, SKIP IT \
+and look for the same information from a reputable publication instead.
 
 Do NOT rely on third-party fact-check sites (Snopes, PolitiFact, etc.). \
 We are building independent verification — find the PRIMARY sources yourself.
@@ -352,13 +394,39 @@ You are an impartial fact-checker. You have received verdicts for each \
 sub-claim that makes up a larger claim. Your job is to combine them into \
 a single overall verdict.
 
-Rules:
-- If ALL sub-claims are true → "true"
-- If MOST are true with minor issues → "mostly_true"
-- If roughly half true and half false → "mixed"
-- If MOST are false → "mostly_false"
-- If ALL sub-claims are false → "false"
-- If most evidence is insufficient → "unverifiable"
+CRITICAL — WEIGH BY IMPORTANCE, NOT BY COUNT:
+Do NOT simply count true vs false sub-claims. Instead:
+
+1. Identify the CORE ASSERTION — what is the person fundamentally claiming?
+2. Identify SUPPORTING DETAILS — who, when, how much, attribution specifics.
+3. The verdict follows the CORE ASSERTION, not the count.
+
+A wrong supporting detail does NOT flip a true core assertion. A wrong \
+core assertion is NOT saved by true supporting details.
+
+Ask yourself: "Would a reasonable person say this claim is basically right \
+or basically wrong?" That determines the verdict.
+
+Example: "Fort Knox gold hasn't been audited despite promises by Trump \
+and Elon Musk"
+- Core assertion: gold hasn't been audited → TRUE ← this drives the verdict
+- Supporting: Trump promised → TRUE
+- Supporting: Musk promised → FALSE (Trump said Musk would, not Musk himself)
+→ Verdict: "mostly_true" — the substance is correct. The Musk attribution \
+is a minor inaccuracy that belongs in the nuance, not the verdict.
+
+Another example: "NASA landed on Mars in 2019"
+- Core: NASA landed on Mars → FALSE ← this drives the verdict
+- Detail: year is 2019 → irrelevant since core is false
+→ Verdict: "false" regardless of details.
+
+Verdict scale:
+- "true" — Core assertion AND key details are well-supported
+- "mostly_true" — Core assertion is right, minor details wrong or imprecise
+- "mixed" — Core assertion is genuinely split (not just detail errors)
+- "mostly_false" — Core assertion is wrong, even if some details are right
+- "false" — Core assertion AND details are clearly contradicted
+- "unverifiable" — Not enough evidence to judge either way
 
 The overall confidence should reflect the weakest link — if one sub-claim \
 is very uncertain, your overall confidence should be lower.
@@ -402,7 +470,7 @@ Original claim: {claim_text}
 Sub-claim verdicts:
 {sub_verdicts_text}
 
-Return a JSON object with "verdict", "confidence", and "reasoning".
+Return a JSON object with "verdict", "confidence", "reasoning", and "nuance".
 
 /no_think\
 """
@@ -413,3 +481,57 @@ Return a JSON object with "verdict", "confidence", and "reasoning".
 #   $48M, a human would say "mostly true" — the core claim is right, the
 #   details are slightly off. An LLM can make this nuanced judgment better
 #   than a simple "2 of 3 sub-claims are true → 66% → mostly_true".
+
+
+# =============================================================================
+# STEP 4b: GROUP SYNTHESIZE (intermediate tree nodes)
+# =============================================================================
+
+GROUP_SYNTHESIZE_SYSTEM = """\
+You are an impartial fact-checker. You are synthesizing verdicts for a GROUP \
+of related sub-claims that belong together under the aspect: "{group_label}".
+
+This is an INTERMEDIATE synthesis — you are combining related sub-claim \
+verdicts into a single group-level verdict. This group verdict will then \
+be combined with other group/leaf verdicts in the final synthesis.
+
+WEIGH BY IMPORTANCE within this group:
+Do NOT simply count true vs false children. Identify which children carry \
+the most weight for this aspect and let those drive the group verdict.
+
+Verdict scale for groups (sub-claim level):
+- "true" — The core of this aspect is well-supported
+- "false" — The core of this aspect is contradicted
+- "partially_true" — The core is right but details are off, or it's mixed
+- "unverifiable" — Not enough evidence for this aspect
+
+The confidence should reflect the weakest link in the group.
+
+NUANCE:
+If the children have important nuance notes, synthesize them into a \
+group-level nuance that captures the combined context for this aspect.
+
+Return a JSON object:
+{{
+  "verdict": "true|false|partially_true|unverifiable",
+  "confidence": 0.0 to 1.0,
+  "reasoning": "How the child verdicts combine for this aspect",
+  "nuance": "Group-level context note. Null if not needed."
+}}
+
+Return ONLY the JSON object. No markdown, no explanation, no wrapping.\
+"""
+
+GROUP_SYNTHESIZE_USER = """\
+Synthesize these related sub-claim verdicts for the "{group_label}" aspect \
+of the original claim.
+
+Original claim: {claim_text}
+
+Sub-claim verdicts for this group:
+{sub_verdicts_text}
+
+Return a JSON object with "verdict", "confidence", "reasoning", and "nuance".
+
+/no_think\
+"""

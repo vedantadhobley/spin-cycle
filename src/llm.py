@@ -63,6 +63,7 @@ def get_llm(temperature: float = 0.1) -> ChatOpenAI:
         api_key="not-needed",
         model=INSTRUCT_MODEL,
         temperature=temperature,
+        max_tokens=2048,
     )
     log.debug(logger, MODULE, "instruct_init", "Instruct LLM client created",
               base_url=LLAMA_URL, model=INSTRUCT_MODEL, temperature=temperature)
@@ -87,6 +88,7 @@ def get_reasoning_llm(temperature: float = 0.2) -> ChatOpenAI:
         api_key="not-needed",
         model=REASONING_MODEL,
         temperature=temperature,
+        max_tokens=4096,
     )
     log.debug(logger, MODULE, "reasoning_init", "Reasoning LLM client created",
               base_url=LLAMA_REASONING_URL, model=REASONING_MODEL, temperature=temperature)

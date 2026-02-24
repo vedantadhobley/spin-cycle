@@ -22,7 +22,7 @@ async def search_news(query: str, max_results: int = 5) -> list[dict]:
         return []
 
     log.debug(logger, MODULE, "newsapi_start", "NewsAPI search starting",
-              query=query[:80], max_results=max_results)
+              query=query, max_results=max_results)
 
     async with httpx.AsyncClient() as client:
         try:
@@ -51,11 +51,11 @@ async def search_news(query: str, max_results: int = 5) -> list[dict]:
                 })
 
             log.debug(logger, MODULE, "newsapi_done", "NewsAPI search complete",
-                      query=query[:50], result_count=len(results))
+                      query=query, result_count=len(results))
             return results
 
         except Exception as e:
             log.warning(logger, MODULE, "newsapi_failed", "NewsAPI search failed",
                         error=str(e), error_type=type(e).__name__,
-                        query=query[:80])
+                        query=query)
             return []

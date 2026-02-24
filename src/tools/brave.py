@@ -14,6 +14,7 @@ import os
 import httpx
 from langchain_core.tools import tool
 
+from src.tools.source_filter import filter_results
 from src.utils.logging import log, get_logger
 
 MODULE = "tools"
@@ -37,7 +38,7 @@ async def search_brave(query: str, max_results: int = 5) -> list[dict]:
         return []
 
     log.debug(logger, MODULE, "brave_start", "Brave search starting",
-              query=query[:80], max_results=max_results)
+              query=query, max_results=max_results)
 
     async with httpx.AsyncClient() as client:
         try:
@@ -60,21 +61,23 @@ async def search_brave(query: str, max_results: int = 5) -> list[dict]:
             data = resp.json()
 
             results = []
-            for item in data.get("web", {}).get("results", [])[:max_results]:
+            for item in data.get("web", {}).get("results", [])[:max_results + 5]:
                 results.append({
                     "title": item.get("title", ""),
                     "snippet": item.get("description", ""),
                     "url": item.get("url", ""),
                 })
 
+            results = filter_results(results)[:max_results]
+
             log.debug(logger, MODULE, "brave_done", "Brave search complete",
-                      query=query[:50], result_count=len(results))
+                      query=query, result_count=len(results))
             return results
 
         except Exception as e:
             log.warning(logger, MODULE, "brave_failed", "Brave search failed",
                         error=str(e), error_type=type(e).__name__,
-                        query=query[:80])
+                        query=query)
             return []
 
 
@@ -99,7 +102,7 @@ def get_brave_tool():
             log.warning(logger, MODULE, "brave_tool_failed",
                         "Brave search tool failed",
                         error=str(e), error_type=type(e).__name__,
-                        query=query[:80])
+                        query=query)
             return "Brave search failed. Try another search tool."
 
         if not results:

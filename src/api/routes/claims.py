@@ -22,6 +22,42 @@ TASK_QUEUE = "spin-cycle-verify"
 router = APIRouter()
 
 
+def _build_sub_claim_tree(sub_claims) -> list[SubClaimResponse]:
+    """Build a nested tree of SubClaimResponse from flat DB rows with parent_id.
+
+    DB stores a flat list with parent_id references. This function
+    reconstructs the tree by:
+      1. Indexing all sub-claims by ID
+      2. Finding root nodes (parent_id is None)
+      3. Recursively attaching children
+    """
+    by_id = {}
+    roots = []
+
+    # Index all sub-claims
+    for sc in sub_claims:
+        node = SubClaimResponse(
+            text=sc.text,
+            is_leaf=sc.is_leaf,
+            verdict=sc.verdict,
+            confidence=sc.confidence,
+            reasoning=sc.reasoning,
+            nuance=sc.nuance,
+            evidence_count=len(sc.evidence) if sc.evidence else 0,
+            children=[],
+        )
+        by_id[sc.id] = (node, sc.parent_id)
+
+    # Build tree
+    for sc_id, (node, parent_id) in by_id.items():
+        if parent_id is None:
+            roots.append(node)
+        elif parent_id in by_id:
+            by_id[parent_id][0].children.append(node)
+
+    return roots
+
+
 @router.post("", response_model=ClaimResponse, status_code=201)
 async def submit_claim(
     body: ClaimSubmit,
@@ -41,7 +77,7 @@ async def submit_claim(
 
     claim_id = str(claim.id)
     log.info(logger, MODULE, "submitted", "Claim submitted",
-             claim_id=claim_id, text=body.text[:80])
+             claim_id=claim_id, text=body.text)
 
     # Kick off Temporal workflow
     temporal = request.app.state.temporal
@@ -85,17 +121,7 @@ async def get_claim(
     if not claim:
         raise HTTPException(status_code=404, detail="Claim not found")
 
-    sub_claim_responses = [
-        SubClaimResponse(
-            text=sc.text,
-            verdict=sc.verdict,
-            confidence=sc.confidence,
-            reasoning=sc.reasoning,
-            nuance=sc.nuance,
-            evidence_count=len(sc.evidence),
-        )
-        for sc in claim.sub_claims
-    ]
+    sub_claim_responses = _build_sub_claim_tree(claim.sub_claims)
 
     return VerdictResponse(
         id=str(claim.id),
@@ -105,6 +131,7 @@ async def get_claim(
         source_name=claim.source_name,
         verdict=claim.verdict.verdict if claim.verdict else None,
         confidence=claim.verdict.confidence if claim.verdict else None,
+        reasoning=claim.verdict.reasoning if claim.verdict else None,
         nuance=claim.verdict.nuance if claim.verdict else None,
         sub_claims=sub_claim_responses,
         created_at=claim.created_at,
@@ -148,18 +175,9 @@ async def list_claims(
                 source_name=c.source_name,
                 verdict=c.verdict.verdict if c.verdict else None,
                 confidence=c.verdict.confidence if c.verdict else None,
+                reasoning=c.verdict.reasoning if c.verdict else None,
                 nuance=c.verdict.nuance if c.verdict else None,
-                sub_claims=[
-                    SubClaimResponse(
-                        text=sc.text,
-                        verdict=sc.verdict,
-                        confidence=sc.confidence,
-                        reasoning=sc.reasoning,
-                        nuance=sc.nuance,
-                        evidence_count=len(sc.evidence),
-                    )
-                    for sc in c.sub_claims
-                ],
+                sub_claims=_build_sub_claim_tree(c.sub_claims),
                 created_at=c.created_at,
                 updated_at=c.updated_at,
             )

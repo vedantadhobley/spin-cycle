@@ -27,6 +27,7 @@ def get_llm() -> ChatOpenAI:
         api_key="not-needed",
         model="Qwen3-VL-30B-A3B-Instruct",
         temperature=0.1,
+        max_tokens=2048,
     )
 
 
@@ -45,7 +46,7 @@ Return ONLY a JSON array. /no_think"""
 
     # TODO: Parse JSON response into sub_claims
     log.info(logger, MODULE, "decompose", "Legacy decompose node called",
-             claim=state["claim_text"], response=response.content[:200])
+             claim=state["claim_text"], response=response.content)
 
     return {
         "sub_claims": [],  # TODO: parse

@@ -12,6 +12,7 @@ import os
 import httpx
 from langchain_core.tools import tool
 
+from src.tools.source_filter import filter_results
 from src.utils.logging import log, get_logger
 
 MODULE = "tools"
@@ -35,7 +36,7 @@ async def search_serper(query: str, max_results: int = 5) -> list[dict]:
         return []
 
     log.debug(logger, MODULE, "serper_start", "Serper search starting",
-              query=query[:80], max_results=max_results)
+              query=query, max_results=max_results)
 
     async with httpx.AsyncClient() as client:
         try:
@@ -54,7 +55,7 @@ async def search_serper(query: str, max_results: int = 5) -> list[dict]:
             results = []
 
             # Organic results (main search results)
-            for item in data.get("organic", [])[:max_results]:
+            for item in data.get("organic", [])[:max_results + 5]:
                 results.append({
                     "title": item.get("title", ""),
                     "snippet": item.get("snippet", ""),
@@ -70,14 +71,16 @@ async def search_serper(query: str, max_results: int = 5) -> list[dict]:
                     "url": kg.get("descriptionLink") or kg.get("website") or "",
                 })
 
+            results = filter_results(results)[:max_results]
+
             log.debug(logger, MODULE, "serper_done", "Serper search complete",
-                      query=query[:50], result_count=len(results))
+                      query=query, result_count=len(results))
             return results
 
         except Exception as e:
             log.warning(logger, MODULE, "serper_failed", "Serper search failed",
                         error=str(e), error_type=type(e).__name__,
-                        query=query[:80])
+                        query=query)
             return []
 
 
@@ -102,7 +105,7 @@ def get_serper_tool():
             log.warning(logger, MODULE, "serper_tool_failed",
                         "Serper search tool failed",
                         error=str(e), error_type=type(e).__name__,
-                        query=query[:80])
+                        query=query)
             return "Google search failed. Try another search tool."
 
         if not results:

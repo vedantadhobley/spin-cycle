@@ -36,7 +36,9 @@ class SubClaim(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     claim_id = Column(UUID(as_uuid=True), ForeignKey("claims.id"), nullable=False)
-    text = Column(Text, nullable=False)
+    parent_id = Column(UUID(as_uuid=True), ForeignKey("sub_claims.id"), nullable=True)
+    is_leaf = Column(Boolean, default=True, nullable=False)
+    text = Column(Text, nullable=False)  # leaf: verifiable assertion, group: label
     verdict = Column(
         Enum("true", "false", "partially_true", "unverifiable", name="sub_claim_verdict"),
         nullable=True,
@@ -46,6 +48,7 @@ class SubClaim(Base):
     nuance = Column(Text, nullable=True)
 
     claim = relationship("Claim", back_populates="sub_claims")
+    parent = relationship("SubClaim", remote_side="SubClaim.id", backref="children")
     evidence = relationship("Evidence", back_populates="sub_claim", cascade="all, delete-orphan")
 
 
@@ -76,6 +79,7 @@ class Verdict(Base):
         nullable=False,
     )
     confidence = Column(Float, nullable=False)
+    reasoning = Column(Text, nullable=True)
     reasoning_chain = Column(JSONB, nullable=True)
     nuance = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

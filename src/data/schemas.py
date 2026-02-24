@@ -28,13 +28,19 @@ class ClaimResponse(BaseModel):
 
 
 class SubClaimResponse(BaseModel):
-    """A verified sub-claim in the response."""
-    text: str
+    """A verified sub-claim (leaf) or group node in the response."""
+    text: str  # leaf: verifiable assertion, group: label
+    is_leaf: bool = True
     verdict: Optional[Literal["true", "false", "partially_true", "unverifiable"]] = None
     confidence: Optional[float] = None
     reasoning: Optional[str] = None
     nuance: Optional[str] = None
     evidence_count: int = 0
+    children: list["SubClaimResponse"] = []
+
+
+# Pydantic v2 needs model_rebuild() for recursive (self-referential) models
+SubClaimResponse.model_rebuild()
 
 
 class VerdictResponse(BaseModel):
@@ -46,6 +52,7 @@ class VerdictResponse(BaseModel):
     source_name: Optional[str] = None
     verdict: Optional[Literal["true", "mostly_true", "mixed", "mostly_false", "false", "unverifiable"]] = None
     confidence: Optional[float] = None
+    reasoning: Optional[str] = None
     nuance: Optional[str] = None
     sub_claims: list[SubClaimResponse] = []
     created_at: datetime

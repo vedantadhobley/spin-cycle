@@ -68,20 +68,32 @@ curl -X POST http://localhost:4500/claims \
 
 ### 2. Verification Pipeline (Temporal workflow)
 
-The claim triggers `VerifyClaimWorkflow` — 6 activities run in sequence:
+The claim triggers `VerifyClaimWorkflow` — 7 activities orchestrated as a tree:
 
 ```
 create_claim          Creates DB record (skipped if called via API)
     ↓
-decompose_claim       LLM splits claim into atomic sub-claims
+decompose_claim       LLM splits claim into a tree of sub-claims
+    ↓                 (groups for related assertions, leaves for atomic facts)
     ↓
-research_subclaim     LangGraph ReAct agent searches DuckDuckGo + Wikipedia
-    ↓                 (autonomously decides what to search, loops until satisfied)
-judge_subclaim        LLM evaluates evidence — "Do NOT use your own knowledge"
+┌─── _process_node (recursive, parallel via asyncio.gather) ───┐
+│                                                           │
+│  LEAF NODE:                                               │
+│    research_subclaim   LangGraph ReAct agent searches     │
+│       ↓                SearXNG + DuckDuckGo + Serper +    │
+│       ↓                Brave + Wikipedia + page_fetcher   │
+│       ↓                (all filtered for source quality)  │
+│    judge_subclaim      LLM evaluates evidence             │
+│                                                           │
+│  GROUP NODE:                                              │
+│    → process children in parallel                         │
+│    → synthesize_group  LLM synthesizes children's verdicts│
+│                                                           │
+└───────────────────────────────────────────────────────┘
     ↓
-synthesize_verdict    LLM combines sub-verdicts into overall verdict
+synthesize_verdict    LLM combines top-level results (importance-weighted)
     ↓
-store_result          Writes everything to Postgres
+store_result          Writes tree structure + verdict to Postgres
 ```
 
 ### 3. Result
@@ -214,14 +226,15 @@ docker logs -f spin-cycle-dev-worker
 
 # With LOG_FORMAT=pretty (default in dev), you'll see:
 # I [WORKER    ] starting: Connecting to Temporal | temporal_host=... task_queue=spin-cycle-verify
-# I [WORKER    ] ready: Worker listening | task_queue=spin-cycle-verify activity_count=6
-# I [DECOMPOSE ] start: Decomposing claim into sub-claims | claim=The Great Wall of China...
-# I [DECOMPOSE ] done: Claim decomposed | num_sub_claims=1
-# I [RESEARCH  ] start: Starting research agent | sub_claim=The Great Wall of China...
-# I [RESEARCH  ] done: Research agent complete | evidence_count=3 agent_steps=8
-# I [JUDGE     ] done: Sub-claim judged | verdict=false confidence=0.95
-# I [SYNTHESIZE] done: Overall verdict synthesized | verdict=false confidence=0.95
-# I [STORE     ] done: Result stored in database | claim_id=... sub_claims=1
+# I [WORKER    ] ready: Worker listening | task_queue=spin-cycle-verify activity_count=7
+# I [DECOMPOSE ] done: Claim decomposed into tree | top_level_nodes=2
+# I [WORKFLOW  ] group_start: Processing group node | label=US Policy num_children=2
+# I [RESEARCH  ] start: Starting research agent | sub_claim=The US is increasing military spending
+# I [RESEARCH  ] done: Research agent complete | evidence_count=4 agent_steps=8
+# I [JUDGE     ] done: Sub-claim judged | verdict=true confidence=0.92
+# I [WORKFLOW  ] group_done: Group node synthesized | label=US Policy verdict=true
+# I [SYNTHESIZE] done: Overall verdict synthesized | verdict=mostly_false confidence=0.88
+# I [STORE     ] done: Result stored in database | claim_id=... sub_claims=6
 
 # With LOG_FORMAT=json (default in prod), output is JSON for Grafana Loki
 ```
@@ -237,7 +250,9 @@ docker logs -f spin-cycle-dev-worker
 | `LOG_FORMAT` | `json` (prod) / `pretty` (dev) | Log output format — `json` for Grafana Loki, `pretty` for terminal |
 | `LOG_LEVEL` | `INFO` | Log level — `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 | `NEWSAPI_KEY` | (empty) | NewsAPI key for news search evidence (optional) |
-| `SERPER_API_KEY` | (empty) | Serper key for Google search evidence (not yet implemented) |
+| `SERPER_API_KEY` | (empty) | Serper key for Google search evidence |
+| `BRAVE_API_KEY` | (empty) | Brave Search API key |
+| `SEARXNG_URL` | `http://searxng:8080` | SearXNG meta-search endpoint (self-hosted) |
 
 ## Port Allocation
 
@@ -254,9 +269,9 @@ Four tables in PostgreSQL, all with UUID primary keys:
 | Table | Purpose | Key Columns |
 |-------|---------|-------------|
 | `claims` | Top-level claims | text, source_url, status (pending→verified), timestamps |
-| `sub_claims` | Decomposed atomic claims | text, verdict, confidence, reasoning |
+| `sub_claims` | Decomposed sub-claim tree | text, parent_id (self-ref FK), is_leaf, verdict, confidence, reasoning |
 | `evidence` | Research results per sub-claim | source_type (web/wikipedia/news_api), content, URL |
-| `verdicts` | Overall claim verdict | verdict, confidence, reasoning_chain (JSONB) |
+| `verdicts` | Overall claim verdict | verdict, confidence, reasoning, reasoning_chain (JSONB) |
 
 Relationships: `claims` → has many `sub_claims` → has many `evidence`. `claims` → has one `verdict`.
 
@@ -286,11 +301,16 @@ spin-cycle/
 │   │       └── claims.py           # Claim CRUD
 │   │
 │   ├── agent/                      # LangGraph agents
-│   │   └── research.py             # ReAct agent (DuckDuckGo + Wikipedia)
+│   │   └── research.py             # ReAct agent (multi-source search)
 │   │
 │   ├── tools/                      # Evidence gathering tools
+│   │   ├── source_filter.py        # Domain blocklist — filters junk sources
+│   │   ├── searxng.py              # SearXNG meta-search (self-hosted)
+│   │   ├── serper.py               # Serper (Google Search API)
+│   │   ├── brave.py                # Brave Search API
 │   │   ├── web_search.py           # DuckDuckGo
 │   │   ├── wikipedia.py            # Wikipedia API
+│   │   ├── page_fetcher.py         # URL → text extraction
 │   │   └── news_api.py             # NewsAPI
 │   │
 │   ├── prompts/                    # LLM prompts (heavily documented)
@@ -300,7 +320,7 @@ spin-cycle/
 │   │   └── verify.py               # VerifyClaimWorkflow
 │   │
 │   ├── activities/
-│   │   └── verify_activities.py    # 6 Temporal activities (including create_claim)
+│   │   └── verify_activities.py    # 7 Temporal activities (including create_claim + synthesize_group)
 │   │
 │   ├── db/
 │   │   ├── models.py               # SQLAlchemy models
@@ -317,9 +337,10 @@ spin-cycle/
 
 ## What's Next
 
-1. **Serper (Google search) tool** — biggest research quality win, SERPER_API_KEY ready in .env
+1. **Alembic migrations** — proper database schema versioning (currently using raw SQL ALTER TABLE)
 2. **Extraction pipeline** — automated claim ingestion from RSS feeds via scheduled Temporal workflows
-3. **Alembic migrations** — proper database schema versioning
-4. **LangFuse** — self-hosted LLM observability for prompt debugging
+3. **Source credibility scoring** — tiered scoring system (Reuters > random blog) for evidence weighting
+4. **Calibration test suite** — benchmark against known claims to measure accuracy
+5. **LangFuse** — self-hosted LLM observability for prompt debugging
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full technical deep dive, including the extraction pipeline design, database schema details, and how LangChain/LangGraph/Temporal fit together.

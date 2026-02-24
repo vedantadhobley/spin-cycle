@@ -201,7 +201,7 @@ def extract_evidence(messages: list) -> list[dict]:
     return evidence
 
 
-async def research_claim(sub_claim: str, max_steps: int = 25, timeout_secs: int = 180) -> list[dict]:
+async def research_claim(sub_claim: str, max_steps: int = 25, timeout_secs: int = 240) -> list[dict]:
     """Run the research agent to gather evidence for a sub-claim.
 
     This is the main entry point called by the research_subclaim activity.
@@ -226,7 +226,7 @@ async def research_claim(sub_claim: str, max_steps: int = 25, timeout_secs: int 
     import asyncio
 
     log.info(logger, MODULE, "start", "Starting research agent",
-             sub_claim=sub_claim[:80])
+             sub_claim=sub_claim)
 
     try:
         agent = build_research_agent()
@@ -259,14 +259,14 @@ async def research_claim(sub_claim: str, max_steps: int = 25, timeout_secs: int 
             })
 
         log.info(logger, MODULE, "done", "Research agent complete",
-                 sub_claim=sub_claim[:50], evidence_count=len(evidence),
+                 sub_claim=sub_claim, evidence_count=len(evidence),
                  agent_steps=len(result["messages"]))
         return evidence
 
     except asyncio.TimeoutError:
         log.warning(logger, MODULE, "agent_timeout",
                     "Research agent timed out, falling back to direct search",
-                    timeout_secs=timeout_secs, sub_claim=sub_claim[:50])
+                    timeout_secs=timeout_secs, sub_claim=sub_claim)
         return await _research_fallback(sub_claim)
 
     except Exception as e:
@@ -280,7 +280,7 @@ async def research_claim(sub_claim: str, max_steps: int = 25, timeout_secs: int 
         log.warning(logger, MODULE, "agent_failed",
                     "Research agent failed, falling back to direct search",
                     error=str(e), error_type=type(e).__name__,
-                    sub_claim=sub_claim[:50])
+                    sub_claim=sub_claim)
         return await _research_fallback(sub_claim)
 
 
@@ -294,7 +294,7 @@ async def _research_fallback(sub_claim: str) -> list[dict]:
     Uses the best available search tool (SearXNG > Serper > Brave > DDG).
     """
     log.info(logger, MODULE, "fallback_start", "Running fallback direct search",
-             sub_claim=sub_claim[:50])
+             sub_claim=sub_claim)
     evidence = []
 
     # Try SearXNG first (self-hosted meta-search)
@@ -390,5 +390,5 @@ async def _research_fallback(sub_claim: str) -> list[dict]:
         evidence = evidence[:6]
 
     log.info(logger, MODULE, "fallback_done", "Fallback search complete",
-             sub_claim=sub_claim[:50], evidence_count=len(evidence))
+             sub_claim=sub_claim, evidence_count=len(evidence))
     return evidence

@@ -4,16 +4,22 @@ Where spin-cycle is, where it needs to go, and what each improvement actually do
 
 ---
 
-## What We Have (v0.1)
+## What We Have (v0.2)
 
-A working end-to-end claim verification pipeline:
+A working end-to-end claim verification pipeline with tree decomposition:
 - Manual claim submission via API
-- LLM decomposes claims into sub-claims
+- LLM decomposes claims into **hierarchical trees** (groups + leaves)
+- Leaves researched + judged **in parallel** via `asyncio.gather`
+- Groups get intermediate synthesis before final verdict
 - LangGraph research agent gathers evidence with dynamically loaded tools
+- **Source quality filtering** — domain blocklist (~40 domains) silently drops Reddit, Quora, social media, content farms from all search results
 - Thinking model evaluates evidence and renders verdicts
-- Results stored in Postgres with full reasoning chains
-- Temporal orchestrates everything with retries and durability
+- **Importance-weighted synthesis** — verdicts weighed by significance, not count
+- Results stored in Postgres with full tree structure (parent_id, is_leaf) and reasoning chains
+- Top-level synthesis reasoning exposed in API responses
+- Temporal orchestrates everything with retries and durability (7 activities, 1 workflow)
 - Production-grade structured logging (JSON for Loki, pretty for dev)
+- LLM max_tokens configured to prevent truncated output (2048 instruct, 4096 reasoning)
 
 **Search tools (env-var gated — set the key to enable):**
 - **SearXNG** (self-hosted meta-search, free, aggregates 70+ engines) — `SEARXNG_URL`
@@ -59,7 +65,9 @@ SearXNG is now the primary search tool, running self-hosted in the Docker stack.
 
 ### 1.3 — Source Credibility Scoring
 
-**Why:** Right now all sources are weighted equally. A Reuters article and a random blog post both count as "web" evidence. The judge prompt says "reliable sources count more" but the model has to infer credibility from the URL alone.
+**Why:** Right now sources are filtered (junk domains blocked) but all remaining sources are weighted equally. A Reuters article and a lesser-known outlet both count as "web" evidence. The judge prompt says "reliable sources count more" but the model has to infer credibility from the URL alone.
+
+**Status:** Partially done — domain blocklist filtering is implemented in `src/tools/source_filter.py`, wired into all search tools and the page fetcher. The RESEARCH_SYSTEM prompt explicitly lists acceptable and forbidden source types. What's missing is the **tiered scoring** system below.
 
 **What:** Add a source credibility tier system:
 
@@ -211,13 +219,18 @@ For this to be legitimate, people need to trust the verdicts. Trust comes from t
 
 **Effort:** Medium. Need a caching layer (Redis or just Postgres with TTL) and embedding similarity search.
 
-### 4.2 — Parallel Sub-Claim Processing
+### 4.2 — Parallel Sub-Claim Processing (DONE)
 
-**Why:** Right now sub-claims are processed sequentially. A claim with 3 sub-claims takes 3× as long as one with 1.
+**Status:** ✅ Implemented
 
-**What:** Research + judge all sub-claims in parallel. Temporal supports this natively — just replace the for-loop with parallel activity execution.
+Sub-claims are now processed in parallel using `asyncio.gather` within the Temporal workflow. The tree decomposition enables natural parallelism:
 
-**Effort:** Small. Temporal's `asyncio.gather` pattern. Maybe 20 lines of code. But check that joi can handle concurrent inference requests without degrading.
+- All leaf nodes within a group are researched + judged concurrently
+- All top-level nodes are processed in parallel
+- Group synthesis waits for children to complete, then runs
+- Temporal handles the per-activity retries and timeouts (research: 360s, judge: 120s, synthesis: 60s)
+
+Additionally, tree decomposition groups related sub-claims, enabling intermediate synthesis that produces more nuanced verdicts than flat list processing.
 
 ### 4.3 — LangFuse Observability
 
@@ -307,18 +320,17 @@ What to build next, in order of impact:
 | Priority | Item | Why |
 |----------|------|-----|
 | **1** | Alembic migrations | Unblocks all future schema changes |
-| **3** | Source credibility scoring | Better evidence → better verdicts |
-| **4** | Calibration test suite | Can't improve without measuring |
-| **5** | RSS feed monitoring | First step toward automated intake |
-| **6** | Claim extraction from articles | Enables fully automated pipeline |
-| **7** | Parallel sub-claim processing | Easy performance win |
-| **8** | Evidence caching | Reduces redundant work at scale |
-| **9** | LangFuse observability | Visibility into LLM performance |
-| **10** | Speaker profiles | Product differentiation |
-| **11** | Article highlighting UI | Core product experience |
-| **12** | Human review loop | Trust + quality assurance |
-| **13** | Public API | Distribution |
-| **14** | Speech transcripts | Expand beyond articles |
+| **2** | Source credibility scoring | Tiered weighting (basic filtering already done) |
+| **3** | Calibration test suite | Can't improve without measuring |
+| **4** | RSS feed monitoring | First step toward automated intake |
+| **5** | Claim extraction from articles | Enables fully automated pipeline |
+| **6** | Evidence caching | Reduces redundant work at scale |
+| **7** | LangFuse observability | Visibility into LLM performance |
+| **8** | Speaker profiles | Product differentiation |
+| **9** | Article highlighting UI | Core product experience |
+| **10** | Human review loop | Trust + quality assurance |
+| **11** | Public API | Distribution |
+| **12** | Speech transcripts | Expand beyond articles |
 
 ---
 

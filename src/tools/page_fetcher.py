@@ -12,6 +12,7 @@ import re
 import httpx
 from langchain_core.tools import tool
 
+from src.tools.source_filter import is_blocked
 from src.utils.logging import log, get_logger
 
 MODULE = "tools"
@@ -78,7 +79,7 @@ async def fetch_page(url: str) -> dict:
       - error: error message if fetch failed (None on success)
     """
     log.debug(logger, MODULE, "fetch_start", "Fetching page",
-              url=url[:120])
+              url=url)
 
     async with httpx.AsyncClient(
         follow_redirects=True,
@@ -117,7 +118,7 @@ async def fetch_page(url: str) -> dict:
                 text = text[:MAX_CONTENT_LENGTH] + "\n\n[... content truncated ...]"
 
             log.debug(logger, MODULE, "fetch_done", "Page fetched successfully",
-                      url=url[:80], title=title[:60],
+                      url=url, title=title,
                       content_length=len(text))
 
             return {
@@ -129,7 +130,7 @@ async def fetch_page(url: str) -> dict:
 
         except httpx.HTTPStatusError as e:
             log.warning(logger, MODULE, "fetch_http_error", "Page fetch HTTP error",
-                        url=url[:80], status_code=e.response.status_code)
+                        url=url, status_code=e.response.status_code)
             return {
                 "url": url,
                 "title": "",
@@ -139,7 +140,7 @@ async def fetch_page(url: str) -> dict:
 
         except Exception as e:
             log.warning(logger, MODULE, "fetch_failed", "Page fetch failed",
-                        url=url[:80], error=str(e),
+                        url=url, error=str(e),
                         error_type=type(e).__name__)
             return {
                 "url": url,
@@ -169,13 +170,16 @@ def get_page_fetcher_tool():
         if not url.startswith(("http://", "https://")):
             return "Invalid URL. Must start with http:// or https://"
 
+        if is_blocked(url):
+            return f"Blocked source: {url} is not a citable source (social media, forum, or content farm). Find a reputable publication instead."
+
         try:
             result = await fetch_page(url)
         except Exception as e:
             log.warning(logger, MODULE, "fetch_tool_failed",
                         "Page fetch tool failed",
                         error=str(e), error_type=type(e).__name__,
-                        url=url[:80])
+                        url=url)
             return f"Failed to fetch page: {str(e)}"
 
         if result["error"]:

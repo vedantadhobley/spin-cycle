@@ -23,7 +23,7 @@ async def search_wikipedia(query: str, max_results: int = 3) -> list[dict]:
     Returns a list of {title, summary, url} dicts.
     """
     log.debug(logger, MODULE, "wiki_search_start", "Wikipedia search starting",
-              query=query[:80], max_results=max_results)
+              query=query, max_results=max_results)
 
     async with httpx.AsyncClient() as client:
         resp = await client.get(
@@ -52,7 +52,7 @@ async def search_wikipedia(query: str, max_results: int = 3) -> list[dict]:
             })
 
         log.debug(logger, MODULE, "wiki_search_done", "Wikipedia search complete",
-                  query=query[:50], result_count=len(results))
+                  query=query, result_count=len(results))
         return results
 
 
@@ -78,7 +78,7 @@ def get_wikipedia_tool():
             log.warning(logger, MODULE, "wiki_tool_failed",
                         "Wikipedia search tool failed",
                         error=str(e), error_type=type(e).__name__,
-                        query=query[:80])
+                        query=query)
             return "Wikipedia search failed. Try web search instead."
 
         if not results:
