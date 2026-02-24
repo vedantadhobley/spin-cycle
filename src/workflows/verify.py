@@ -5,6 +5,10 @@ Processes claims recursively:
   - Atomic parts (single items) are researched + judged
   - Compound parts are further decomposed, processed, and synthesized
   - The tree structure emerges naturally from recursion
+
+Concurrency is limited to avoid overwhelming the LLM server (llama.cpp
+processes requests sequentially). Siblings are processed in batches of
+MAX_CONCURRENT to balance parallelism with LLM throughput.
 """
 
 import asyncio
@@ -29,6 +33,12 @@ MODULE = "workflow"
 # to be leaves (researched + judged directly) regardless of complexity.
 # depth=0 is the original claim, depth=1 is first split, etc.
 MAX_DEPTH = 3
+
+# Maximum concurrent sibling branches processed in parallel. Limits load on
+# the LLM server — llama.cpp processes inference sequentially, so firing
+# 4+ research agents simultaneously just causes timeouts as they queue up.
+# 2 keeps pipeline fast while staying within what the server can handle.
+MAX_CONCURRENT = 2
 
 
 @workflow.defn
@@ -111,20 +121,26 @@ class VerifyClaimWorkflow:
                 result = await workflow.execute_activity(
                     judge_subclaim,
                     args=[claim_text, leaf_text, evidence],
-                    start_to_close_timeout=timedelta(seconds=120),
+                    start_to_close_timeout=timedelta(seconds=180),
                     retry_policy=RetryPolicy(maximum_attempts=3),
                 )
                 return result
 
-            # COMPOUND — process children in parallel, then synthesize
+            # COMPOUND — process children in batches, then synthesize
             log.info(workflow.logger, MODULE, "branch",
                      "Processing compound node",
                      claim_id=claim_id, node=node_text,
                      depth=depth, num_children=len(sub_nodes))
 
-            child_results = list(await asyncio.gather(
-                *[_process(child["text"], depth + 1) for child in sub_nodes]
-            ))
+            # Process siblings in batches of MAX_CONCURRENT to avoid
+            # overwhelming the LLM server with too many parallel requests.
+            child_results = []
+            for i in range(0, len(sub_nodes), MAX_CONCURRENT):
+                batch = sub_nodes[i:i + MAX_CONCURRENT]
+                batch_results = list(await asyncio.gather(
+                    *[_process(child["text"], depth + 1) for child in batch]
+                ))
+                child_results.extend(batch_results)
 
             # Synthesize children into a single verdict for this node
             is_final = (depth == 0)
