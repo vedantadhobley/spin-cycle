@@ -52,7 +52,7 @@ Because we're putting the spin through the wringer.
 | Agent framework | [LangGraph](https://langchain-ai.github.io/langgraph/) | ReAct agent for autonomous evidence gathering |
 | LLM toolkit | [LangChain](https://python.langchain.com/) | ChatOpenAI client, tool wrappers, message types |
 | Workflow engine | [Temporal](https://temporal.io/) | Durable execution, retries, scheduling, visibility |
-| LLM | Qwen3-VL-30B-A3B-Instruct (on joi via llama.cpp) | Claim decomposition, evidence evaluation, verdict synthesis |
+| LLM | Qwen3-VL-30B-A3B (on joi via llama.cpp) | Instruct (:3101) for decompose/synthesize, Thinking (:3102) for research/judge |
 | Database | PostgreSQL 16 + SQLAlchemy 2.0 (async) | Claims, sub-claims, evidence, verdicts |
 | API | FastAPI | REST endpoints for claim submission and querying |
 
@@ -68,9 +68,11 @@ curl -X POST http://localhost:4500/claims \
 
 ### 2. Verification Pipeline (Temporal workflow)
 
-The claim triggers `VerifyClaimWorkflow` — 5 activities run in sequence:
+The claim triggers `VerifyClaimWorkflow` — 6 activities run in sequence:
 
 ```
+create_claim          Creates DB record (skipped if called via API)
+    ↓
 decompose_claim       LLM splits claim into atomic sub-claims
     ↓
 research_subclaim     LangGraph ReAct agent searches DuckDuckGo + Wikipedia
@@ -210,23 +212,30 @@ Watch the verification pipeline in real-time:
 # Follow worker logs (shows every step as it happens)
 docker logs -f spin-cycle-dev-worker
 
-# You'll see lines like:
-# decompose_claim.start    claim='...'
-# decompose_claim.done     num_sub_claims=2
-# research_claim.start     sub_claim='...'
-# research_claim.done      evidence_count=3
-# judge_subclaim.done      verdict=true confidence=0.95
-# synthesize_verdict.done  verdict=true confidence=0.95
-# store_result.done        claim_id=... sub_claims=2
+# With LOG_FORMAT=pretty (default in dev), you'll see:
+# I [WORKER    ] starting: Connecting to Temporal | temporal_host=... task_queue=spin-cycle-verify
+# I [WORKER    ] ready: Worker listening | task_queue=spin-cycle-verify activity_count=6
+# I [DECOMPOSE ] start: Decomposing claim into sub-claims | claim=The Great Wall of China...
+# I [DECOMPOSE ] done: Claim decomposed | num_sub_claims=1
+# I [RESEARCH  ] start: Starting research agent | sub_claim=The Great Wall of China...
+# I [RESEARCH  ] done: Research agent complete | evidence_count=3 agent_steps=8
+# I [JUDGE     ] done: Sub-claim judged | verdict=false confidence=0.95
+# I [SYNTHESIZE] done: Overall verdict synthesized | verdict=false confidence=0.95
+# I [STORE     ] done: Result stored in database | claim_id=... sub_claims=1
+
+# With LOG_FORMAT=json (default in prod), output is JSON for Grafana Loki
 ```
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LLAMA_URL` | `http://joi:3101` | LLM chat API endpoint (OpenAI-compatible) |
-| `LLAMA_EMBED_URL` | `http://joi:3103` | LLM embeddings endpoint |
+| `LLAMA_URL` | `http://joi:3101` | Instruct LLM endpoint (fast, structured output) |
+| `LLAMA_REASONING_URL` | `http://joi:3102` | Thinking LLM endpoint (chain-of-thought reasoning) |
+| `LLAMA_EMBED_URL` | `http://joi:3103` | Embeddings endpoint (not yet used) |
 | `POSTGRES_PASSWORD` | `spin-cycle-dev` | Application Postgres password |
+| `LOG_FORMAT` | `json` (prod) / `pretty` (dev) | Log output format — `json` for Grafana Loki, `pretty` for terminal |
+| `LOG_LEVEL` | `INFO` | Log level — `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 | `NEWSAPI_KEY` | (empty) | NewsAPI key for news search evidence (optional) |
 | `SERPER_API_KEY` | (empty) | Serper key for Google search evidence (not yet implemented) |
 
@@ -265,7 +274,10 @@ spin-cycle/
 │
 ├── src/
 │   ├── worker.py                   # Temporal worker entrypoint
-│   ├── llm.py                      # Shared LLM client → joi
+│   ├── llm.py                      # Shared LLM client → joi (instruct + thinking)
+│   │
+│   ├── utils/                      # Shared utilities
+│   │   └── logging.py              # Structured logging (JSON for Loki, pretty for dev)
 │   │
 │   ├── api/                        # FastAPI backend
 │   │   ├── app.py                  # App + lifespan
@@ -288,7 +300,7 @@ spin-cycle/
 │   │   └── verify.py               # VerifyClaimWorkflow
 │   │
 │   ├── activities/
-│   │   └── verify_activities.py    # 5 Temporal activities
+│   │   └── verify_activities.py    # 6 Temporal activities (including create_claim)
 │   │
 │   ├── db/
 │   │   ├── models.py               # SQLAlchemy models
@@ -305,8 +317,9 @@ spin-cycle/
 
 ## What's Next
 
-1. **Extraction pipeline** — automated claim ingestion from RSS feeds and news APIs via scheduled Temporal workflows
-2. **Alembic migrations** — proper database schema versioning
-3. **LangFuse** — self-hosted LLM observability for prompt debugging
+1. **Serper (Google search) tool** — biggest research quality win, SERPER_API_KEY ready in .env
+2. **Extraction pipeline** — automated claim ingestion from RSS feeds via scheduled Temporal workflows
+3. **Alembic migrations** — proper database schema versioning
+4. **LangFuse** — self-hosted LLM observability for prompt debugging
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full technical deep dive, including the extraction pipeline design, database schema details, and how LangChain/LangGraph/Temporal fit together.

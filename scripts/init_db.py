@@ -7,12 +7,14 @@ Run once to create all tables:
 import asyncio
 import os
 
-import structlog
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from src.db.models import Base
+from src.utils.logging import configure_logging, log, get_logger
 
-logger = structlog.get_logger()
+configure_logging()
+MODULE = "init_db"
+logger = get_logger()
 
 
 async def init() -> None:
@@ -22,7 +24,8 @@ async def init() -> None:
     user = os.getenv("POSTGRES_USER", "spincycle")
     password = os.getenv("POSTGRES_PASSWORD", "spin-cycle-dev")
     database_url = f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{db}"
-    logger.info("init_db", url=database_url.split("@")[-1])  # log host only
+    log.info(logger, MODULE, "start", "Initializing database",
+             url=database_url.split("@")[-1])
 
     engine = create_async_engine(database_url, echo=True)
 
@@ -30,7 +33,7 @@ async def init() -> None:
         await conn.run_sync(Base.metadata.create_all)
 
     await engine.dispose()
-    logger.info("init_db.done")
+    log.info(logger, MODULE, "done", "Database initialized")
 
 
 if __name__ == "__main__":

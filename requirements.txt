@@ -26,4 +26,3 @@ wikipedia-api>=0.7.0
 
 # Utilities
 python-dotenv>=1.0.0
-structlog>=24.0.0

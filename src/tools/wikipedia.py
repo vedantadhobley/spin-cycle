@@ -11,16 +11,21 @@ raw function returns dicts (for programmatic use).
 import httpx
 from langchain_core.tools import tool
 
+from src.utils.logging import log, get_logger
+
+MODULE = "tools"
+logger = get_logger()
+
 
 async def search_wikipedia(query: str, max_results: int = 3) -> list[dict]:
     """Search Wikipedia for articles related to the query.
 
     Returns a list of {title, summary, url} dicts.
     """
+    log.debug(logger, MODULE, "wiki_search_start", "Wikipedia search starting",
+              query=query[:80], max_results=max_results)
+
     async with httpx.AsyncClient() as client:
-        # Wikipedia API search
-        # NOTE: Wikipedia requires a User-Agent header. Without it, you get 403.
-        # See: https://meta.wikimedia.org/wiki/User-Agent_policy
         resp = await client.get(
             "https://en.wikipedia.org/w/api.php",
             params={
@@ -46,6 +51,8 @@ async def search_wikipedia(query: str, max_results: int = 3) -> list[dict]:
                 "url": f"https://en.wikipedia.org/wiki/{item['title'].replace(' ', '_')}",
             })
 
+        log.debug(logger, MODULE, "wiki_search_done", "Wikipedia search complete",
+                  query=query[:50], result_count=len(results))
         return results
 
 
@@ -67,7 +74,11 @@ def get_wikipedia_tool():
         """
         try:
             results = await search_wikipedia(query, max_results=3)
-        except Exception:
+        except Exception as e:
+            log.warning(logger, MODULE, "wiki_tool_failed",
+                        "Wikipedia search tool failed",
+                        error=str(e), error_type=type(e).__name__,
+                        query=query[:80])
             return "Wikipedia search failed. Try web search instead."
 
         if not results:

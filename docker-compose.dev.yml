@@ -39,6 +39,8 @@ services:
       LLAMA_URL: ${LLAMA_URL}
       LLAMA_REASONING_URL: ${LLAMA_REASONING_URL}
       LLAMA_EMBED_URL: ${LLAMA_EMBED_URL}
+      LOG_FORMAT: ${LOG_FORMAT:-pretty}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes:
       - .:/app
     depends_on:
@@ -70,6 +72,8 @@ services:
       LLAMA_URL: ${LLAMA_URL}
       LLAMA_REASONING_URL: ${LLAMA_REASONING_URL}
       LLAMA_EMBED_URL: ${LLAMA_EMBED_URL}
+      LOG_FORMAT: ${LOG_FORMAT:-pretty}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes:
       - .:/app
     depends_on:

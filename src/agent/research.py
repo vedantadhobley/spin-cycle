@@ -53,7 +53,8 @@ This agent runs INSIDE the research_subclaim Temporal activity. This gives us:
   - Observability: activity status visible in Temporal UI
 """
 
-import structlog
+import logging
+
 from langchain_core.messages import HumanMessage, ToolMessage, AIMessage
 from langgraph.prebuilt import create_react_agent
 
@@ -61,8 +62,10 @@ from src.llm import get_reasoning_llm
 from src.prompts.verification import RESEARCH_SYSTEM, RESEARCH_USER
 from src.tools.web_search import get_web_search_tool
 from src.tools.wikipedia import get_wikipedia_tool
+from src.utils.logging import log, get_logger
 
-logger = structlog.get_logger()
+MODULE = "research"
+logger = get_logger()
 
 
 def build_research_agent():
@@ -155,7 +158,8 @@ async def research_claim(sub_claim: str, max_steps: int = 25) -> list[dict]:
           - content: The evidence text/snippet
           - supports_claim: None (determined by the judge step later)
     """
-    logger.info("research_claim.start", sub_claim=sub_claim[:80])
+    log.info(logger, MODULE, "start", "Starting research agent",
+             sub_claim=sub_claim[:80])
 
     try:
         agent = build_research_agent()
@@ -184,12 +188,9 @@ async def research_claim(sub_claim: str, max_steps: int = 25) -> list[dict]:
                 "supports_claim": None,
             })
 
-        logger.info(
-            "research_claim.done",
-            sub_claim=sub_claim[:50],
-            evidence_count=len(evidence),
-            agent_steps=len(result["messages"]),
-        )
+        log.info(logger, MODULE, "done", "Research agent complete",
+                 sub_claim=sub_claim[:50], evidence_count=len(evidence),
+                 agent_steps=len(result["messages"]))
         return evidence
 
     except Exception as e:
@@ -200,13 +201,10 @@ async def research_claim(sub_claim: str, max_steps: int = 25) -> list[dict]:
         #   - Network issues
         # The judge step will see the evidence and can still work with it,
         # or will return "unverifiable" if there's nothing useful.
-        logger.warning(
-            "research_claim.agent_failed",
-            sub_claim=sub_claim[:50],
-            error=str(e),
-            error_type=type(e).__name__,
-            fallback="direct_search",
-        )
+        log.warning(logger, MODULE, "agent_failed",
+                    "Research agent failed, falling back to direct search",
+                    error=str(e), error_type=type(e).__name__,
+                    sub_claim=sub_claim[:50])
         return await _research_fallback(sub_claim)
 
 
@@ -220,7 +218,8 @@ async def _research_fallback(sub_claim: str) -> list[dict]:
     This still produces usable evidence; it's just less targeted than
     the agent's approach.
     """
-    logger.info("research_fallback.start", sub_claim=sub_claim[:50])
+    log.info(logger, MODULE, "fallback_start", "Running fallback direct search",
+             sub_claim=sub_claim[:50])
     evidence = []
 
     # DuckDuckGo search
@@ -235,7 +234,9 @@ async def _research_fallback(sub_claim: str) -> list[dict]:
                 "supports_claim": None,
             })
     except Exception as e:
-        logger.warning("research_fallback.ddg_failed", error=str(e))
+        log.warning(logger, MODULE, "fallback_ddg_failed",
+                    "DuckDuckGo fallback search failed",
+                    error=str(e), error_type=type(e).__name__)
 
     # Wikipedia search
     try:
@@ -249,11 +250,10 @@ async def _research_fallback(sub_claim: str) -> list[dict]:
                 "supports_claim": None,
             })
     except Exception as e:
-        logger.warning("research_fallback.wiki_failed", error=str(e))
+        log.warning(logger, MODULE, "fallback_wiki_failed",
+                    "Wikipedia fallback search failed",
+                    error=str(e), error_type=type(e).__name__)
 
-    logger.info(
-        "research_fallback.done",
-        sub_claim=sub_claim[:50],
-        evidence_count=len(evidence),
-    )
+    log.info(logger, MODULE, "fallback_done", "Fallback search complete",
+             sub_claim=sub_claim[:50], evidence_count=len(evidence))
     return evidence

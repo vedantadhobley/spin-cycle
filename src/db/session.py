@@ -4,6 +4,10 @@ import os
 
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 
+from src.utils.logging import log, get_logger
+
+MODULE = "db"
+logger = get_logger()
 
 POSTGRES_HOST = os.getenv("POSTGRES_HOST", "localhost")
 POSTGRES_PORT = os.getenv("POSTGRES_PORT", "5432")
@@ -15,6 +19,9 @@ DATABASE_URL = f"postgresql+asyncpg://{POSTGRES_USER}:{POSTGRES_PASSWORD}@{POSTG
 
 engine = create_async_engine(DATABASE_URL, echo=False)
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+log.info(logger, MODULE, "configured", "Database engine configured",
+         host=POSTGRES_HOST, port=POSTGRES_PORT, database=POSTGRES_DB)
 
 
 async def get_session() -> AsyncSession:

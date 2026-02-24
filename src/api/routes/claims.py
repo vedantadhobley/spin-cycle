@@ -3,7 +3,6 @@
 import uuid
 from typing import Optional
 
-import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,9 +11,11 @@ from sqlalchemy.orm import selectinload
 from src.data.schemas import ClaimSubmit, ClaimResponse, VerdictResponse, ClaimListResponse, SubClaimResponse
 from src.db.models import Claim, SubClaim, Verdict
 from src.db.session import get_session
+from src.utils.logging import log, get_logger
 from src.workflows.verify import VerifyClaimWorkflow
 
-logger = structlog.get_logger()
+MODULE = "claims"
+logger = get_logger()
 
 TASK_QUEUE = "spin-cycle-verify"
 
@@ -39,7 +40,8 @@ async def submit_claim(
     await session.refresh(claim)
 
     claim_id = str(claim.id)
-    logger.info("claim.submitted", claim_id=claim_id, text=body.text[:80])
+    log.info(logger, MODULE, "submitted", "Claim submitted",
+             claim_id=claim_id, text=body.text[:80])
 
     # Kick off Temporal workflow
     temporal = request.app.state.temporal
@@ -49,7 +51,8 @@ async def submit_claim(
         id=f"verify-{claim_id}",
         task_queue=TASK_QUEUE,
     )
-    logger.info("workflow.started", claim_id=claim_id)
+    log.info(logger, MODULE, "workflow_started", "Verification workflow started",
+             claim_id=claim_id)
 
     return ClaimResponse(
         id=claim_id,

@@ -98,7 +98,7 @@ Temporal handles the **macro orchestration** (decompose → research → judge �
 
 **Where it's used:**
 - `src/workflows/verify.py` — `VerifyClaimWorkflow` definition
-- `src/activities/verify_activities.py` — all 5 Temporal activities
+- `src/activities/verify_activities.py` — all 6 Temporal activities (including create_claim)
 - `src/worker.py` — worker entrypoint that registers workflows + activities
 - `docker-compose.dev.yml` — Temporal server + Temporal UI containers
 
@@ -106,7 +106,7 @@ Temporal handles the **macro orchestration** (decompose → research → judge �
 
 ## The Verification Pipeline (what's working now)
 
-A claim enters the system (via API or extraction) and goes through 5 activities, orchestrated by Temporal:
+A claim enters the system (via API or extraction) and goes through 6 activities, orchestrated by Temporal:
 
 ### Step 1: decompose_claim
 
@@ -541,6 +541,143 @@ spin-cycle-dev-adminer           :4502  ← Postgres web UI (Dracula theme)
 
 ---
 
+## Logging & Observability
+
+### Architecture
+
+Spin Cycle uses **structured JSON logging** designed for Grafana Loki, matching the logging conventions established in found-footy:
+
+```
+Container stdout → Docker json-file → Promtail → Loki → Grafana
+```
+
+Every log line is a JSON object with consistent fields:
+
+```json
+{"ts":"2025-01-15T12:00:00.123Z","level":"INFO","module":"judge","action":"done","msg":"Sub-claim judged","sub_claim":"Bitcoin was created by...","verdict":"true","confidence":0.95}
+```
+
+In development (`LOG_FORMAT=pretty`), logs are human-readable:
+
+```
+I [JUDGE     ] done: Sub-claim judged | sub_claim=Bitcoin was created by... verdict=true confidence=0.95
+```
+
+### Core Module: `src/utils/logging.py`
+
+| Component | Purpose |
+|-----------|---------|
+| `StructuredFormatter` | JSON formatter for Loki. Strips Temporal context dicts. Pretty mode for dev. |
+| `StructuredLogger` | Singleton (`log`) with `.info()`, `.warning()`, `.error()`, `.debug()` methods |
+| `configure_logging()` | Called once at startup. Sets format, level, silences noisy loggers |
+| `get_logger()` | Returns a fallback stdlib logger for infrastructure code |
+
+### Usage Pattern
+
+Every log call follows the same signature: `log.level(logger, module, action, msg, **kwargs)`
+
+```python
+from src.utils.logging import log
+
+# In Temporal activities — use activity.logger for proper Temporal context
+log.info(activity.logger, "decompose", "start", "Decomposing claim",
+         claim_id=claim_id, claim=claim_text[:80])
+
+# In Temporal workflows — use workflow.logger
+log.info(workflow.logger, "workflow", "started", "Verification started",
+         claim_id=claim_id)
+
+# In infrastructure code — use get_logger() fallback
+from src.utils.logging import get_logger
+logger = get_logger()
+log.info(logger, "worker", "ready", "Worker listening", task_queue="spin-cycle-verify")
+```
+
+### Standard Fields
+
+Every log line has these fields, which Promtail promotes to Loki labels:
+
+| Field | Description | Example |
+|-------|-------------|---------|
+| `ts` | ISO 8601 UTC timestamp | `2025-01-15T12:00:00.123Z` |
+| `level` | Log level | `INFO`, `WARNING`, `ERROR`, `DEBUG` |
+| `module` | Source module | `decompose`, `research`, `judge`, `synthesize`, `store`, `workflow`, `worker`, `api`, `claims`, `tools`, `db`, `llm` |
+| `action` | What happened | `start`, `done`, `failed`, `parse_failed`, `no_evidence`, `fallback_start` |
+| `msg` | Human-readable message | `"Claim decomposed"` |
+
+Plus arbitrary context kwargs: `claim_id`, `verdict`, `confidence`, `evidence_count`, `error`, `error_type`, etc.
+
+### Action Naming Convention
+
+| Suffix | Meaning |
+|--------|---------|
+| `*_start` | Beginning of an operation |
+| `*_done` | Successful completion |
+| `*_failed` | Error or failure |
+| `*_skipped` | Intentionally skipped |
+| `*_fallback` | Falling back to alternative path |
+
+### Grafana Loki Queries
+
+```logql
+# All errors
+{project="spin-cycle"} | json | level="ERROR"
+
+# Track a single claim end-to-end
+{project="spin-cycle"} | json | claim_id="<uuid>"
+
+# All workflow starts
+{project="spin-cycle"} | json | action=~".*start"
+
+# Research agent failures
+{project="spin-cycle"} | json | module="research" action="agent_failed"
+
+# Judge verdicts only
+{project="spin-cycle"} | json | module="judge" action="done"
+
+# Tool invocations
+{project="spin-cycle"} | json | module="tools"
+
+# LLM responses (debug level)
+{project="spin-cycle"} | json | action="llm_response"
+```
+
+### Noisy Logger Suppression
+
+Third-party libraries are silenced at WARNING to keep logs clean:
+
+| Logger | Level | Why |
+|--------|-------|-----|
+| `temporalio.worker` | WARNING | Heartbeats, replay logs |
+| `temporalio.client` | WARNING | Connection pool noise |
+| `langchain`, `langchain_core`, `langchain_openai` | WARNING | LLM request/response at DEBUG |
+| `langgraph` | WARNING | Graph transition logs |
+| `httpx`, `httpcore`, `urllib3` | WARNING | HTTP request logs |
+| `sqlalchemy` | WARNING | Query logs (engine echo=False) |
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LOG_FORMAT` | `json` | `json` for Loki, `pretty` for development |
+| `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
+
+In docker-compose.dev.yml, `LOG_FORMAT` defaults to `pretty`. In docker-compose.yml (prod), it defaults to `json`.
+
+### Promtail Integration
+
+The monitor stack at `~/workspace/monitor/` runs Promtail, which:
+
+1. Discovers spin-cycle containers via Docker socket (`docker_sd_configs`)
+2. Extracts `project`, `environment`, `service` from container names
+3. Parses JSON log lines from `spin-cycle-*` containers
+4. Promotes `level`, `module`, `action` to native Loki labels
+5. Ships everything to Loki for queryable, filterable log storage
+
+Config: `~/workspace/monitor/promtail/promtail.yml`
+
+---
+
 ## Implementation Status
 
 ### What's Working (end-to-end verified)
@@ -550,15 +687,16 @@ spin-cycle-dev-adminer           :4502  ← Postgres web UI (Dracula theme)
 | Docker infrastructure | **Done** | 7 containers, health checks, volume persistence |
 | PostgreSQL schema | **Done** | 4 tables: claims, sub_claims, evidence, verdicts |
 | FastAPI API | **Done** | POST/GET claims, health check, lifespan management |
-| Temporal workflow | **Done** | VerifyClaimWorkflow with 5 activities, retry policies |
-| Temporal worker | **Done** | Registers workflow + activities, connects to Temporal |
+| Temporal workflow | **Done** | VerifyClaimWorkflow with 6 activities (including create_claim), retry policies |
+| Temporal worker | **Done** | Registers workflow + activities, structured logging configured |
 | `decompose_claim` | **Done** | LLM decomposes claims into sub-claims |
 | `research_subclaim` | **Done** | LangGraph ReAct agent with DuckDuckGo + Wikipedia |
 | `judge_subclaim` | **Done** | LLM evaluates evidence, returns structured verdict |
 | `synthesize_verdict` | **Done** | LLM combines sub-verdicts into overall verdict |
 | `store_result` | **Done** | Writes all results to Postgres |
 | Prompts | **Done** | All 4 prompt pairs documented in `src/prompts/verification.py` |
-| LLM connectivity | **Done** | Qwen3 on joi, tool calling verified |
+| LLM connectivity | **Done** | Dual-model: instruct (:3101) + thinking (:3102) on joi |
+| Logging | **Done** | Structured JSON logging via `src/utils/logging.py`, Promtail → Loki → Grafana |
 | Tests | **Done** | Graph compilation, health endpoint, schema validation |
 
 ### What's Planned
@@ -621,14 +759,20 @@ From the Temporal UI you can also:
 # Stream worker logs — shows every step of the pipeline in real time
 docker logs -f spin-cycle-dev-worker
 
-# Typical output:
-# decompose_claim.start    claim='...'
-# decompose_claim.done     num_sub_claims=2
-# research_claim.start     sub_claim='...'
-# research_claim.done      evidence_count=3
-# judge_subclaim.done       verdict=true confidence=0.95
-# synthesize_verdict.done   verdict=true confidence=0.95
-# store_result.done         claim_id=... sub_claims=2
+# With LOG_FORMAT=pretty (default in dev), output looks like:
+# I [WORKER    ] starting: Connecting to Temporal | temporal_host=spin-cycle-dev-temporal:7233 task_queue=spin-cycle-verify
+# I [WORKER    ] ready: Worker listening | task_queue=spin-cycle-verify activity_count=6 workflow_count=1
+# I [CREATE    ] start: Creating claim record | claim=The Great Wall of China is visible from ...
+# I [DECOMPOSE ] start: Decomposing claim into sub-claims | claim=The Great Wall of China is visible from ...
+# I [DECOMPOSE ] done: Claim decomposed | num_sub_claims=1
+# I [RESEARCH  ] start: Starting research agent | sub_claim=The Great Wall of China is visible from space
+# I [RESEARCH  ] done: Research agent complete | evidence_count=3 agent_steps=8
+# I [JUDGE     ] done: Sub-claim judged | verdict=false confidence=0.95
+# I [SYNTHESIZE] done: Overall verdict synthesized | verdict=false confidence=0.95
+# I [STORE     ] done: Result stored in database | claim_id=abc123... sub_claims=1
+
+# With LOG_FORMAT=json (default in prod), output is JSON for Loki:
+# {"ts":"2025-01-15T12:00:00.123Z","level":"INFO","module":"decompose","action":"done","msg":"Claim decomposed","num_sub_claims":2}
 ```
 
 ### Inspecting the Database
@@ -689,6 +833,9 @@ spin-cycle/
 │   ├── worker.py                   # Temporal worker entrypoint
 │   ├── llm.py                      # Shared LLM client (ChatOpenAI → joi)
 │   │
+│   ├── utils/                      # Shared utilities
+│   │   └── logging.py              # Structured logging (JSON for Loki, pretty for dev)
+│   │
 │   ├── api/                        # FastAPI backend
 │   │   ├── app.py                  # App + lifespan (DB + Temporal init)
 │   │   └── routes/
@@ -713,7 +860,7 @@ spin-cycle/
 │   │   └── verify.py               # VerifyClaimWorkflow
 │   │
 │   ├── activities/                 # Temporal activity implementations
-│   │   └── verify_activities.py    # All 5 verification activities
+│   │   └── verify_activities.py    # All 6 verification activities (including create_claim)
 │   │
 │   ├── db/                         # Database layer
 │   │   ├── models.py               # SQLAlchemy models (Claim, SubClaim, Evidence, Verdict)
@@ -750,5 +897,4 @@ spin-cycle/
 | `alembic` | >=1.14.0 | Database migrations (not yet initialised) |
 | `httpx` | >=0.28.0 | Async HTTP client (Wikipedia, NewsAPI) |
 | `ddgs` | >=7.0.0 | DuckDuckGo search backend |
-| `structlog` | >=24.0.0 | Structured logging |
 | `python-dotenv` | >=1.0.0 | .env file loading |

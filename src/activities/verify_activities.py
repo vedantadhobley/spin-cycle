@@ -3,8 +3,9 @@
 Each activity is a single unit of work that the Temporal worker executes.
 Activities can be retried independently if they fail.
 
-The verification pipeline has 5 activities:
-  1. decompose_claim  — LLM breaks a complex claim into atomic sub-claims
+The verification pipeline has 6 activities:
+  0. create_claim      — creates a claim record in the DB (when started from Temporal UI)
+  1. decompose_claim   — LLM breaks a complex claim into atomic sub-claims
   2. research_subclaim — LangGraph agent gathers evidence using tools
   3. judge_subclaim    — LLM evaluates evidence for/against a sub-claim
   4. synthesize_verdict — LLM combines sub-verdicts into overall verdict
@@ -19,7 +20,6 @@ import re
 import uuid
 from datetime import datetime, timezone
 
-import structlog
 from langchain_core.messages import SystemMessage, HumanMessage
 from sqlalchemy import select
 from temporalio import activity
@@ -35,8 +35,7 @@ from src.prompts.verification import (
     SYNTHESIZE_SYSTEM,
     SYNTHESIZE_USER,
 )
-
-logger = structlog.get_logger()
+from src.utils.logging import log
 
 
 @activity.defn
@@ -48,7 +47,8 @@ async def create_claim(claim_text: str) -> str:
     automatically. When started via the API, the claim already exists so this
     activity is skipped.
     """
-    logger.info("create_claim.start", claim=claim_text[:80])
+    log.info(activity.logger, "create", "start", "Creating claim record",
+             claim=claim_text[:80])
 
     async with async_session() as session:
         async with session.begin():
@@ -60,7 +60,8 @@ async def create_claim(claim_text: str) -> str:
             await session.flush()
             claim_id = str(claim.id)
 
-    logger.info("create_claim.done", claim_id=claim_id)
+    log.info(activity.logger, "create", "done", "Claim record created",
+             claim_id=claim_id)
     return claim_id
 
 
@@ -83,7 +84,8 @@ async def decompose_claim(claim_text: str) -> list[str]:
     original claim as a single sub-claim — the pipeline still works, it just
     doesn't get the benefit of decomposition.
     """
-    logger.info("decompose_claim.start", claim=claim_text)
+    log.info(activity.logger, "decompose", "start", "Decomposing claim into sub-claims",
+             claim=claim_text[:80])
     llm = get_llm()
 
     response = await llm.ainvoke([
@@ -92,7 +94,8 @@ async def decompose_claim(claim_text: str) -> list[str]:
     ])
 
     raw = response.content.strip()
-    logger.info("decompose_claim.llm_response", raw=raw)
+    log.debug(activity.logger, "decompose", "llm_response", "LLM response received",
+              raw=raw[:300])
 
     # Parse the JSON array from the LLM response
     try:
@@ -107,20 +110,14 @@ async def decompose_claim(claim_text: str) -> list[str]:
         # Fallback: if JSON parsing fails, use the original claim as-is.
         # This is safe — the pipeline still works with a single sub-claim,
         # it just won't get the benefit of decomposition.
-        logger.warning(
-            "decompose_claim.parse_failed",
-            error=str(e),
-            raw=raw,
-            fallback="original_claim",
-        )
+        log.warning(activity.logger, "decompose", "parse_failed",
+                    "Failed to parse LLM decomposition, using original claim",
+                    error=str(e), raw=raw[:200])
         sub_claims = [claim_text]
 
-    logger.info(
-        "decompose_claim.done",
-        claim=claim_text[:80],
-        num_sub_claims=len(sub_claims),
-        sub_claims=sub_claims,
-    )
+    log.info(activity.logger, "decompose", "done", "Claim decomposed",
+             claim=claim_text[:80], num_sub_claims=len(sub_claims),
+             sub_claims=sub_claims)
     return sub_claims
 
 
@@ -143,16 +140,14 @@ async def research_subclaim(sub_claim: str) -> list[dict]:
 
     Returns a list of evidence dicts for the judge step.
     """
-    logger.info("research_subclaim.start", sub_claim=sub_claim)
+    log.info(activity.logger, "research", "start", "Researching sub-claim",
+             sub_claim=sub_claim[:80])
 
     from src.agent.research import research_claim
     evidence = await research_claim(sub_claim)
 
-    logger.info(
-        "research_subclaim.done",
-        sub_claim=sub_claim[:50],
-        evidence_count=len(evidence),
-    )
+    log.info(activity.logger, "research", "done", "Research complete",
+             sub_claim=sub_claim[:50], evidence_count=len(evidence))
     return evidence
 
 
@@ -174,11 +169,13 @@ async def judge_subclaim(sub_claim: str, evidence: list[dict]) -> dict:
     If there's no evidence at all, we short-circuit to "unverifiable" without
     bothering the LLM.
     """
-    logger.info("judge_subclaim.start", sub_claim=sub_claim, evidence_count=len(evidence))
+    log.info(activity.logger, "judge", "start", "Judging sub-claim",
+             sub_claim=sub_claim[:80], evidence_count=len(evidence))
 
     # No evidence → unverifiable (no point asking the LLM)
     if not evidence:
-        logger.info("judge_subclaim.no_evidence", sub_claim=sub_claim[:50])
+        log.info(activity.logger, "judge", "no_evidence", "No evidence found, returning unverifiable",
+                 sub_claim=sub_claim[:50])
         return {
             "sub_claim": sub_claim,
             "verdict": "unverifiable",
@@ -212,10 +209,12 @@ async def judge_subclaim(sub_claim: str, evidence: list[dict]) -> dict:
     # then extract just the JSON output after the thinking block.
     think_match = re.search(r"<think>(.*?)</think>", raw, re.DOTALL)
     if think_match:
-        logger.info("judge_subclaim.thinking", thinking=think_match.group(1)[:200])
+        log.debug(activity.logger, "judge", "thinking", "Model reasoning captured",
+                  thinking=think_match.group(1)[:200])
         raw = raw[think_match.end():].strip()
 
-    logger.info("judge_subclaim.llm_response", raw=raw[:200])
+    log.debug(activity.logger, "judge", "llm_response", "LLM response received",
+              raw=raw[:200])
 
     # Parse the JSON verdict from the LLM
     try:
@@ -227,33 +226,24 @@ async def judge_subclaim(sub_claim: str, evidence: list[dict]) -> dict:
         # Validate verdict is one of our expected values
         valid_verdicts = {"true", "false", "partially_true", "unverifiable"}
         if verdict not in valid_verdicts:
-            logger.warning(
-                "judge_subclaim.invalid_verdict",
-                verdict=verdict,
-                fallback="unverifiable",
-            )
+            log.warning(activity.logger, "judge", "invalid_verdict",
+                        "Invalid verdict from LLM, falling back to unverifiable",
+                        verdict=verdict)
             verdict = "unverifiable"
 
         # Clamp confidence to [0, 1]
         confidence = max(0.0, min(1.0, confidence))
 
     except (json.JSONDecodeError, ValueError, TypeError) as e:
-        logger.warning(
-            "judge_subclaim.parse_failed",
-            error=str(e),
-            raw=raw[:200],
-            fallback="unverifiable",
-        )
+        log.warning(activity.logger, "judge", "parse_failed",
+                    "Failed to parse LLM judgment",
+                    error=str(e), raw=raw[:200])
         verdict = "unverifiable"
         confidence = 0.0
         reasoning = f"Failed to parse LLM judgment: {raw[:200]}"
 
-    logger.info(
-        "judge_subclaim.done",
-        sub_claim=sub_claim[:50],
-        verdict=verdict,
-        confidence=confidence,
-    )
+    log.info(activity.logger, "judge", "done", "Sub-claim judged",
+             sub_claim=sub_claim[:50], verdict=verdict, confidence=confidence)
 
     return {
         "sub_claim": sub_claim,
@@ -281,7 +271,8 @@ async def synthesize_verdict(claim_text: str, sub_results: list[dict]) -> dict:
     referencing the sub-claim verdicts. This reasoning chain is stored
     and can be displayed to users.
     """
-    logger.info("synthesize_verdict.start", claim=claim_text[:80], num_sub_results=len(sub_results))
+    log.info(activity.logger, "synthesize", "start", "Synthesizing overall verdict",
+             claim=claim_text[:80], num_sub_results=len(sub_results))
 
     # Format sub-verdicts for the LLM prompt
     sub_verdict_parts = []
@@ -304,7 +295,8 @@ async def synthesize_verdict(claim_text: str, sub_results: list[dict]) -> dict:
     ])
 
     raw = response.content.strip()
-    logger.info("synthesize_verdict.llm_response", raw=raw[:200])
+    log.debug(activity.logger, "synthesize", "llm_response", "LLM response received",
+              raw=raw[:200])
 
     # Parse the JSON verdict
     try:
@@ -318,32 +310,23 @@ async def synthesize_verdict(claim_text: str, sub_results: list[dict]) -> dict:
             "true", "mostly_true", "mixed", "mostly_false", "false", "unverifiable"
         }
         if verdict not in valid_verdicts:
-            logger.warning(
-                "synthesize_verdict.invalid_verdict",
-                verdict=verdict,
-                fallback="unverifiable",
-            )
+            log.warning(activity.logger, "synthesize", "invalid_verdict",
+                        "Invalid verdict from LLM, falling back to unverifiable",
+                        verdict=verdict)
             verdict = "unverifiable"
 
         confidence = max(0.0, min(1.0, confidence))
 
     except (json.JSONDecodeError, ValueError, TypeError) as e:
-        logger.warning(
-            "synthesize_verdict.parse_failed",
-            error=str(e),
-            raw=raw[:200],
-            fallback="unverifiable",
-        )
+        log.warning(activity.logger, "synthesize", "parse_failed",
+                    "Failed to parse LLM synthesis",
+                    error=str(e), raw=raw[:200])
         verdict = "unverifiable"
         confidence = 0.0
         reasoning = f"Failed to parse LLM synthesis: {raw[:200]}"
 
-    logger.info(
-        "synthesize_verdict.done",
-        claim=claim_text[:50],
-        verdict=verdict,
-        confidence=confidence,
-    )
+    log.info(activity.logger, "synthesize", "done", "Overall verdict synthesized",
+             claim=claim_text[:50], verdict=verdict, confidence=confidence)
 
     return {
         "verdict": verdict,
@@ -359,7 +342,8 @@ async def store_result(claim_id: str, verdict: dict, sub_results: list[dict]) ->
 
     Updates the claim status and writes sub-claims, evidence, and verdict rows.
     """
-    logger.info("store_result", claim_id=claim_id, verdict=verdict.get("verdict"))
+    log.info(activity.logger, "store", "start", "Storing verification result",
+             claim_id=claim_id, verdict=verdict.get("verdict"))
 
     async with async_session() as session:
         async with session.begin():
@@ -370,7 +354,9 @@ async def store_result(claim_id: str, verdict: dict, sub_results: list[dict]) ->
             )
             claim = result.scalar_one_or_none()
             if not claim:
-                logger.error("store_result.claim_not_found", claim_id=claim_id)
+                log.error(activity.logger, "store", "claim_not_found",
+                          "Claim not found in database",
+                          error="claim_not_found", claim_id=claim_id)
                 return
 
             # Write sub-claims + evidence
@@ -413,9 +399,6 @@ async def store_result(claim_id: str, verdict: dict, sub_results: list[dict]) ->
             claim.status = "verified"
             claim.updated_at = datetime.now(timezone.utc)
 
-        logger.info(
-            "store_result.done",
-            claim_id=claim_id,
-            verdict=verdict.get("verdict"),
-            sub_claims=len(sub_results),
-        )
+        log.info(activity.logger, "store", "done", "Result stored in database",
+                 claim_id=claim_id, verdict=verdict.get("verdict"),
+                 sub_claims=len(sub_results))

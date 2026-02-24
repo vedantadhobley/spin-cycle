@@ -40,6 +40,8 @@ services:
       LLAMA_URL: ${LLAMA_URL}
       LLAMA_REASONING_URL: ${LLAMA_REASONING_URL}
       LLAMA_EMBED_URL: ${LLAMA_EMBED_URL}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:
       postgres:
         condition: service_healthy
@@ -67,6 +69,8 @@ services:
       LLAMA_URL: ${LLAMA_URL}
       LLAMA_REASONING_URL: ${LLAMA_REASONING_URL}
       LLAMA_EMBED_URL: ${LLAMA_EMBED_URL}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:
       postgres:
         condition: service_healthy

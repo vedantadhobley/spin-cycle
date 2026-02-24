@@ -33,6 +33,11 @@ import os
 
 from langchain_openai import ChatOpenAI
 
+from src.utils.logging import log, get_logger
+
+MODULE = "llm"
+logger = get_logger()
+
 # Instruct model — fast, structured output
 LLAMA_URL = os.getenv("LLAMA_URL", "http://joi:3101")
 INSTRUCT_MODEL = "Qwen3-VL-30B-A3B-Instruct"
@@ -53,12 +58,15 @@ def get_llm(temperature: float = 0.1) -> ChatOpenAI:
         temperature: 0.0 = deterministic, 1.0 = creative.
             Default 0.1 for fact-checking — consistent, conservative.
     """
-    return ChatOpenAI(
+    client = ChatOpenAI(
         base_url=f"{LLAMA_URL}/v1",
         api_key="not-needed",
         model=INSTRUCT_MODEL,
         temperature=temperature,
     )
+    log.debug(logger, MODULE, "instruct_init", "Instruct LLM client created",
+              base_url=LLAMA_URL, model=INSTRUCT_MODEL, temperature=temperature)
+    return client
 
 
 def get_reasoning_llm(temperature: float = 0.2) -> ChatOpenAI:
@@ -74,9 +82,12 @@ def get_reasoning_llm(temperature: float = 0.2) -> ChatOpenAI:
     Slightly higher default temperature (0.2) to allow more exploratory
     reasoning without becoming unreliable.
     """
-    return ChatOpenAI(
+    client = ChatOpenAI(
         base_url=f"{LLAMA_REASONING_URL}/v1",
         api_key="not-needed",
         model=REASONING_MODEL,
         temperature=temperature,
     )
+    log.debug(logger, MODULE, "reasoning_init", "Reasoning LLM client created",
+              base_url=LLAMA_REASONING_URL, model=REASONING_MODEL, temperature=temperature)
+    return client

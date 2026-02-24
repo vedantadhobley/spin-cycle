@@ -1,18 +1,32 @@
-"""FastAPI application for Spin Cycle."""
+"""FastAPI application for Spin Cycle.
+
+Logging: Uses structured JSON logging for Grafana Loki.
+Set LOG_FORMAT=pretty for development-friendly output.
+"""
 
 import os
+import sys
 from contextlib import asynccontextmanager
 
-import structlog
-from fastapi import FastAPI
-from temporalio.client import Client as TemporalClient
+# Force unbuffered output so Docker/Promtail sees logs immediately
+sys.stdout = os.fdopen(sys.stdout.fileno(), "w", buffering=1)
+sys.stderr = os.fdopen(sys.stderr.fileno(), "w", buffering=1)
 
-from src.api.routes.health import router as health_router
-from src.api.routes.claims import router as claims_router
-from src.db.session import engine
-from src.db.models import Base
+# Configure structured logging BEFORE importing anything else
+from src.utils.logging import configure_logging, get_logger, log  # noqa: E402
 
-logger = structlog.get_logger()
+configure_logging()
+
+MODULE = "api"
+logger = get_logger()
+
+from fastapi import FastAPI  # noqa: E402
+from temporalio.client import Client as TemporalClient  # noqa: E402
+
+from src.api.routes.health import router as health_router  # noqa: E402
+from src.api.routes.claims import router as claims_router  # noqa: E402
+from src.db.session import engine  # noqa: E402
+from src.db.models import Base  # noqa: E402
 
 TEMPORAL_HOST = os.getenv("TEMPORAL_HOST", "localhost:7233")
 
@@ -23,18 +37,19 @@ async def lifespan(app: FastAPI):
     # Create DB tables if they don't exist
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    logger.info("db.ready")
+    log.info(logger, MODULE, "db_ready", "Database tables ready")
 
     # Connect to Temporal
     temporal_client = await TemporalClient.connect(TEMPORAL_HOST)
     app.state.temporal = temporal_client
-    logger.info("temporal.connected", host=TEMPORAL_HOST)
+    log.info(logger, MODULE, "temporal_connected", "Connected to Temporal",
+             temporal_host=TEMPORAL_HOST)
 
     yield
 
     # Cleanup
     await engine.dispose()
-    logger.info("shutdown.complete")
+    log.info(logger, MODULE, "shutdown", "Application shutdown complete")
 
 
 app = FastAPI(

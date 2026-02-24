@@ -13,6 +13,9 @@ with workflow.unsafe.imports_passed_through():
         synthesize_verdict,
         store_result,
     )
+    from src.utils.logging import log
+
+MODULE = "workflow"
 
 
 @workflow.defn
@@ -45,9 +48,11 @@ class VerifyClaimWorkflow:
                 start_to_close_timeout=timedelta(seconds=15),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
-            workflow.logger.info(f"Created claim record: {claim_id}")
+            log.info(workflow.logger, MODULE, "claim_created", "Created claim record",
+                     claim_id=claim_id)
 
-        workflow.logger.info(f"Starting verification for claim: {claim_id}")
+        log.info(workflow.logger, MODULE, "started", "Starting verification pipeline",
+                 claim_id=claim_id, claim=claim_text[:80])
 
         # Step 1: Decompose into sub-claims
         sub_claims = await workflow.execute_activity(
@@ -57,12 +62,15 @@ class VerifyClaimWorkflow:
             retry_policy=RetryPolicy(maximum_attempts=3),
         )
 
-        workflow.logger.info(f"Decomposed into {len(sub_claims)} sub-claims")
+        log.info(workflow.logger, MODULE, "decomposed", "Claim decomposed into sub-claims",
+                 claim_id=claim_id, num_sub_claims=len(sub_claims))
 
         # Step 2: Research + judge each sub-claim
         sub_results = []
         for i, sub_claim in enumerate(sub_claims):
-            workflow.logger.info(f"Processing sub-claim {i+1}/{len(sub_claims)}: {sub_claim}")
+            log.info(workflow.logger, MODULE, "subclaim_start", "Processing sub-claim",
+                     claim_id=claim_id, index=i + 1, total=len(sub_claims),
+                     sub_claim=sub_claim[:80])
 
             # Research evidence (LangGraph agent — uses thinking model, needs more time)
             evidence = await workflow.execute_activity(
@@ -98,5 +106,7 @@ class VerifyClaimWorkflow:
             retry_policy=RetryPolicy(maximum_attempts=3),
         )
 
-        workflow.logger.info(f"Verification complete for claim {claim_id}: {verdict.get('verdict')}")
+        log.info(workflow.logger, MODULE, "complete", "Verification complete",
+                 claim_id=claim_id, verdict=verdict.get("verdict"),
+                 confidence=verdict.get("confidence"))
         return verdict

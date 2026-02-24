@@ -2,15 +2,20 @@
 
 Each function is a node in the verification graph. It receives the current
 VerificationState and returns updates to that state.
+
+NOTE: This is a legacy/stub module from early development. The actual
+pipeline uses Temporal activities (src/activities/verify_activities.py)
+and a ReAct research agent (src/agent/research.py).
 """
 
 import os
-import structlog
 from langchain_openai import ChatOpenAI
 
 from src.agent.state import VerificationState
+from src.utils.logging import log, get_logger
 
-logger = structlog.get_logger()
+MODULE = "graph"
+logger = get_logger()
 
 LLAMA_URL = os.getenv("LLAMA_URL", "http://localhost:8080")
 
@@ -39,7 +44,8 @@ Return ONLY a JSON array. /no_think"""
     )
 
     # TODO: Parse JSON response into sub_claims
-    logger.info("decompose", claim=state["claim_text"], response=response.content)
+    log.info(logger, MODULE, "decompose", "Legacy decompose node called",
+             claim=state["claim_text"], response=response.content[:200])
 
     return {
         "sub_claims": [],  # TODO: parse
@@ -51,11 +57,9 @@ Return ONLY a JSON array. /no_think"""
 async def research(state: VerificationState) -> dict:
     """Research evidence for the current sub-claim using tools."""
     # TODO: Use LangGraph tool nodes for web search, Wikipedia, news APIs
-    logger.info(
-        "research",
-        sub_claim_index=state["current_sub_claim_index"],
-        iteration=state["research_iterations"],
-    )
+    log.info(logger, MODULE, "research", "Legacy research node called",
+             sub_claim_index=state["current_sub_claim_index"],
+             iteration=state["research_iterations"])
 
     return {
         "research_iterations": state["research_iterations"] + 1,
@@ -80,7 +84,8 @@ async def judge(state: VerificationState) -> dict:
     llm = get_llm()
 
     # TODO: LLM evaluates evidence for/against the sub-claim
-    logger.info("judge", sub_claim_index=state["current_sub_claim_index"])
+    log.info(logger, MODULE, "judge", "Legacy judge node called",
+             sub_claim_index=state["current_sub_claim_index"])
 
     return {
         "sub_claims": state["sub_claims"],  # TODO: update with verdict
@@ -92,7 +97,8 @@ async def synthesize(state: VerificationState) -> dict:
     llm = get_llm()
 
     # TODO: Aggregate sub-verdicts
-    logger.info("synthesize", num_sub_claims=len(state.get("sub_claims", [])))
+    log.info(logger, MODULE, "synthesize", "Legacy synthesize node called",
+             num_sub_claims=len(state.get("sub_claims", [])))
 
     return {
         "verdict": None,  # TODO
