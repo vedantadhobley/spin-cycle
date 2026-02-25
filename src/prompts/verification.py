@@ -156,18 +156,9 @@ atomic, return it as a single-item array.
 
 Claim: {claim_text}
 
-Return a JSON array of strings.
-
-/no_think\
+Return a JSON array of strings.\
 """
 
-# Why /no_think?
-#   Qwen3 models support a /no_think token that disables the model's internal
-#   chain-of-thought reasoning. For structured output tasks like JSON parsing,
-#   we don't want the model to "think out loud" — we just want the JSON array.
-#   This reduces latency and avoids the model wrapping its answer in <think>
-#   tags.
-#
 # Why flat decomposition instead of recursive?
 #   The old approach called decompose recursively — each sub-claim got
 #   decomposed again, building a tree. This caused three problems:
@@ -243,7 +234,6 @@ When you have finished, write a brief summary of what you found.\
 """
 
 RESEARCH_USER = """\
-/no_think
 Find evidence about this claim:
 
 "{sub_claim}"
@@ -489,9 +479,7 @@ Combine these sub-claim verdicts into a single verdict.
 Sub-claim verdicts:
 {sub_verdicts_text}
 
-Return a JSON object with "verdict", "confidence", "reasoning", and "nuance".
-
-/no_think\
+Return a JSON object with "verdict", "confidence", "reasoning", and "nuance".\
 """
 
 # Why a unified synthesis prompt?

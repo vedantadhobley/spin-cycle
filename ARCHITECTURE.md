@@ -143,7 +143,7 @@ The prompt includes explicit anti-patterns: never split comparisons, never inclu
 
 The output is normalized via `_normalize_flat()`: bare strings become `{"text": "..."}` dicts, and legacy group structures are flattened into their leaves.
 
-The prompt uses `/no_think` to disable Qwen3's chain-of-thought — we want clean JSON, not reasoning. If JSON parsing fails, we fall back to the original claim as a single sub-claim.
+Decompose and synthesize use the instruct model for clean JSON output. Judge uses the thinking model for chain-of-thought reasoning — its `<think>...</think>` blocks are stripped before parsing. If JSON parsing fails, we fall back to the original claim as a single sub-claim.
 
 ### Step 2: research_subclaim (the agentic part)
 
@@ -540,11 +540,11 @@ Two models running on joi via llama.cpp, each serving a different role:
 
 | Port | Model | Role | Used By |
 |------|-------|------|--------|
-| `:3101` | Qwen3-VL-30B-A3B-Instruct | Fast structured output | decompose, synthesize |
-| `:3102` | Qwen3-VL-30B-A3B-Thinking | Chain-of-thought reasoning | research, judge |
+| `:3101` | Qwen3-VL-30B-A3B-Instruct | Fast structured output | decompose, research, synthesize |
+| `:3102` | Qwen3-VL-30B-A3B-Thinking | Chain-of-thought reasoning | judge |
 | `:3103` | (embeddings — not yet used) | Semantic similarity | planned: evidence caching |
 
-Same base architecture (30B params, 3B active MoE), different fine-tunes. The instruct model uses `/no_think` for clean JSON. The thinking model produces `<think>...</think>` blocks that are stripped before parsing.
+Same base architecture (30B params, 3B active MoE), different fine-tunes. The instruct model produces direct responses without chain-of-thought. The thinking model produces `<think>...</think>` blocks that are stripped before parsing.
 
 ### Connection Path
 
@@ -584,12 +584,12 @@ def get_reasoning_llm(temperature=0.2):  # Thinking — slower, better reasoning
 
 All prompts live in `src/prompts/verification.py` with extensive inline documentation explaining:
 - What each prompt does and why it's designed that way
-- The `/no_think` token and when to use it
+- The model assignment strategy (instruct vs thinking) and why
 - Example inputs and outputs
 - Design constraints (e.g., "Do NOT use your own knowledge")
 
 Four prompt pairs (system + user):
-1. `DECOMPOSE_SYSTEM` / `DECOMPOSE_USER` — break text into immediate sub-parts (single level, called recursively)
+1. `DECOMPOSE_SYSTEM` / `DECOMPOSE_USER` — extract atomic facts in one flat pass
 2. `RESEARCH_SYSTEM` / `RESEARCH_USER` — guide the research agent (includes source quality rules)
 3. `JUDGE_SYSTEM` / `JUDGE_USER` — evaluate evidence for a sub-claim
 4. `SYNTHESIZE_SYSTEM` / `SYNTHESIZE_USER` — combine child verdicts (importance-weighted, adapts via `is_final` parameter)

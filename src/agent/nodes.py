@@ -41,7 +41,7 @@ Return a JSON array of strings, each a single factual assertion.
 
 Claim: {state["claim_text"]}
 
-Return ONLY a JSON array. /no_think"""
+Return ONLY a JSON array."""
     )
 
     # TODO: Parse JSON response into sub_claims

@@ -13,7 +13,7 @@ They share the same Qwen3-VL-30B-A3B architecture (30B params, 3B active)
 but are fine-tuned differently:
 
   - Instruct: optimised for instruction following and structured output.
-    Fast because we use /no_think to skip chain-of-thought.
+    No chain-of-thought — fast, direct responses.
 
   - Thinking: optimised for multi-step reasoning. Produces <think>...</think>
     blocks before answering. Better at weighing conflicting evidence and

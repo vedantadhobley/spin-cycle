@@ -221,9 +221,9 @@ async def judge_subclaim(claim_text: str, sub_claim: str, evidence: list[dict]) 
 
     raw = response.content.strip()
 
-    # Strip <think>...</think> tags if the model used chain-of-thought
-    # We let the judge think (no /no_think token) for better reasoning,
-    # then extract just the JSON output after the thinking block.
+    # Strip <think>...</think> tags from the thinking model's output.
+    # The thinking model always produces chain-of-thought before its answer;
+    # we capture it for debug logging, then extract just the JSON.
     think_match = re.search(r"<think>(.*?)</think>", raw, re.DOTALL)
     if think_match:
         log.debug(activity.logger, "judge", "thinking", "Model reasoning captured",
