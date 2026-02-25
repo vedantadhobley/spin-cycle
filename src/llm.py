@@ -52,6 +52,7 @@ def get_llm(temperature: float = 0.1) -> ChatOpenAI:
 
     Use for tasks that need fast, structured output:
       - decompose_claim (JSON array)
+      - research_subclaim (ReAct tool-routing — picking search queries)
       - synthesize_verdict (JSON object)
 
     Args:
@@ -74,8 +75,11 @@ def get_reasoning_llm(temperature: float = 0.2) -> ChatOpenAI:
     """Get the thinking/reasoning LLM client.
 
     Use for tasks that benefit from chain-of-thought reasoning:
-      - research_subclaim (planning search strategy, evaluating relevance)
       - judge_subclaim (weighing conflicting evidence, calibrating confidence)
+
+    NOT used for research — the ReAct loop is pure tool-routing where
+    <think> blocks waste ~25-45s per iteration without improving query
+    quality.  Research uses the instruct model via get_llm() instead.
 
     The thinking model produces <think>...</think> blocks before its answer.
     Callers should strip these before parsing structured output.

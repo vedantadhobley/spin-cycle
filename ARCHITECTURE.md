@@ -85,7 +85,7 @@ The key insight: **LangGraph runs inside Temporal activities, not instead of the
 
 ```
 Temporal Workflow
-└── Activity: research_subclaim (retryable, timeout: 360s)
+└── Activity: research_subclaim (retryable, timeout: 180s)
     └── LangGraph ReAct Agent (cycles between LLM and tools)
         ├── LLM call (via LangChain ChatOpenAI)
         ├── SearXNG search (via LangChain tool, filtered by source_filter)
@@ -109,14 +109,23 @@ Temporal handles the **macro orchestration** (decompose → research → judge �
 
 ## The Verification Pipeline (what's working now)
 
-A claim enters the system (via API or extraction) and is processed as a **recursively decomposed tree of sub-claims**, orchestrated by Temporal with 6 activities:
+A claim enters the system (via API or extraction) and is processed as a **flat pipeline of atomic facts**, orchestrated by Temporal with 6 activities. Inspired by Google DeepMind's SAFE (NeurIPS 2024) and FActScore — factual claims are flat structures, not hierarchical trees.
 
-### Step 1: decompose_claim (single-level decomposition)
+### Model Assignment
+
+| Step | Model | Why |
+|------|-------|-----|
+| decompose_claim | Instruct (`:3101`) | Structured JSON output, no reasoning needed |
+| research_subclaim | Instruct (`:3101`) | ReAct tool-routing — picking search queries. Thinking model wastes ~25-45s/iteration on `<think>` blocks |
+| judge_subclaim | Thinking (`:3102`) | Genuine reasoning under uncertainty — weighing conflicting evidence |
+| synthesize_verdict | Instruct (`:3101`) | Structured aggregation of sub-verdicts |
+
+### Step 1: decompose_claim (flat atomic fact extraction)
 
 **File:** `src/activities/verify_activities.py`
 **Prompt:** `src/prompts/verification.py` → `DECOMPOSE_SYSTEM` / `DECOMPOSE_USER`
 
-The LLM breaks a text into its **immediate sub-parts** — one level at a time. This is called recursively by the workflow, so the tree structure emerges naturally from the claim's complexity rather than being planned upfront.
+The LLM breaks a text into its **atomic, independently verifiable facts** — all in one call. No recursion, no tree structure.
 
 ```
 Input:  "The US and China are both increasing military spending while cutting foreign aid"
@@ -128,7 +137,9 @@ Output: [
 ]
 ```
 
-The key design insight: **decomposition is lazy and recursive.** Instead of asking the LLM to architect an entire tree in one shot (which requires planning ahead and often produces suboptimal structures), each call handles only one level. The workflow calls decompose again on each sub-part — if it returns 1 item, the part is atomic (research it). If it returns 2+ items, the part is compound (recurse deeper). The tree shape adapts to the claim's actual complexity.
+The key design insight: **claims are flat structures, not hierarchical ones.** Recursive decomposition caused tree explosion — the LLM would include the original claim as a sub-claim, causing infinite recursion, and split comparisons into truisms ("US spends money on military" — trivially true). Flat extraction avoids both problems.
+
+The prompt includes explicit anti-patterns: never split comparisons, never include the original claim as a sub-fact, never decompose into overlapping facts. Max 6 atomic facts per claim.
 
 The output is normalized via `_normalize_flat()`: bare strings become `{"text": "..."}` dicts, and legacy group structures are flattened into their leaves.
 
@@ -140,14 +151,16 @@ The prompt uses `/no_think` to disable Qwen3's chain-of-thought — we want clea
 **Called from:** `src/activities/verify_activities.py`
 **Prompt:** `src/prompts/verification.py` → `RESEARCH_SYSTEM` / `RESEARCH_USER`
 
-This is where the LangGraph ReAct agent runs. For each **leaf** sub-claim:
+This is where the LangGraph ReAct agent runs. For each **atomic fact**:
 
 1. Agent receives: "Find evidence about: {sub-claim}"
 2. LLM decides what to search → calls any of the available tools
 3. Tool executes the search → returns results as text
 4. LLM reads results → decides if it needs more → calls another tool or stops
 5. Typically: 2-4 tool calls per sub-claim, 6-10 agent steps
-6. Agent timeout: 240s
+6. Agent timeout: 120s (soft), 180s (Temporal hard limit)
+
+The research agent uses the **instruct model**, not the thinking model. The ReAct loop is pure tool-routing — picking search queries and deciding when to stop. The thinking model wastes ~25-45s per iteration generating `<think>` blocks that nobody reads, just to produce an 8-token tool call. The instruct model produces the same search queries in ~3s per iteration.
 
 **Tools available to the agent:**
 - `searxng_search` — SearXNG meta-search (news, general web). Self-hosted, no API key.
@@ -235,33 +248,45 @@ The result tree is stored recursively via `_store_node()` — parent nodes are s
 
 Evidence records with `source_type` not in the DB enum (`web`, `wikipedia`, `news_api`) are filtered out — the agent_summary doesn't get stored.
 
-### Workflow Orchestration (recursive processing)
+### Workflow Orchestration (flat pipeline)
 
-The workflow processes claims recursively using a `_process()` function that calls decompose at each level. The tree emerges from recursion — it's not planned upfront.
+The workflow processes claims in a flat pipeline — one decompose call, then research+judge in parallel batches, then synthesize.
 
 ```
 VerifyClaimWorkflow
 ├── create_claim (if needed)
-├── _process(claim_text, depth=0)   ← recursive entry point
-│   ├── decompose_claim (60s timeout) → sub-parts for this level
-│   │
-│   ├── IF ≤1 item (atomic): → leaf path
-│   │   ├── research_subclaim (360s timeout)
-│   │   └── judge_subclaim (120s timeout)
-│   │
-│   └── IF 2+ items (compound): → branch path
-│       ├── asyncio.gather(*[_process(child, depth+1) for child in sub_parts])
-│       └── synthesize_verdict (60s timeout, is_final=(depth==0))
+├── decompose_claim (60s timeout) → list of atomic facts
 │
-└── store_result (30s timeout) ← full result tree
+├── For each batch of MAX_CONCURRENT=2 facts:
+│   └── asyncio.gather(
+│       ├── research_subclaim (180s timeout) → judge_subclaim (180s timeout)
+│       └── research_subclaim (180s timeout) → judge_subclaim (180s timeout)
+│       )
+│
+├── IF 1 fact: skip synthesis, use judgment directly
+├── IF 2+ facts: synthesize_verdict (60s timeout, is_final=True)
+│
+└── store_result (30s timeout)
 ```
 
 Key properties:
-- **MAX_DEPTH = 3** — safety limit. At max depth, items are forced to be leaves regardless of complexity.
-- **Depth-adaptive** — simple claims stay flat (depth 0 → atomic). Complex claims go to depth 2 or 3 naturally.
-- **Parallel at every level** — siblings are always processed concurrently via `asyncio.gather`.
-- **Single synthesis activity** — `synthesize_verdict` handles both intermediate (depth > 0) and final (depth = 0) synthesis, adapting its prompt via `is_final`.
+- **Flat, not recursive** — no tree, no recursion, no MAX_DEPTH. One decompose call produces all atomic facts.
+- **MAX_FACTS = 6** — safety limit. Complex claims are capped at 6 facts.
+- **MAX_CONCURRENT = 2** — matched to `--parallel 2` on the LLM server. Two research agents run simultaneously, each getting half the GPU bandwidth. Higher concurrency is strictly worse with llama.cpp (see GPU Compute below).
+- **Single synthesis** — `synthesize_verdict` combines all fact-level judgments into one final verdict. Single-fact claims skip synthesis entirely.
 - **Temporal retries per activity** — if one research call fails, only that activity retries (max 3 attempts).
+
+### GPU Compute Constraints
+
+The LLMs run on joi via llama.cpp with `--parallel N` slots. This multiplexes concurrent requests onto a single GPU — it does NOT parallelize them. N concurrent requests = each takes ~Nx longer, total throughput is constant.
+
+| Service | Port | `--parallel` | Why |
+|---------|------|-------------|-----|
+| Instruct | `:3101` | 4 | Shared with found-footy (4 concurrent) |
+| Thinking | `:3102` | 2 | Spin Cycle research uses 2 concurrent |
+| Embedding | `:3103` | 4 | Fast, low-latency |
+
+`MAX_CONCURRENT=2` is matched to `--parallel 2` on the thinking model. Each agent gets ~50% GPU bandwidth. Higher concurrency doesn't improve wall-clock time — it just increases per-request latency.
 
 ---
 
@@ -275,7 +300,7 @@ All search results pass through a domain blocklist before reaching the research 
 
 Search engines return Reddit comments, Quora answers, Medium blogs, and other user-generated content that isn't citable for fact-checking. The LLM prompt also instructs the agent to prefer authoritative sources, but the code-level filter catches what the LLM might miss.
 
-### Blocked Categories (~40 domains)
+### Blocked Categories (~70 domains)
 
 | Category | Examples | Reason |
 |----------|----------|--------|
@@ -285,6 +310,9 @@ Search engines return Reddit comments, Quora answers, Medium blogs, and other us
 | Fact-check sites | snopes.com, politifact.com, factcheck.org | We do our own verification |
 | Blog platforms | medium.com, substack.com | Mostly unvetted |
 | AI aggregators | perplexity.ai, you.com | Not primary sources |
+| Tabloids | dailymail.co.uk, thesun.co.uk, nypost.com, tmz.com | Sensationalist, unreliable |
+| Partisan outlets | breitbart.com, infowars.com, dailywire.com, occupydemocrats.com | Ideological bias |
+| State propaganda | rt.com, sputniknews.com | State-controlled media |
 
 ### How It's Wired
 

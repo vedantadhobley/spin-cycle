@@ -5,15 +5,14 @@ Activities can be retried independently if they fail.
 
 The verification pipeline has 6 activities:
   0. create_claim      — creates a claim record in the DB (when started from Temporal UI)
-  1. decompose_claim   — LLM breaks a claim into simpler sub-claims (one level)
+  1. decompose_claim   — LLM extracts atomic facts from a claim (one flat pass)
   2. research_subclaim — LangGraph agent gathers evidence using tools
   3. judge_subclaim    — LLM evaluates evidence for/against a sub-claim
-  4. synthesize_verdict — LLM combines child verdicts (intermediate or final)
-  5. store_result       — writes full result tree to Postgres
+  4. synthesize_verdict — LLM combines sub-verdicts into a final verdict
+  5. store_result       — writes result to Postgres
 
-The workflow calls decompose_claim recursively at each level of the tree.
-synthesize_verdict is unified — it works for both intermediate and final
-synthesis, adapting its prompt based on context.
+The pipeline is flat: decompose once → research+judge each fact → synthesize.
+No recursion, no tree — follows the approach used by Google's SAFE and FActScore.
 """
 
 import json
@@ -68,13 +67,12 @@ async def create_claim(claim_text: str) -> str:
 
 @activity.defn
 async def decompose_claim(claim_text: str) -> list[dict]:
-    """Break a claim into simpler sub-claims using the LLM (one level).
+    """Extract atomic verifiable facts from a claim in one flat pass.
 
-    Called recursively by the workflow at each level of the tree.
-    Returns a flat list of {"text": "..."} dicts.
+    Returns a flat list of {"text": "..."} dicts, each an atomic fact.
 
     If the claim is atomic, returns [{"text": "the original claim"}].
-    If the claim is compound, returns 2-6 simpler sub-claims.
+    If the claim is compound, returns 2-6 atomic facts.
 
     Falls back to a single item if JSON parsing fails.
     """

@@ -1,14 +1,17 @@
 """Temporal workflow for claim verification.
 
-Processes claims recursively:
-  - Each text is decomposed into sub-parts (one level at a time)
-  - Atomic parts (single items) are researched + judged
-  - Compound parts are further decomposed, processed, and synthesized
-  - The tree structure emerges naturally from recursion
+Flat pipeline — no recursion:
+  1. Decompose the claim into atomic verifiable facts (one LLM call)
+  2. Research + judge each fact (batched for concurrency)
+  3. Synthesize all verdicts into a final result
+  4. Store the result
 
-Concurrency is limited to avoid overwhelming the LLM server (llama.cpp
-processes requests sequentially). Siblings are processed in batches of
-MAX_CONCURRENT to balance parallelism with LLM throughput.
+This follows the approach used by Google's SAFE (NeurIPS 2024) and FActScore:
+extract all facts in one pass, verify each independently, aggregate.
+
+Concurrency is tuned for llama.cpp on joi. With --parallel 2 on the thinking
+model, MAX_CONCURRENT=2 gives each research agent a dedicated slot — no
+interleaving overhead, predictable ~3 min per fact.
 """
 
 import asyncio
@@ -29,15 +32,12 @@ with workflow.unsafe.imports_passed_through():
 
 MODULE = "workflow"
 
-# Maximum recursion depth for decomposition. At MAX_DEPTH, items are forced
-# to be leaves (researched + judged directly) regardless of complexity.
-# depth=0 is the original claim, depth=1 is first split, etc.
-MAX_DEPTH = 3
+# Maximum atomic facts to process. If decomposition returns more, we cap it.
+# 6 facts × ~4 min each = ~12 min per batch of 2 = ~12 min total. Reasonable.
+MAX_FACTS = 6
 
-# Maximum concurrent sibling branches processed in parallel. Limits load on
-# the LLM server — llama.cpp processes inference sequentially, so firing
-# 4+ research agents simultaneously just causes timeouts as they queue up.
-# 2 keeps pipeline fast while staying within what the server can handle.
+# Maximum concurrent research+judge pipelines. Matched to --parallel 2 on
+# joi's thinking model — each agent gets a dedicated inference slot.
 MAX_CONCURRENT = 2
 
 
@@ -45,13 +45,11 @@ MAX_CONCURRENT = 2
 class VerifyClaimWorkflow:
     """Orchestrates the full claim verification pipeline.
 
-    The workflow is recursive:
-    1. Decompose the text into sub-parts (one level)
-    2. For each sub-part:
-       - If atomic (1 item): research + judge as a leaf
-       - If compound (2+ items): recurse into each, then synthesize
-    3. The tree emerges from recursion — depth adapts to claim complexity
-    4. Store the full result tree in the database
+    Flat pipeline:
+    1. Decompose claim into atomic facts (1 LLM call, instruct model)
+    2. For each fact: research with ReAct agent + judge (thinking model)
+    3. Synthesize all sub-verdicts into final verdict (instruct model)
+    4. Store result in database
     """
 
     @workflow.run
@@ -77,92 +75,83 @@ class VerifyClaimWorkflow:
         log.info(workflow.logger, MODULE, "started", "Starting verification pipeline",
                  claim_id=claim_id, claim=claim_text)
 
-        # Recursive processing function — decomposes, researches, judges, synthesizes
-        async def _process(node_text: str, depth: int) -> dict:
-            """Recursively process a claim or sub-claim.
+        # Step 1: Decompose — extract atomic facts in one pass
+        atomic_facts = await workflow.execute_activity(
+            decompose_claim,
+            args=[claim_text],
+            start_to_close_timeout=timedelta(seconds=60),
+            retry_policy=RetryPolicy(maximum_attempts=3),
+        )
 
-            At each level:
-            1. Decompose the text into sub-parts
-            2. If atomic (single item returned): research + judge
-            3. If compound (multiple items): recurse on each, then synthesize
-            """
-            # Decompose this node (unless at max depth)
-            if depth < MAX_DEPTH:
-                sub_nodes = await workflow.execute_activity(
-                    decompose_claim,
-                    args=[node_text],
-                    start_to_close_timeout=timedelta(seconds=60),
-                    retry_policy=RetryPolicy(maximum_attempts=3),
-                )
-            else:
-                # Max depth — force as atomic leaf
-                sub_nodes = [{"text": node_text}]
+        # Cap to prevent runaway decompositions
+        if len(atomic_facts) > MAX_FACTS:
+            log.warning(workflow.logger, MODULE, "facts_capped",
+                        "Capping atomic facts",
+                        original=len(atomic_facts), capped=MAX_FACTS)
+            atomic_facts = atomic_facts[:MAX_FACTS]
 
-            log.info(workflow.logger, MODULE, "decomposed",
-                     "Node decomposed",
-                     claim_id=claim_id, node=node_text,
-                     depth=depth, sub_count=len(sub_nodes))
+        log.info(workflow.logger, MODULE, "decomposed",
+                 "Claim decomposed into atomic facts",
+                 claim_id=claim_id, fact_count=len(atomic_facts),
+                 facts=[f["text"] for f in atomic_facts])
 
-            if len(sub_nodes) <= 1:
-                # ATOMIC — research + judge as a leaf
-                leaf_text = sub_nodes[0]["text"] if sub_nodes else node_text
+        # Step 2: Research + judge each fact
+        # Process in batches of MAX_CONCURRENT for parallel execution
+        async def _research_and_judge(fact_text: str) -> dict:
+            """Research a single fact and judge it."""
+            log.info(workflow.logger, MODULE, "fact_start",
+                     "Processing atomic fact",
+                     claim_id=claim_id, fact=fact_text)
 
-                log.info(workflow.logger, MODULE, "leaf_start",
-                         "Processing leaf sub-claim",
-                         claim_id=claim_id, sub_claim=leaf_text, depth=depth)
+            evidence = await workflow.execute_activity(
+                research_subclaim,
+                args=[fact_text],
+                start_to_close_timeout=timedelta(seconds=180),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
 
-                evidence = await workflow.execute_activity(
-                    research_subclaim,
-                    args=[leaf_text],
-                    start_to_close_timeout=timedelta(seconds=360),
-                    retry_policy=RetryPolicy(maximum_attempts=3),
-                )
+            result = await workflow.execute_activity(
+                judge_subclaim,
+                args=[claim_text, fact_text, evidence],
+                start_to_close_timeout=timedelta(seconds=180),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+            return result
 
-                result = await workflow.execute_activity(
-                    judge_subclaim,
-                    args=[claim_text, leaf_text, evidence],
-                    start_to_close_timeout=timedelta(seconds=180),
-                    retry_policy=RetryPolicy(maximum_attempts=3),
-                )
-                return result
+        sub_results = []
+        for i in range(0, len(atomic_facts), MAX_CONCURRENT):
+            batch = atomic_facts[i:i + MAX_CONCURRENT]
+            log.info(workflow.logger, MODULE, "batch_start",
+                     "Starting fact batch",
+                     claim_id=claim_id,
+                     batch_num=i // MAX_CONCURRENT + 1,
+                     batch_size=len(batch))
 
-            # COMPOUND — process children in batches, then synthesize
-            log.info(workflow.logger, MODULE, "branch",
-                     "Processing compound node",
-                     claim_id=claim_id, node=node_text,
-                     depth=depth, num_children=len(sub_nodes))
+            batch_results = list(await asyncio.gather(
+                *[_research_and_judge(fact["text"]) for fact in batch]
+            ))
+            sub_results.extend(batch_results)
 
-            # Process siblings in batches of MAX_CONCURRENT to avoid
-            # overwhelming the LLM server with too many parallel requests.
-            child_results = []
-            for i in range(0, len(sub_nodes), MAX_CONCURRENT):
-                batch = sub_nodes[i:i + MAX_CONCURRENT]
-                batch_results = list(await asyncio.gather(
-                    *[_process(child["text"], depth + 1) for child in batch]
-                ))
-                child_results.extend(batch_results)
-
-            # Synthesize children into a single verdict for this node
-            is_final = (depth == 0)
-            synthesis_result = await workflow.execute_activity(
+        # Step 3: Synthesize all verdicts into final result
+        if len(sub_results) == 1:
+            # Single fact — no synthesis needed, just use the verdict directly
+            result = sub_results[0]
+        else:
+            result = await workflow.execute_activity(
                 synthesize_verdict,
-                args=[claim_text, node_text, child_results, is_final],
+                args=[claim_text, claim_text, sub_results, True],
                 start_to_close_timeout=timedelta(seconds=60),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
 
-            log.info(workflow.logger, MODULE, "synthesized",
-                     "Node synthesized",
-                     claim_id=claim_id, node=node_text,
-                     depth=depth, is_final=is_final,
-                     verdict=synthesis_result.get("verdict"))
+        log.info(workflow.logger, MODULE, "verdict",
+                 "Final verdict reached",
+                 claim_id=claim_id,
+                 verdict=result.get("verdict"),
+                 confidence=result.get("confidence"),
+                 fact_count=len(atomic_facts))
 
-            return synthesis_result
-
-        # Process the claim recursively starting at depth 0
-        result = await _process(claim_text, depth=0)
-
-        # Store the full result tree
+        # Step 4: Store the result
         await workflow.execute_activity(
             store_result,
             args=[claim_id, result],

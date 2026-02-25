@@ -72,75 +72,87 @@ Verdict scale (6 levels):
 
 
 # =============================================================================
-# STEP 1: DECOMPOSE (single-level, called recursively by the workflow)
+# STEP 1: DECOMPOSE — extract all atomic verifiable facts in ONE pass
 # =============================================================================
 
 DECOMPOSE_SYSTEM = """\
-You are a fact-checker's assistant. Your job is to break a claim into \
-simpler sub-claims, ONE LEVEL at a time.
+You are a fact-checker's assistant. Your job is to extract ALL the \
+verifiable atomic facts from a claim in a SINGLE pass.
+
+An "atomic fact" is a single, specific factual assertion that can be \
+independently verified through research. It should contain exactly ONE \
+checkable thing.
 
 Rules:
-- Split the claim into 2-6 simpler sub-claims
-- Each sub-claim must be a specific, verifiable factual assertion
-- Each sub-claim must stand on its own (understandable without context)
+- Extract 1-6 atomic facts from the claim
+- Each fact must be a specific, verifiable assertion
+- Each fact must stand on its own (understandable without the original)
 - Include specific numbers, dates, names when present in the original
 - Do NOT include opinions, predictions, or subjective statements
-- Preserve original wording where possible
-- Each sub-claim MUST cover a DIFFERENT aspect — do NOT rephrase the \
-same fact multiple ways
-- Sub-claims CAN still be compound — they will be decomposed further in \
-later passes if needed. You do NOT need to fully atomize everything in \
-one shot.
+- Each fact MUST cover a DIFFERENT verifiable point
 
-If the claim is ALREADY a single, atomic fact that cannot be meaningfully \
-split further, return it unchanged as a single-item array.
+CRITICAL ANTI-PATTERNS — do NOT do these:
+
+1. NEVER split a comparison into non-claims:
+   BAD:  "US gives less aid than France" → ["US gives aid", "France gives aid"]
+   GOOD: "US gives less aid than France" → ["US gives less aid than France"]
+   The comparison IS the claim. "US gives aid" is a truism, not a claim.
+
+2. NEVER include the original claim (or a rephrasing) as a sub-claim:
+   BAD:  "X while Y" → ["X", "Y", "X while Y"]
+   GOOD: "X while Y" → ["X", "Y"]
+
+3. NEVER decompose into overlapping facts:
+   BAD:  ["NASA landed on the moon", "NASA landed on the moon 6 times"]
+   GOOD: ["NASA landed on the moon 6 times"]
+   The more specific version subsumes the vague one.
 
 SPLITTING STRATEGY:
-Think about the NATURAL fault lines in the claim. What are the distinct \
-aspects or subjects? Split along those lines FIRST:
+Find the NATURAL fault lines — distinct verifiable assertions:
 - Different subjects/entities → split by subject
-- Different time periods → split by time
 - Different actions or outcomes → split by action
-- Cause and effect → split cause from effect
+- Conjunctions ("and", "while", "yet", "but") often mark split points
+- Comparatives/superlatives ("more than", "the most") are ONE fact, not two
 
-Do NOT over-split. If the claim has 2 natural parts, return 2 sub-claims, \
-not 6. Later passes will split further if needed.
-
-HYPERBOLE AND EXAGGERATION:
-When a claim uses exaggerated language ("a million times", "literally \
-everyone", "the biggest ever"), split it into:
-  1. The CORE factual assertion (what they're really claiming)
-  2. The SPECIFIC quantitative/superlative claim (the exact exaggerated part)
+If the claim is ALREADY a single atomic fact, return it unchanged.
 
 EXAMPLES:
 
-Atomic claim (cannot be split):
+Atomic (no split):
 "NASA landed on the moon 6 times"
 → ["NASA landed on the moon 6 times"]
 
-Two distinct subjects (split by entity, each part may be further split):
-"The US and China are both increasing military spending while cutting \
-foreign aid"
-→ ["The US is increasing military spending while cutting foreign aid", \
-"China is increasing military spending while cutting foreign aid"]
+Comparison (keep as one fact):
+"The US spends more on military than the next 10 countries combined"
+→ ["The US spends more on military than the next 10 countries combined"]
 
-Multiple distinct assertions (fully decomposed in one pass):
+Two distinct claims joined by "yet":
+"The US spends more on military than the next 10 combined, yet gives \
+less foreign aid as a percentage of GDP than most developed nations"
+→ ["The US spends more on its military than the next 10 countries combined", \
+"The US provides less foreign aid as a percentage of GDP than most other \
+developed nations"]
+
+Multiple distinct assertions:
 "Fort Knox gold has not been audited despite promises by Trump and Musk"
 → ["The gold in Fort Knox has not been audited recently", \
 "Donald Trump promised to audit Fort Knox", \
 "Elon Musk or DOGE promised to audit Fort Knox"]
 
-Hyperbolic claim:
-"Trump was mentioned in the Epstein files a million times"
-→ ["Trump is mentioned in the Epstein files", \
-"Trump is mentioned approximately one million times in the Epstein files"]
+Multiple subjects with shared predicate:
+"The US and China are both increasing military spending while cutting \
+foreign aid"
+→ ["The US is increasing military spending", \
+"The US is cutting foreign aid", \
+"China is increasing military spending", \
+"China is cutting foreign aid"]
 
 Return ONLY a JSON array of strings. No markdown, no explanation, no wrapping.\
 """
 
 DECOMPOSE_USER = """\
-Break this claim into simpler sub-claims. If it's already atomic, return \
-it unchanged as a single-item array.
+Extract all verifiable atomic facts from this claim. If it's already \
+atomic, return it as a single-item array.
 
 Claim: {claim_text}
 
@@ -156,26 +168,26 @@ Return a JSON array of strings.
 #   This reduces latency and avoids the model wrapping its answer in <think>
 #   tags.
 #
-# Why single-level decomposition?
-#   Instead of asking the LLM to plan a whole tree structure in one shot
-#   (groups, children, nesting), we ask for ONE level of splitting. The
-#   workflow calls decompose recursively — each child gets decomposed again,
-#   and the tree emerges naturally from recursion. This is better because:
-#     1. The LLM only has to think about one kind of split at a time
-#     2. Depth adapts automatically — simple claims stay shallow
-#     3. Every level of the tree is the same operation
+# Why flat decomposition instead of recursive?
+#   The old approach called decompose recursively — each sub-claim got
+#   decomposed again, building a tree. This caused three problems:
+#     1. Self-referencing: the LLM included the original claim as a sub-claim,
+#        causing infinite recursion until MAX_DEPTH killed it
+#     2. Comparison splitting: "A > B" got split into "A exists" + "B exists"
+#        — neither is actually a claim
+#     3. Tree explosion: 2-3 real facts became 7+ leaves with duplicates
 #
-# Example of recursive decomposition:
-#   depth=0: "US and China increasing military spending while cutting aid"
-#            → ["US increasing spending while cutting aid",
-#               "China increasing spending while cutting aid"]
-#   depth=1: "US increasing spending while cutting aid"
-#            → ["US is increasing military spending",
-#               "US is cutting foreign aid"]
-#   depth=1: "China increasing spending while cutting aid"
-#            → ["China is increasing military spending",
-#               "China is cutting foreign aid"]
-#   depth=2: each of these returns itself (atomic) → research + judge
+#   The flat approach (used by Google's SAFE, FActScore, FacTool) extracts
+#   all atomic facts in a single LLM call. No recursion, no tree, no
+#   self-referencing. One call, flat list, done.
+#
+# Example:
+#   "US and China increasing military spending while cutting aid"
+#   → ["US is increasing military spending",
+#      "US is cutting foreign aid",
+#      "China is increasing military spending",
+#      "China is cutting foreign aid"]
+#   — one LLM call, 4 facts, each independently researchable.
 
 
 # =============================================================================
@@ -213,24 +225,25 @@ and look for the same information from a reputable publication instead.
 Do NOT rely on third-party fact-check sites (Snopes, PolitiFact, etc.). \
 We are building independent verification — find the PRIMARY sources yourself.
 
-Research strategy:
-1. Search for the specific entities, numbers, dates, or events in the claim
-2. Use the page reader to read promising URLs in full — snippets often miss \
-key details that would confirm or deny the claim
-3. Check Wikipedia for established background facts and context
-4. If initial results are thin, try different phrasings or related terms
-5. Cross-reference across multiple sources when possible
-- You have found at least 2-3 relevant sources from different searches
-- OR you have done 3-4 searches and found nothing relevant (the claim \
-  may be unverifiable)
+IMPORTANT — you have a STRICT budget of 5-6 tool calls total. Be efficient:
+1. First search: target the SPECIFIC claim detail (entity + number/date/event)
+2. Second search: try a different angle or source (Wikipedia, official data)
+3. If you found promising URLs, use fetch_page_content on the 1-2 BEST ones
+4. Third search ONLY if the first two returned nothing useful
+5. Stop and summarize. Do NOT keep searching after 3 searches.
+
+You are done when:
+- You have 2-3 relevant pieces of evidence (even partial), OR
+- You have done 3 searches and found nothing (claim may be unverifiable)
 
 Do NOT make up evidence. Only report what the tools actually return.
 Do NOT evaluate whether the claim is true or false — just gather evidence.
 
-When you have finished searching, write a brief summary of what you found.\
+When you have finished, write a brief summary of what you found.\
 """
 
 RESEARCH_USER = """\
+/no_think
 Find evidence about this claim:
 
 "{sub_claim}"

@@ -70,7 +70,7 @@ import logging
 from langchain_core.messages import HumanMessage, ToolMessage, AIMessage
 from langgraph.prebuilt import create_react_agent
 
-from src.llm import get_reasoning_llm
+from src.llm import get_llm
 from src.prompts.verification import RESEARCH_SYSTEM, RESEARCH_USER
 from src.tools.web_search import get_web_search_tool
 from src.tools.wikipedia import get_wikipedia_tool
@@ -138,7 +138,12 @@ def build_research_agent():
     how to research (search strategies, when to stop, what to report).
     See RESEARCH_SYSTEM in src/prompts/verification.py for the full prompt.
     """
-    llm = get_reasoning_llm(temperature=0.2)
+    # Instruct model — not the thinking model.  The ReAct loop is pure
+    # tool-routing: pick a search query, call the tool, repeat.  The thinking
+    # model wastes ~25-45s per iteration generating <think> blocks nobody
+    # reads, which eats the entire timeout budget.  Instruct produces the
+    # same search queries in ~3s per iteration.
+    llm = get_llm(temperature=0.2)
     tools = _build_tool_list()
 
     return create_react_agent(
@@ -201,7 +206,7 @@ def extract_evidence(messages: list) -> list[dict]:
     return evidence
 
 
-async def research_claim(sub_claim: str, max_steps: int = 25, timeout_secs: int = 240) -> list[dict]:
+async def research_claim(sub_claim: str, max_steps: int = 14, timeout_secs: int = 120) -> list[dict]:
     """Run the research agent to gather evidence for a sub-claim.
 
     This is the main entry point called by the research_subclaim activity.
@@ -210,11 +215,14 @@ async def research_claim(sub_claim: str, max_steps: int = 25, timeout_secs: int 
         sub_claim: The specific sub-claim to find evidence for.
         max_steps: Maximum number of graph steps (prevents infinite loops).
                    Each tool call costs ~2 steps (agent node + tool node).
-                   25 steps allows ~10-12 tool calls, which is generous.
+                   14 steps allows ~6 tool calls — the sweet spot for
+                   3 searches + 2 page reads + final summary.
         timeout_secs: Soft timeout in seconds. If the agent exceeds this,
                       we cancel it and return whatever evidence was gathered
-                      so far via the fallback. Default 180s (3 min) to stay
-                      well under the 300s Temporal activity timeout.
+                      so far via the fallback. Default 120s (2 min) — the
+                      instruct model completes 6 iterations in ~40-60s;
+                      120s gives ample margin for slow web requests.
+                      60s buffer before the 180s Temporal activity timeout.
 
     Returns:
         List of evidence dicts, each with:
