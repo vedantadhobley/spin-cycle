@@ -119,10 +119,10 @@ async def fetch_page(url: str) -> dict:
             if len(text) > MAX_CONTENT_LENGTH:
                 text = text[:MAX_CONTENT_LENGTH] + "\n\n[... content truncated ...]"
 
-            log.info(logger, MODULE, "fetch_done", "Page fetched",
-                     url=url, title=title,
-                     content_length=len(text),
-                     latency_ms=int((_time.monotonic() - _t0) * 1000))
+            log.debug(logger, MODULE, "fetch_done", "Page fetched",
+                      url=url, title=title,
+                      content_length=len(text),
+                      latency_ms=int((_time.monotonic() - _t0) * 1000))
 
             return {
                 "url": url,
@@ -174,12 +174,12 @@ def get_page_fetcher_tool():
             return "Invalid URL. Must start with http:// or https://"
 
         if is_blocked(url):
-            log.info(logger, MODULE, "fetch_blocked", "URL blocked by source filter",
-                     url=url)
+            log.debug(logger, MODULE, "fetch_blocked", "URL blocked by source filter",
+                      url=url)
             return f"Blocked source: {url} is not a citable source (social media, forum, or content farm). Find a reputable publication instead."
 
-        log.info(logger, MODULE, "fetch_query", "Fetching page",
-                 url=url)
+        log.debug(logger, MODULE, "fetch_query", "Fetching page",
+                  url=url)
         try:
             result = await fetch_page(url)
         except Exception as e:

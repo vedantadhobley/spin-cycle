@@ -75,9 +75,9 @@ async def search_serper(query: str, max_results: int = 5) -> list[dict]:
 
             results = filter_results(results)[:max_results]
 
-            log.info(logger, MODULE, "serper_done", "Serper search complete",
-                     query=query, result_count=len(results),
-                     latency_ms=int((_time.monotonic() - _t0) * 1000))
+            log.debug(logger, MODULE, "serper_done", "Serper search complete",
+                      query=query, result_count=len(results),
+                      latency_ms=int((_time.monotonic() - _t0) * 1000))
             return results
 
         except Exception as e:
@@ -102,8 +102,8 @@ def get_serper_tool():
         This searches the full Google index — the most comprehensive
         web search available.
         """
-        log.info(logger, MODULE, "serper_query", "Serper search",
-                 query=query)
+        log.debug(logger, MODULE, "serper_query", "Serper search",
+                  query=query)
         try:
             results = await search_serper(query, max_results=5)
         except Exception as e:

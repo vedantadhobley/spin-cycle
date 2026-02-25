@@ -338,10 +338,17 @@ Search engines return Reddit comments, Quora answers, Medium blogs, and other us
 
 ### Prompt-Level Reinforcement
 
-The `RESEARCH_SYSTEM` prompt explicitly lists acceptable and forbidden source types:
+The `RESEARCH_SYSTEM` prompt explicitly lists acceptable and forbidden source types, ranked in a **3-tier hierarchy**:
 
-- **ACCEPTABLE:** Government databases, wire services (Reuters, AP), established newspapers, official statistics, academic institutions
-- **NEVER USE:** Reddit, Quora, social media, personal blogs, forums, YouTube comments, AI-generated summaries
+| Tier | Sources | Weight |
+|------|---------|--------|
+| **Tier 1 — Primary documents** | Treaties, charters, legislation, court filings, UN resolutions, official data (World Bank, SIPRI, BLS), academic papers | Strongest |
+| **Tier 2 — Independent reporting** | Wire services (Reuters, AP), major outlets (BBC, NYT, Guardian), Wikipedia, think tanks | Strong |
+| **Tier 3 — Interested-party statements** | Government websites (whitehouse.gov, state.gov, kremlin.ru), press releases, politician statements | Weakest — treated as claims, not facts |
+
+The judge prompt mirrors this hierarchy: primary documents outweigh reporting, and both outweigh political statements. Government websites are explicitly flagged as communications arms of political actors, not neutral sources.
+
+- **NEVER USE:** Reddit, Quora, social media, personal blogs, forums, YouTube comments, AI-generated summaries, fact-check sites (Snopes, PolitiFact)
 
 ---
 
@@ -862,7 +869,7 @@ See [ROADMAP.md](ROADMAP.md) for the full prioritised improvement plan. Key next
 | Component | Status | Details |
 |-----------|--------|--------|
 | Alembic migrations | **Next** | Unblocks all future schema changes. Dependency installed, no init |
-| Source credibility scoring | **Planned** | Tiered scoring (Reuters > blog) — basic domain filtering already done |
+| Source credibility hierarchy | **Done** | 3-tier system in prompts: primary docs > independent reporting > political statements |
 | Calibration test suite | **Planned** | 100+ known claims, measure accuracy and confidence calibration |
 | RSS feed monitoring | **Planned** | `source_feeds` + `articles` tables, Temporal cron workflow |
 | Claim extraction pipeline | **Planned** | ExtractClaimsWorkflow, LLM reads articles → extracts claims |

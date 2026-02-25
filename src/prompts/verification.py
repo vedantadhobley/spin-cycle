@@ -220,15 +220,36 @@ you MUST do at least one search for the OPPOSITE perspective. For example:
 This prevents one-sided evidence that misleads the judge. A claim about a \
 complex topic needs evidence from both angles.
 
-ACCEPTABLE sources (use ONLY these):
-1. Official documents, government records, court filings, legislation
-2. Press releases, official statements from named organisations
-3. Major news outlets reporting firsthand (Reuters, AP, BBC, NPR, \
+ACCEPTABLE sources (use ONLY these), ranked by reliability:
+
+TIER 1 — Primary documents (STRONGEST evidence):
+1. Original texts: treaties, charters, legislation, court filings, contracts
+2. Official data sources (USAFacts, World Bank, SIPRI, BLS, etc.)
+3. Academic papers, scientific journals, published research
+4. UN resolutions, regulatory filings, financial disclosures
+
+TIER 2 — Independent reporting:
+5. Major news outlets reporting firsthand (Reuters, AP, BBC, NPR, \
 NY Times, Washington Post, The Guardian, Al Jazeera, CNBC, etc.)
-4. Academic papers, scientific journals, published research
-5. Think tanks and policy institutes (Brookings, CSIS, Heritage, RAND, etc.)
 6. Wikipedia for established background facts
-7. Official data sources (USAFacts, World Bank, SIPRI, BLS, etc.)
+7. Think tanks and policy institutes (Brookings, CSIS, Heritage, RAND, etc.)
+
+TIER 3 — Interested-party statements (WEAKEST — treat as claims, not facts):
+8. Press releases, official statements from governments or organisations
+9. Politician statements, press conferences, social media posts by officials
+10. Government websites (whitehouse.gov, state.gov, kremlin.ru, gov.uk, \
+etc.) — these are the communications arms of political actors, NOT \
+neutral sources. Content on government websites is curated to serve \
+political interests and should be treated with the same skepticism \
+as a press release from a corporation about its own conduct.
+
+CRITICAL: Tier 3 sources are NOT evidence of truth — they are claims by \
+interested parties. A politician denying something does not make it false. \
+A press office asserting something does not make it true. A government \
+website describing its own policies is SPIN, not fact — look for the \
+actual legislation, treaty text, or charter instead. Always prefer \
+Tier 1 primary documents over Tier 3 statements. When Tier 1 and Tier 3 \
+conflict, Tier 1 wins.
 
 NEVER cite these — they are NOT credible sources:
 - Reddit, Quora, Stack Exchange, or any forum/comment section
@@ -326,8 +347,17 @@ reasonable person would, informed by the original claim's context.
 Your job:
 1. Evaluate each piece of evidence — does it SUPPORT, CONTRADICT, or say \
 nothing about the claim?
-2. Weigh the evidence — reliable sources (official reports, major news \
-outlets, academic sources) count more than blogs or social media.
+2. Weigh the evidence using this hierarchy:
+   - PRIMARY DOCUMENTS (treaties, charters, legislation, data, court \
+filings) are the STRONGEST evidence. What a document actually says \
+trumps what anyone claims it says.
+   - INDEPENDENT REPORTING (Reuters, AP, BBC, etc.) is strong evidence, \
+especially when multiple outlets corroborate.
+   - POLITICIAN/GOVERNMENT STATEMENTS are the WEAKEST evidence. A press \
+office denial is NOT proof something is false. A politician's claim is \
+NOT proof something is true. These are interested parties with motives \
+to spin — treat their statements as claims to be verified, not as \
+evidence that settles a question.
 3. Render a verdict based ONLY on the evidence provided. Do NOT use your \
 own knowledge.
 

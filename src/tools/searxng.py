@@ -78,9 +78,9 @@ async def search_searxng(
 
             results = filter_results(results)[:max_results]
 
-            log.info(logger, MODULE, "searxng_done", "SearXNG search complete",
-                     query=query, result_count=len(results),
-                     latency_ms=int((_time.monotonic() - _t0) * 1000))
+            log.debug(logger, MODULE, "searxng_done", "SearXNG search complete",
+                      query=query, result_count=len(results),
+                      latency_ms=int((_time.monotonic() - _t0) * 1000))
             return results
 
         except Exception as e:
@@ -106,8 +106,8 @@ def get_searxng_tool():
         For established facts and background, also use wikipedia_search.
         When you find a promising URL, use fetch_page_content to read the full article.
         """
-        log.info(logger, MODULE, "searxng_query", "SearXNG search",
-                 query=query)
+        log.debug(logger, MODULE, "searxng_query", "SearXNG search",
+                  query=query)
         try:
             results = await search_searxng(query, max_results=8)
         except Exception as e:

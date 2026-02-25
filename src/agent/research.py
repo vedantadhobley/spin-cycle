@@ -102,15 +102,15 @@ def _build_tool_list() -> list:
     # Search tools — add based on availability
     if searxng_available():
         tools.append(get_searxng_tool())
-        log.info(logger, MODULE, "tool_enabled", "SearXNG meta-search enabled")
+        log.debug(logger, MODULE, "tool_enabled", "SearXNG meta-search enabled")
 
     if serper_available():
         tools.append(get_serper_tool())
-        log.info(logger, MODULE, "tool_enabled", "Serper search enabled")
+        log.debug(logger, MODULE, "tool_enabled", "Serper search enabled")
 
     if brave_available():
         tools.append(get_brave_tool())
-        log.info(logger, MODULE, "tool_enabled", "Brave search enabled")
+        log.debug(logger, MODULE, "tool_enabled", "Brave search enabled")
 
     # DuckDuckGo — always available as fallback
     tools.append(get_web_search_tool())
@@ -122,8 +122,8 @@ def _build_tool_list() -> list:
     tools.append(get_page_fetcher_tool())
 
     tool_names = [t.name for t in tools]
-    log.info(logger, MODULE, "tools_loaded", "Research agent tools configured",
-             tool_count=len(tools), tools=tool_names)
+    log.debug(logger, MODULE, "tools_loaded", "Research agent tools configured",
+              tool_count=len(tools), tools=tool_names)
 
     return tools
 
@@ -379,9 +379,10 @@ async def research_claim(sub_claim: str, max_steps: int = 30, timeout_secs: int 
         return evidence
 
     except asyncio.TimeoutError:
-        log.warning(logger, MODULE, "agent_timeout",
-                    "Research agent timed out, falling back to direct search",
-                    timeout_secs=timeout_secs, sub_claim=sub_claim)
+        log.error(logger, MODULE, "agent_timeout",
+                  "Research agent timed out, falling back to direct search",
+                  error="TimeoutError", error_type="TimeoutError",
+                  timeout_secs=timeout_secs, sub_claim=sub_claim)
         return await _research_fallback(sub_claim)
 
     except Exception as e:
@@ -392,10 +393,10 @@ async def research_claim(sub_claim: str, max_steps: int = 30, timeout_secs: int 
         #   - Network issues
         # The judge step will see the evidence and can still work with it,
         # or will return "unverifiable" if there's nothing useful.
-        log.warning(logger, MODULE, "agent_failed",
-                    "Research agent failed, falling back to direct search",
-                    error=str(e), error_type=type(e).__name__,
-                    sub_claim=sub_claim)
+        log.error(logger, MODULE, "agent_failed",
+                  "Research agent failed, falling back to direct search",
+                  error=str(e), error_type=type(e).__name__,
+                  sub_claim=sub_claim)
         return await _research_fallback(sub_claim)
 
 

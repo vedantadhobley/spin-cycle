@@ -255,12 +255,12 @@ async def judge_subclaim(claim_text: str, sub_claim: str, evidence: list[dict]) 
     for ev in source_evidence:
         st = ev.get("source_type", "unknown")
         source_types[st] = source_types.get(st, 0) + 1
-    log.info(activity.logger, "judge", "evidence_summary",
-             "Evidence prepared for judge",
-             sub_claim=sub_claim,
-             evidence_count=len(source_evidence),
-             source_types=source_types,
-             urls=evidence_urls)
+    log.debug(activity.logger, "judge", "evidence_summary",
+              "Evidence prepared for judge",
+              sub_claim=sub_claim,
+              evidence_count=len(source_evidence),
+              source_types=source_types,
+              urls=evidence_urls)
 
     # Format evidence for the LLM prompt
     evidence_parts = []

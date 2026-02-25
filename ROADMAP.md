@@ -15,13 +15,14 @@ A working end-to-end claim verification pipeline with **flat decomposition + the
 - **Single synthesis activity** uses the thesis as primary rubric when available
 - LangGraph ReAct research agent gathers evidence with dynamically loaded tools (temperature=0.0 for deterministic queries)
 - **Source quality filtering** — domain blocklist (~40 domains) silently drops Reddit, Quora, social media, content farms from all search results
+- **3-tier source hierarchy** in prompts — primary documents (charters, legislation, data) > independent reporting (Reuters, BBC) > interested-party statements (government websites, politician claims). Government sites explicitly classified as political actor communications, not neutral sources
 - Thinking model evaluates evidence and renders verdicts (instruct model for everything else)
 - **Importance-weighted synthesis** — verdicts weighed by significance, not count
 - **Date-aware prompts** — all prompts include `Today's date: {current_date}` so the LLM references current data
 - Results stored in Postgres with sub-claims, evidence, and reasoning chains
 - Top-level synthesis reasoning + nuance exposed in API responses
 - Temporal orchestrates everything with retries and durability (5 activities, 1 workflow)
-- Production-grade structured JSON logging (for Grafana Loki, pretty format for dev)
+- Production-grade structured JSON logging (for Grafana Loki, pretty format for dev) — INFO for pipeline milestones, DEBUG for per-query tool noise
 - LLM max_tokens configured to prevent truncated output (2048 instruct, 4096 reasoning)
 
 **Search tools (env-var gated — set the key to enable):**
@@ -70,21 +71,17 @@ SearXNG is now the primary search tool, running self-hosted in the Docker stack.
 
 **Why:** Right now sources are filtered (junk domains blocked) but all remaining sources are weighted equally. A Reuters article and a lesser-known outlet both count as "web" evidence. The judge prompt says "reliable sources count more" but the model has to infer credibility from the URL alone.
 
-**Status:** Partially done — domain blocklist filtering is implemented in `src/tools/source_filter.py`, wired into all search tools and the page fetcher. The RESEARCH_SYSTEM prompt explicitly lists acceptable and forbidden source types. What's missing is the **tiered scoring** system below.
-
-**What:** Add a source credibility tier system:
+**Status:** Partially done — domain blocklist filtering is implemented in `src/tools/source_filter.py`, wired into all search tools and the page fetcher. The RESEARCH_SYSTEM and JUDGE_SYSTEM prompts now include a **3-tier source hierarchy**:
 
 | Tier | Sources | Weight |
 |------|---------|--------|
-| **1 — Wire services** | Reuters, AP, AFP | Highest |
-| **2 — Major outlets** | BBC, NYT, Guardian, WSJ, etc. | High |
-| **3 — Official records** | Government sites, court records, legislatures | High |
-| **4 — Quality press** | Reputable national/regional outlets | Medium |
-| **5 — Other** | Blogs, forums, unknown domains | Low |
+| **1 — Primary documents** | Treaties, charters, legislation, court filings, UN resolutions, official data, academic papers | Strongest |
+| **2 — Independent reporting** | Reuters, AP, BBC, NYT, Wikipedia, think tanks | Strong |
+| **3 — Interested-party statements** | Government websites, press releases, politician statements | Weakest — treated as claims, not facts |
 
-Tag each evidence item with its tier. Pass the tier to the judge so it can weigh sources properly.
+Government websites (whitehouse.gov, state.gov, etc.) are explicitly classified as Tier 3 — political actor communications, not neutral sources. The judge is instructed that when Tier 1 (e.g., the actual charter text) conflicts with Tier 3 (e.g., a White House denial), Tier 1 wins.
 
-**Effort:** Medium. Need a domain → tier mapping (can start with top 200 domains) and add `credibility_tier` to the Evidence model.
+**What's still missing:** Domain → tier mapping at the **code level** (currently prompt-only, the LLM applies the hierarchy but there's no programmatic scoring). Adding `credibility_tier` to the Evidence model and a scored domain list (~200 domains) would let the judge see explicit tier tags per evidence item.
 
 ### 1.4 — Claim-Specific Search Strategy
 
