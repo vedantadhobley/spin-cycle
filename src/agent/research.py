@@ -65,9 +65,9 @@ This agent runs INSIDE the research_subclaim Temporal activity. This gives us:
   - Observability: activity status visible in Temporal UI
 """
 
-import logging
+import re as _re
 
-from langchain_core.messages import HumanMessage, ToolMessage, AIMessage
+from langchain_core.messages import HumanMessage, ToolMessage
 from langgraph.prebuilt import create_react_agent
 
 from src.llm import get_llm
@@ -143,14 +143,129 @@ def build_research_agent():
     # model wastes ~25-45s per iteration generating <think> blocks nobody
     # reads, which eats the entire timeout budget.  Instruct produces the
     # same search queries in ~3s per iteration.
-    llm = get_llm(temperature=0.2)
+    #
+    # temperature=0 for deterministic search queries.  The agent's job is
+    # routing — "search for X", "fetch Y" — not creative writing.  temp=0
+    # ensures the same sub-claim always generates the same queries, which
+    # means the same evidence, which means consistent verdicts.
+    llm = get_llm(temperature=0)
     tools = _build_tool_list()
+
+    from datetime import date
+    prompt = RESEARCH_SYSTEM.format(current_date=date.today().isoformat())
 
     return create_react_agent(
         llm,
         tools,
-        prompt=RESEARCH_SYSTEM,
+        prompt=prompt,
     )
+
+
+def _parse_tool_output(content: str, tool_name: str) -> list[dict]:
+    """Parse structured evidence items from a tool's text output.
+
+    All our search tools format results as blocks separated by '---':
+        Title: ...
+        URL: ...
+        Snippet/Summary: ...
+
+    The page fetcher uses:
+        Page: ...
+        URL: ...
+        <content>
+
+    This function splits multi-result outputs into individual evidence
+    items with extracted metadata (url, title, source_type).
+    """
+    if not content or not content.strip():
+        return []
+
+    # Skip known empty responses
+    stripped = content.strip()
+    if stripped in (
+        "No results found.",
+        "No Wikipedia results found.",
+        "No SearXNG results found. Try web_search as a fallback.",
+        "SearXNG search failed. Try web_search as a fallback.",
+        "Wikipedia search failed. Try web search instead.",
+    ):
+        return []
+
+    # Determine source type from tool name
+    tl = tool_name.lower()
+    if "wikipedia" in tl:
+        source_type = "wikipedia"
+    else:
+        source_type = "web"
+
+    # Page fetcher — single result, different format
+    if "fetch_page" in tl:
+        title = ""
+        url = None
+        body = stripped
+        # Format: "Page: ...\nURL: ...\n\n<content>"
+        title_m = _re.match(r"Page:\s*(.+)", stripped)
+        if title_m:
+            title = title_m.group(1).strip()
+        url_m = _re.search(r"URL:\s*(https?://\S+)", stripped)
+        if url_m:
+            url = url_m.group(1).strip()
+            # Content starts after the URL line + blank line
+            after_url = stripped[url_m.end():].lstrip("\n")
+            if after_url:
+                body = after_url
+        return [{
+            "source_type": source_type,
+            "source_url": url,
+            "title": title,
+            "content": body[:5000],
+            "supports_claim": None,
+        }]
+
+    # Blocked/error responses from page fetcher
+    if stripped.startswith(("Blocked source:", "Failed to fetch", "Invalid URL")):
+        return []
+
+    # Multi-result tools (SearXNG, Serper, Brave, Wikipedia, DDG)
+    # Split on '---' separator used by all our tool wrappers
+    blocks = _re.split(r"\n\n---\n\n", stripped)
+
+    items = []
+    for block in blocks:
+        block = block.strip()
+        if not block:
+            continue
+
+        title = ""
+        url = None
+        snippet = block  # fallback: use the whole block as content
+
+        # Parse structured fields
+        title_m = _re.match(r"(?:Title|Page):\s*(.+)", block)
+        if title_m:
+            title = title_m.group(1).strip()
+
+        url_m = _re.search(r"URL:\s*(https?://\S+)", block)
+        if url_m:
+            url = url_m.group(1).strip()
+
+        # Extract the content/snippet portion
+        snippet_m = _re.search(
+            r"(?:Snippet|Summary|Content):\s*(.+)",
+            block, _re.DOTALL,
+        )
+        if snippet_m:
+            snippet = snippet_m.group(1).strip()
+
+        items.append({
+            "source_type": source_type,
+            "source_url": url,
+            "title": title,
+            "content": snippet[:5000],
+            "supports_claim": None,
+        })
+
+    return items
 
 
 def extract_evidence(messages: list) -> list[dict]:
@@ -160,53 +275,52 @@ def extract_evidence(messages: list) -> list[dict]:
       1. SystemMessage — research instructions (from RESEARCH_SYSTEM)
       2. HumanMessage — "Find evidence about: {claim}"
       3. AIMessage with tool_calls — agent decides to search
-      4. ToolMessage — search results from DuckDuckGo/Wikipedia
+      4. ToolMessage — search results (structured text with Title/URL/Snippet)
       5. ... (more tool calls and results)
       N. AIMessage — agent's final summary (no tool_calls)
 
-    We extract evidence from ToolMessage objects, since those contain
-    the actual search results. Each ToolMessage becomes one evidence record.
+    We parse each ToolMessage to extract individual evidence items with
+    metadata (URL, title, source_type). Multi-result tool outputs (e.g.,
+    SearXNG returning 8 results) are split into separate evidence items.
 
-    The agent's final AIMessage is captured separately as an "agent_summary"
-    evidence item — this contains the agent's analysis of what it found,
-    which is useful context for the judge step.
+    The agent's final AIMessage is NOT included — it's the agent's own
+    interpretation, not primary evidence. The judge should reason only
+    from actual source material.
+
+    Deduplicates by URL — different search engines often return the same
+    pages, and duplicates just bloat the judge prompt without adding signal.
     """
     evidence = []
+    seen_urls: set[str] = set()
+    total_items = 0
+    deduped_count = 0
 
     for msg in messages:
         if not isinstance(msg, ToolMessage):
             continue
 
-        # Determine source type from the tool that was called
         tool_name = getattr(msg, "name", "") or ""
-        if "wikipedia" in tool_name.lower():
-            source_type = "wikipedia"
-        elif "fetch_page" in tool_name.lower():
-            source_type = "web"  # Page content is still "web" evidence
-        else:
-            source_type = "web"  # serper, brave, google, ddg → all "web"
-
         content = msg.content if isinstance(msg.content, str) else str(msg.content)
 
-        # Skip empty or unhelpful results
-        if not content or content.strip() in (
-            "",
-            "No results found.",
-            "No Wikipedia results found.",
-        ):
-            continue
+        items = _parse_tool_output(content, tool_name)
+        for item in items:
+            total_items += 1
+            url = item.get("source_url")
+            if url:
+                if url in seen_urls:
+                    deduped_count += 1
+                    continue
+                seen_urls.add(url)
+            evidence.append(item)
 
-        evidence.append({
-            "source_type": source_type,
-            "source_url": None,    # URLs are embedded in the content text
-            "content": content[:3000],  # Truncate very long search results
-            "supports_claim": None,     # Determined later by the judge step
-        })
-
+    log.info(logger, MODULE, "evidence_dedup",
+             "Evidence extraction complete",
+             total_items=total_items, unique_items=len(evidence),
+             deduped=deduped_count, unique_urls=len(seen_urls))
     return evidence
 
 
-async def research_claim(sub_claim: str, max_steps: int = 14, timeout_secs: int = 120) -> list[dict]:
+async def research_claim(sub_claim: str, max_steps: int = 30, timeout_secs: int = 120) -> list[dict]:
     """Run the research agent to gather evidence for a sub-claim.
 
     This is the main entry point called by the research_subclaim activity.
@@ -215,8 +329,10 @@ async def research_claim(sub_claim: str, max_steps: int = 14, timeout_secs: int 
         sub_claim: The specific sub-claim to find evidence for.
         max_steps: Maximum number of graph steps (prevents infinite loops).
                    Each tool call costs ~2 steps (agent node + tool node).
-                   14 steps allows ~6 tool calls — the sweet spot for
-                   3 searches + 2 page reads + final summary.
+                   30 steps allows ~14 tool calls — generous budget for
+                   the instruct model which processes each step in ~3s.
+                   The prompt's 5-6 tool call budget and the timeout_secs
+                   are the real limiters, not max_steps.
         timeout_secs: Soft timeout in seconds. If the agent exceeds this,
                       we cancel it and return whatever evidence was gathered
                       so far via the fallback. Default 120s (2 min) — the
@@ -225,9 +341,10 @@ async def research_claim(sub_claim: str, max_steps: int = 14, timeout_secs: int 
                       60s buffer before the 180s Temporal activity timeout.
 
     Returns:
-        List of evidence dicts, each with:
-          - source_type: "web", "wikipedia", or "agent_summary"
-          - source_url: URL if available (often None — embedded in content)
+        List of evidence dicts (deduplicated by URL), each with:
+          - source_type: "web" or "wikipedia"
+          - source_url: URL extracted from tool output (None for DDG)
+          - title: Page/article title
           - content: The evidence text/snippet
           - supports_claim: None (determined by the judge step later)
     """
@@ -255,16 +372,6 @@ async def research_claim(sub_claim: str, max_steps: int = 14, timeout_secs: int 
 
         # Extract evidence from tool results in the conversation
         evidence = extract_evidence(result["messages"])
-
-        # Also capture the agent's final analysis as a summary
-        final_msg = result["messages"][-1]
-        if isinstance(final_msg, AIMessage) and final_msg.content:
-            evidence.append({
-                "source_type": "agent_summary",
-                "source_url": None,
-                "content": final_msg.content[:2000],
-                "supports_claim": None,
-            })
 
         log.info(logger, MODULE, "done", "Research agent complete",
                  sub_claim=sub_claim, evidence_count=len(evidence),

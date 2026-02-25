@@ -75,13 +75,16 @@ class VerifyClaimWorkflow:
         log.info(workflow.logger, MODULE, "started", "Starting verification pipeline",
                  claim_id=claim_id, claim=claim_text)
 
-        # Step 1: Decompose — extract atomic facts in one pass
-        atomic_facts = await workflow.execute_activity(
+        # Step 1: Decompose — extract atomic facts + thesis in one pass
+        decomposition = await workflow.execute_activity(
             decompose_claim,
             args=[claim_text],
             start_to_close_timeout=timedelta(seconds=60),
             retry_policy=RetryPolicy(maximum_attempts=3),
         )
+
+        atomic_facts = decomposition["facts"]
+        thesis_info = decomposition.get("thesis_info", {})
 
         # Cap to prevent runaway decompositions
         if len(atomic_facts) > MAX_FACTS:
@@ -93,7 +96,9 @@ class VerifyClaimWorkflow:
         log.info(workflow.logger, MODULE, "decomposed",
                  "Claim decomposed into atomic facts",
                  claim_id=claim_id, fact_count=len(atomic_facts),
-                 facts=[f["text"] for f in atomic_facts])
+                 facts=[f["text"] for f in atomic_facts],
+                 thesis=thesis_info.get("thesis"),
+                 structure=thesis_info.get("structure"))
 
         # Step 2: Research + judge each fact
         # Process in batches of MAX_CONCURRENT for parallel execution
@@ -113,7 +118,7 @@ class VerifyClaimWorkflow:
             result = await workflow.execute_activity(
                 judge_subclaim,
                 args=[claim_text, fact_text, evidence],
-                start_to_close_timeout=timedelta(seconds=180),
+                start_to_close_timeout=timedelta(seconds=300),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
             return result
@@ -121,15 +126,22 @@ class VerifyClaimWorkflow:
         sub_results = []
         for i in range(0, len(atomic_facts), MAX_CONCURRENT):
             batch = atomic_facts[i:i + MAX_CONCURRENT]
+            batch_num = i // MAX_CONCURRENT + 1
             log.info(workflow.logger, MODULE, "batch_start",
                      "Starting fact batch",
                      claim_id=claim_id,
-                     batch_num=i // MAX_CONCURRENT + 1,
+                     batch_num=batch_num,
                      batch_size=len(batch))
 
+            _t0 = workflow.time()
             batch_results = list(await asyncio.gather(
                 *[_research_and_judge(fact["text"]) for fact in batch]
             ))
+            _batch_ms = round((workflow.time() - _t0) * 1000)
+            log.info(workflow.logger, MODULE, "batch_done",
+                     "Fact batch completed",
+                     claim_id=claim_id, batch_num=batch_num,
+                     batch_size=len(batch), latency_ms=_batch_ms)
             sub_results.extend(batch_results)
 
         # Step 3: Synthesize all verdicts into final result
@@ -139,7 +151,7 @@ class VerifyClaimWorkflow:
         else:
             result = await workflow.execute_activity(
                 synthesize_verdict,
-                args=[claim_text, claim_text, sub_results, True],
+                args=[claim_text, claim_text, sub_results, True, thesis_info],
                 start_to_close_timeout=timedelta(seconds=60),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )

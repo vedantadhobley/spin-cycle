@@ -51,8 +51,8 @@ async def search_wikipedia(query: str, max_results: int = 3) -> list[dict]:
                 "url": f"https://en.wikipedia.org/wiki/{item['title'].replace(' ', '_')}",
             })
 
-        log.debug(logger, MODULE, "wiki_search_done", "Wikipedia search complete",
-                  query=query, result_count=len(results))
+        log.info(logger, MODULE, "wiki_search_done", "Wikipedia search complete",
+                 query=query, result_count=len(results))
         return results
 
 
@@ -72,6 +72,8 @@ def get_wikipedia_tool():
         notable people, and verifiable statistics. Returns article
         titles, URLs, and summary snippets.
         """
+        log.info(logger, MODULE, "wiki_query", "Wikipedia search query",
+                 query=query)
         try:
             results = await search_wikipedia(query, max_results=3)
         except Exception as e:

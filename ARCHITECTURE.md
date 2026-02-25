@@ -26,7 +26,7 @@ There are three major technologies in play, each doing a different job. Understa
 LangChain is the **toolbox**. It provides:
 
 - **`ChatOpenAI`** — the LLM client that talks to joi's OpenAI-compatible API. Every LLM call in the project goes through this class. It handles message formatting, streaming, structured output, and tool calling.
-- **LangChain tools** — standardised interfaces for external services. DuckDuckGo search, Wikipedia, NewsAPI are all wrapped as LangChain tools with a common `.invoke()` / `.ainvoke()` API.
+- **LangChain tools** — standardised interfaces for external services. DuckDuckGo search, Wikipedia, SearXNG, Serper, Brave, and page fetching are all wrapped as LangChain tools with a common `.invoke()` / `.ainvoke()` API.
 - **Message types** — `SystemMessage`, `HumanMessage`, `AIMessage`, `ToolMessage`. These are the primitives that make up an LLM conversation.
 
 LangChain does NOT handle orchestration, retries, scheduling, or state persistence. It's the building blocks.
@@ -67,9 +67,6 @@ This is what makes the research step **agentic** — the LLM autonomously decide
 
 **Where it's used:**
 - `src/agent/research.py` — `create_react_agent()` builds the ReAct agent for evidence gathering
-- `src/agent/graph.py` — standalone `StateGraph` verification graph (currently stubbed, may be consolidated)
-- `src/agent/state.py` — `VerificationState` TypedDict for the graph
-- `src/agent/nodes.py` — stub node functions for the standalone graph
 
 ### Temporal (durable workflow orchestration)
 
@@ -120,22 +117,34 @@ A claim enters the system (via API or extraction) and is processed as a **flat p
 | judge_subclaim | Thinking (`:3102`) | Genuine reasoning under uncertainty — weighing conflicting evidence |
 | synthesize_verdict | Instruct (`:3101`) | Structured aggregation of sub-verdicts |
 
-### Step 1: decompose_claim (flat atomic fact extraction)
+### Step 1: decompose_claim (flat atomic fact extraction + thesis)
 
 **File:** `src/activities/verify_activities.py`
 **Prompt:** `src/prompts/verification.py` → `DECOMPOSE_SYSTEM` / `DECOMPOSE_USER`
 
-The LLM breaks a text into its **atomic, independently verifiable facts** — all in one call. No recursion, no tree structure.
+The LLM breaks a text into its **atomic, independently verifiable facts** and extracts a **thesis** — all in one call. No recursion, no tree structure.
 
 ```
 Input:  "The US and China are both increasing military spending while cutting foreign aid"
-Output: [
-  { "text": "The US is increasing military spending" },
-  { "text": "The US is cutting foreign aid" },
-  { "text": "China is increasing military spending" },
-  { "text": "China is cutting foreign aid" }
-]
+Output: {
+  "thesis": "The US and China are prioritizing military spending over foreign aid.",
+  "structure": "parallel_comparison",
+  "key_test": "Both countries must show increased military spending AND decreased foreign aid.",
+  "facts": [
+    { "text": "The US is increasing military spending" },
+    { "text": "China is increasing military spending" },
+    { "text": "The US is cutting foreign aid" },
+    { "text": "China is cutting foreign aid" }
+  ]
+}
 ```
+
+The **thesis extraction** (piggybacked on decompose) captures the speaker's rhetorical intent:
+- `thesis` — the argument the speaker is making
+- `structure` — `simple`, `parallel_comparison`, `causal`, or `ranking`
+- `key_test` — what must be true for the thesis to hold
+
+This is passed to the synthesizer so it evaluates whether the speaker's **argument** survives the evidence, not just whether a majority of sub-facts are individually true. Without this, a claim comparing two countries could be rated `mostly_true` if 5 of 6 facts check out — even if the one false fact (e.g., China cutting aid when it's actually increasing) completely invalidates the speaker's thesis.
 
 The key design insight: **claims are flat structures, not hierarchical ones.** Recursive decomposition caused tree explosion — the LLM would include the original claim as a sub-claim, causing infinite recursion, and split comparisons into truisms ("US spends money on military" — trivially true). Flat extraction avoids both problems.
 
@@ -144,6 +153,8 @@ The prompt includes explicit anti-patterns: never split comparisons, never inclu
 The output is normalized via `_normalize_flat()`: bare strings become `{"text": "..."}` dicts, and legacy group structures are flattened into their leaves.
 
 Decompose and synthesize use the instruct model for clean JSON output. Judge uses the thinking model for chain-of-thought reasoning — its `<think>...</think>` blocks are stripped before parsing. If JSON parsing fails, we fall back to the original claim as a single sub-claim.
+
+All prompts include `Today's date: {current_date}` (formatted at call time) so the LLM knows the current date when evaluating temporal claims.
 
 ### Step 2: research_subclaim (the agentic part)
 
@@ -196,85 +207,89 @@ Output: {"verdict": "true", "confidence": 0.95,
          "reasoning": "Multiple sources confirm..."}
 ```
 
-Sub-claim verdicts: `true` | `false` | `partially_true` | `unverifiable`
+Sub-claim verdicts: `true` | `mostly_true` | `mixed` | `mostly_false` | `false` | `unverifiable`
+
+The judge uses a **6-level verdict scale** with spirit-vs-substance guidance:
+- `true` — core assertion and key details are correct
+- `mostly_true` — spirit is right, minor details off (e.g., "$50B" when the real figure is $48B)
+- `mixed` — substantial parts both confirmed and contradicted
+- `mostly_false` — core thrust is wrong, but contains some accurate elements
+- `false` — directly contradicted by evidence
+- `unverifiable` — insufficient evidence to determine
 
 If there's no evidence, we short-circuit to "unverifiable" without calling the LLM.
 
-### Step 4: synthesize_verdict (unified synthesis)
+### Step 4: synthesize_verdict (thesis-aware synthesis)
 
 **File:** `src/activities/verify_activities.py`
 **Prompt:** `src/prompts/verification.py` → `SYNTHESIZE_SYSTEM` / `SYNTHESIZE_USER`
 
-A single, unified synthesis activity used at **every level** of the tree. After a compound node's children are all processed, this activity combines their results into a verdict for that node. The same activity handles both intermediate synthesis (depth > 0) and final synthesis (depth = 0) — the prompt adapts via an `is_final` parameter that controls framing and context.
+A single synthesis activity that combines sub-claim verdicts into an overall verdict. When thesis info is available (from the decompose step), the synthesizer evaluates whether the **speaker's argument** survives the sub-verdicts — not just whether a majority of facts are true.
 
 ```
 Input:  claim_text = "The US and China are both increasing military..."
-        node_text = "The US and China are both increasing military..."  (same at depth 0)
         child_results = [
-            {"sub_claim": "US increasing military spending", "verdict": "true", ...},
-            {"sub_claim": "US cutting foreign aid", "verdict": "true", ...},
+            {"sub_claim": "US increasing military spending", "verdict": "mostly_true", ...},
             {"sub_claim": "China increasing military spending", "verdict": "true", ...},
+            {"sub_claim": "US cutting foreign aid", "verdict": "mostly_true", ...},
             {"sub_claim": "China cutting foreign aid", "verdict": "false", ...}
         ]
+        thesis_info = {
+            "thesis": "The US and China are prioritizing military spending over foreign aid.",
+            "structure": "parallel_comparison",
+            "key_test": "Both countries must show increased military spending AND decreased foreign aid."
+        }
         is_final = True
-Output: {"verdict": "mostly_false", "confidence": 0.95,
-         "reasoning": "While the US claims are supported, China is NOT cutting foreign aid...",
-         "child_results": [...], "reasoning_chain": [...]}
+Output: {"verdict": "mostly_false", "confidence": 0.85,
+         "reasoning": "The thesis requires both countries to be cutting foreign aid. China is actually increasing it, which undermines the core argument.",
+         "nuance": "The US part holds — increased military spending and reduced foreign aid. But the parallel comparison fails because China contradicts the thesis."}
 ```
 
-The prompt instructs the LLM to **weigh by importance, not by count** — if one sub-claim is the core assertion and another is incidental, the core claim should dominate the verdict. When `is_final=True`, the prompt adds framing for a definitive public-facing verdict with a reasoning chain.
+The thesis is injected as a `SPEAKER'S THESIS` block in the synthesis prompt. The synthesizer is instructed to use the thesis as its **primary rubric** — evaluating whether THAT ARGUMENT survives the sub-verdicts, not whether a numerical majority of facts are true.
 
 Why use LLM instead of averaging? Because "X happened in 2019 and cost $50M" where the event DID happen but in 2020 and cost $48M is "mostly true" — the core claim is right, details are slightly off. An LLM makes this nuance call better than math.
 
-The **unified 6-level verdict scale** is used at all tree levels:
-`true` | `mostly_true` | `mixed` | `mostly_false` | `false` | `unverifiable`
-
-Previously, intermediate groups used a coarser 4-level scale that lost expressiveness. Now a group can be `mostly_true` instead of being forced into `true` or `partially_true`.
-
-### Step 5: store_result (structure-aware)
+### Step 5: store_result
 
 **File:** `src/activities/verify_activities.py`
 
-Takes the full recursive result dict and writes it to Postgres:
-- One `SubClaim` row per node in the tree (both compound nodes and leaves)
-  - Compound nodes: `is_leaf=False`, text is the node/group text
-  - Leaf nodes: `is_leaf=True`, text is the verifiable assertion
-  - `parent_id` links children to their parent node (self-referential FK)
+Takes the result dict and writes it to Postgres:
+- One `SubClaim` row per atomic fact (all `is_leaf=True` in the flat pipeline)
 - One `Evidence` row per evidence item (source_type, content, URL) — linked to leaf sub-claims
-- One `Verdict` row (overall verdict, confidence, reasoning, reasoning_chain as JSONB)
+- One `Verdict` row (overall verdict, confidence, reasoning, nuance)
 - Updates `Claim.status` to "verified"
-
-The result tree is stored recursively via `_store_node()` — parent nodes are stored first, then children with `parent_id` set. For atomic results (single leaf, no `child_results`), the leaf is stored directly.
 
 Evidence records with `source_type` not in the DB enum (`web`, `wikipedia`, `news_api`) are filtered out — the agent_summary doesn't get stored.
 
 ### Workflow Orchestration (flat pipeline)
 
-The workflow processes claims in a flat pipeline — one decompose call, then research+judge in parallel batches, then synthesize.
+The workflow processes claims in a flat pipeline — one decompose call (with thesis extraction), then research+judge in parallel batches, then thesis-aware synthesis.
 
 ```
 VerifyClaimWorkflow
 ├── create_claim (if needed)
-├── decompose_claim (60s timeout) → list of atomic facts
+├── decompose_claim (60s timeout) → {facts: [...], thesis_info: {thesis, structure, key_test}}
 │
 ├── For each batch of MAX_CONCURRENT=2 facts:
 │   └── asyncio.gather(
-│       ├── research_subclaim (180s timeout) → judge_subclaim (180s timeout)
-│       └── research_subclaim (180s timeout) → judge_subclaim (180s timeout)
+│       ├── research_subclaim (180s timeout) → judge_subclaim (300s timeout)
+│       └── research_subclaim (180s timeout) → judge_subclaim (300s timeout)
 │       )
 │
 ├── IF 1 fact: skip synthesis, use judgment directly
-├── IF 2+ facts: synthesize_verdict (60s timeout, is_final=True)
+├── IF 2+ facts: synthesize_verdict (60s timeout, is_final=True, thesis_info passed)
 │
 └── store_result (30s timeout)
 ```
 
 Key properties:
-- **Flat, not recursive** — no tree, no recursion, no MAX_DEPTH. One decompose call produces all atomic facts.
+- **Flat, not recursive** — no tree, no recursion, no MAX_DEPTH. One decompose call produces all atomic facts + thesis.
+- **Thesis-aware** — the decompose step extracts the speaker's intent (thesis, structure, key_test) and passes it to synthesis. The synthesizer evaluates whether the argument survives the evidence, not just whether a majority of facts are true.
 - **MAX_FACTS = 6** — safety limit. Complex claims are capped at 6 facts.
-- **MAX_CONCURRENT = 2** — matched to `--parallel 2` on the LLM server. Two research agents run simultaneously, each getting half the GPU bandwidth. Higher concurrency is strictly worse with llama.cpp (see GPU Compute below).
+- **MAX_CONCURRENT = 2** — matched to `--parallel 2` on the LLM server. Two research agents run simultaneously, each getting half the GPU bandwidth.
 - **Single synthesis** — `synthesize_verdict` combines all fact-level judgments into one final verdict. Single-fact claims skip synthesis entirely.
 - **Temporal retries per activity** — if one research call fails, only that activity retries (max 3 attempts).
+- **Date-aware** — all prompts include `Today's date: {current_date}` so the LLM references current data, not training cutoff data.
 
 ### GPU Compute Constraints
 
@@ -283,7 +298,7 @@ The LLMs run on joi via llama.cpp with `--parallel N` slots. This multiplexes co
 | Service | Port | `--parallel` | Why |
 |---------|------|-------------|-----|
 | Instruct | `:3101` | 4 | Shared with found-footy (4 concurrent) |
-| Thinking | `:3102` | 2 | Spin Cycle research uses 2 concurrent |
+| Thinking | `:3102` | 2 | Judge uses 2 concurrent (matched to MAX_CONCURRENT=2) |
 | Embedding | `:3103` | 4 | Fast, low-latency |
 
 `MAX_CONCURRENT=2` is matched to `--parallel 2` on the thinking model. Each agent gets ~50% GPU bandwidth. Higher concurrency doesn't improve wall-clock time — it just increases per-request latency.
@@ -678,7 +693,6 @@ spin-cycle-dev-adminer           :4502  ← Postgres web UI (Dracula theme)
 - Serper — Google search API (requires `SERPER_API_KEY`)
 - Brave Search — web search API (requires `BRAVE_API_KEY`)
 - Wikipedia API — factual lookups (no API key)
-- NewsAPI — news search (requires key, optional)
 
 ---
 
@@ -828,18 +842,18 @@ Config: `~/workspace/monitor/promtail/promtail.yml`
 | Docker infrastructure | **Done** | 7 containers, health checks, volume persistence |
 | PostgreSQL schema | **Done** | 4 tables: claims, sub_claims (with tree structure), evidence, verdicts |
 | FastAPI API | **Done** | POST/GET claims, health check, lifespan management |
-| Temporal workflow | **Done** | VerifyClaimWorkflow with 6 activities, recursive _process pattern, MAX_DEPTH=3, retry policies |
+| Temporal workflow | **Done** | VerifyClaimWorkflow with 5 activities, flat pipeline, thesis-aware synthesis, retry policies |
 | Temporal worker | **Done** | Registers workflow + 6 activities, structured logging configured |
-| `decompose_claim` | **Done** | LLM decomposes text into immediate sub-parts (single level, called recursively by workflow) |
+| `decompose_claim` | **Done** | LLM decomposes text into atomic facts + thesis (structure, key_test) in one flat pass |
 | `research_subclaim` | **Done** | LangGraph ReAct agent with SearXNG + DuckDuckGo + Serper + Brave + Wikipedia + page_fetcher |
 | `judge_subclaim` | **Done** | LLM evaluates evidence, returns structured verdict |
-| `synthesize_verdict` | **Done** | Unified synthesis — handles both intermediate and final levels via `is_final` parameter (importance-weighted) |
-| `store_result` | **Done** | Writes full recursive result tree to Postgres (parent_id, is_leaf) |
+| `synthesize_verdict` | **Done** | Thesis-aware synthesis — evaluates whether speaker's argument survives sub-verdicts (importance-weighted, not count-based) |
+| `store_result` | **Done** | Writes flat result to Postgres (all sub-claims as leaves) |
 | Source quality filtering | **Done** | Domain blocklist (~40 domains) filters all search results + page fetches |
 | Prompts | **Done** | 4 prompt pairs documented in `src/prompts/verification.py` |
 | LLM connectivity | **Done** | Dual-model: instruct (:3101, max_tokens=2048) + thinking (:3102, max_tokens=4096) on joi |
 | Logging | **Done** | Structured JSON logging via `src/utils/logging.py`, Promtail → Loki → Grafana |
-| Tests | **Done** | Graph compilation, health endpoint, schema validation |
+| Tests | **Done** | Health endpoint, schema validation |
 
 ### What's Planned
 
@@ -984,10 +998,7 @@ spin-cycle/
 │   │       └── claims.py          # POST + GET claims
 │   │
 │   ├── agent/                      # LangGraph agents
-│   │   ├── research.py             # ReAct research agent (multi-source search)
-│   │   ├── graph.py                # Standalone verification graph (stubbed)
-│   │   ├── nodes.py                # Graph node functions (stubbed)
-│   │   └── state.py                # VerificationState TypedDict
+│   │   └── research.py             # ReAct research agent (multi-source search)
 │   │
 │   ├── tools/                      # LangChain tools for the agent
 │   │   ├── source_filter.py        # Domain blocklist — filters junk sources from all tools
@@ -996,8 +1007,7 @@ spin-cycle/
 │   │   ├── brave.py                # Brave Search API
 │   │   ├── web_search.py           # DuckDuckGo search wrapper
 │   │   ├── wikipedia.py            # Wikipedia API with @tool decorator
-│   │   ├── page_fetcher.py         # URL → text extraction (respects blocklist)
-│   │   └── news_api.py             # NewsAPI client (requires key)
+│   │   └── page_fetcher.py         # URL → text extraction (respects blocklist)
 │   │
 │   ├── prompts/                    # All LLM prompts with documentation
 │   │   └── verification.py         # Decompose, Research, Judge, Synthesize
@@ -1019,7 +1029,6 @@ spin-cycle/
 │   └── init_db.py                  # Database initialisation script
 │
 └── tests/
-    ├── test_graph.py               # Graph compiles + has expected nodes
     ├── test_health.py              # Health endpoint tests
     └── test_schemas.py             # Schema validation tests
 ```
@@ -1040,7 +1049,4 @@ spin-cycle/
 | `pydantic` | >=2.0 | Request/response validation |
 | `sqlalchemy` | >=2.0 | Async ORM (PostgreSQL) |
 | `asyncpg` | >=0.30.0 | Async PostgreSQL driver |
-| `alembic` | >=1.14.0 | Database migrations (not yet initialised) |
-| `httpx` | >=0.28.0 | Async HTTP client (Wikipedia, NewsAPI) |
-| `ddgs` | >=7.0.0 | DuckDuckGo search backend |
-| `python-dotenv` | >=1.0.0 | .env file loading |
+| `httpx` | >=0.28.0 | Async HTTP client (Wikipedia, Serper, Brave, SearXNG) |

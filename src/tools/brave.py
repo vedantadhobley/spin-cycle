@@ -37,8 +37,10 @@ async def search_brave(query: str, max_results: int = 5) -> list[dict]:
     if not BRAVE_API_KEY:
         return []
 
+    import time as _time
     log.debug(logger, MODULE, "brave_start", "Brave search starting",
               query=query, max_results=max_results)
+    _t0 = _time.monotonic()
 
     async with httpx.AsyncClient() as client:
         try:
@@ -70,8 +72,9 @@ async def search_brave(query: str, max_results: int = 5) -> list[dict]:
 
             results = filter_results(results)[:max_results]
 
-            log.debug(logger, MODULE, "brave_done", "Brave search complete",
-                      query=query, result_count=len(results))
+            log.info(logger, MODULE, "brave_done", "Brave search complete",
+                     query=query, result_count=len(results),
+                     latency_ms=int((_time.monotonic() - _t0) * 1000))
             return results
 
         except Exception as e:
@@ -96,6 +99,8 @@ def get_brave_tool():
         misses or ranks differently. Use this alongside Google/Serper for
         source diversity.
         """
+        log.info(logger, MODULE, "brave_query", "Brave search query",
+                 query=query)
         try:
             results = await search_brave(query, max_results=5)
         except Exception as e:

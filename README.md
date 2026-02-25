@@ -38,9 +38,12 @@ Because we're putting the spin through the wringer.
               │  └─────────┘  └──────────┘  └────────────────┘  │
               │                      │                            │
               │               ┌──────▼──────┐                    │
+              │               │ SearXNG     │                    │
+              │               │ Serper      │                    │
               │               │ DuckDuckGo  │                    │
+              │               │ Brave       │                    │
               │               │ Wikipedia   │                    │
-              │               │ NewsAPI     │                    │
+              │               │ Page Fetch  │                    │
               │               └─────────────┘                    │
               └─────────────────────────────────────────────────┘
 ```
@@ -52,7 +55,7 @@ Because we're putting the spin through the wringer.
 | Agent framework | [LangGraph](https://langchain-ai.github.io/langgraph/) | ReAct agent for autonomous evidence gathering |
 | LLM toolkit | [LangChain](https://python.langchain.com/) | ChatOpenAI client, tool wrappers, message types |
 | Workflow engine | [Temporal](https://temporal.io/) | Durable execution, retries, scheduling, visibility |
-| LLM | Qwen3-VL-30B-A3B (on joi via llama.cpp) | Instruct (:3101) for decompose/synthesize, Thinking (:3102) for research/judge |
+| LLM | Qwen3-VL-30B-A3B (on joi via llama.cpp) | Instruct (:3101) for decompose/research/synthesize, Thinking (:3102) for judge |
 | Database | PostgreSQL 16 + SQLAlchemy 2.0 (async) | Claims, sub-claims, evidence, verdicts |
 | API | FastAPI | REST endpoints for claim submission and querying |
 
@@ -68,33 +71,27 @@ curl -X POST http://localhost:4500/claims \
 
 ### 2. Verification Pipeline (Temporal workflow)
 
-The claim triggers `VerifyClaimWorkflow` — 6 activities orchestrated recursively:
+The claim triggers `VerifyClaimWorkflow` — a flat pipeline of 5 activities:
 
 ```
 create_claim          Creates DB record (skipped if called via API)
     ↓
-_process(claim_text, depth=0)    Recursive processing function
-    │
-    ├── decompose_claim       LLM splits text into sub-parts (one level)
-    │
-    ├── IF ≤1 item (atomic):   → leaf path
-    │     research_subclaim   LangGraph ReAct agent searches
-    │        ↓                SearXNG + DuckDuckGo + Serper +
-    │        ↓                Brave + Wikipedia + page_fetcher
-    │        ↓                (all filtered for source quality)
-    │     judge_subclaim      LLM evaluates evidence
-    │
-    ├── IF 2+ items (compound): → branch path
-    │     → asyncio.gather(*[_process(child, depth+1)])
-    │     → synthesize_verdict  LLM synthesizes children's verdicts
-    │                           (adapts prompt for final vs intermediate)
-    │
-    └── MAX_DEPTH=3 safety limit (forces leaf at max depth)
+decompose_claim       LLM extracts atomic facts + thesis (intent, structure, key_test)
     ↓
-store_result          Writes recursive result tree to Postgres
+For each batch of 2 facts (parallel):
+    research_subclaim   LangGraph ReAct agent searches
+       ↓                SearXNG + DuckDuckGo + Serper +
+       ↓                Brave + Wikipedia + page_fetcher
+       ↓                (all filtered for source quality)
+    judge_subclaim      LLM evaluates evidence (6-level verdict scale)
+    ↓
+synthesize_verdict    LLM combines sub-verdicts using the speaker's thesis
+                      as primary rubric (not naive fact counting)
+    ↓
+store_result          Writes results to Postgres
 ```
 
-The tree structure **emerges from recursion** — it's not planned upfront. Simple claims stay flat, complex claims go deeper naturally.
+The thesis extraction ensures the synthesizer understands the **intent** of the claim, not just the individual facts. For example, a claim saying "both US and China are cutting foreign aid" is rated `mostly_false` even though 5/6 sub-facts are true — because China is actually *increasing* foreign aid, which breaks the parallel comparison.
 
 ### 3. Result
 
@@ -227,12 +224,12 @@ docker logs -f spin-cycle-dev-worker
 # With LOG_FORMAT=pretty (default in dev), you'll see:
 # I [WORKER    ] starting: Connecting to Temporal | temporal_host=... task_queue=spin-cycle-verify
 # I [WORKER    ] ready: Worker listening | task_queue=spin-cycle-verify activity_count=6
-# I [DECOMPOSE ] done: Claim decomposed | sub_count=4
-# I [WORKFLOW  ] branch: Processing compound node | depth=0 num_children=4
+# I [DECOMPOSE ] done: Claim decomposed | sub_count=4 thesis=The US and China are prioritizing...
+# I [WORKFLOW  ] decomposed: Claim decomposed into atomic facts | fact_count=4
 # I [RESEARCH  ] start: Starting research agent | sub_claim=The US is increasing military spending
 # I [RESEARCH  ] done: Research complete | evidence_count=6
 # I [JUDGE     ] done: Sub-claim judged | verdict=true confidence=0.95
-# I [SYNTHESIZE] done: Verdict synthesized | is_final=True verdict=mostly_false confidence=0.95
+# I [SYNTHESIZE] done: Verdict synthesized | is_final=True verdict=mostly_false confidence=0.85
 # I [STORE     ] done: Result stored in database | claim_id=... verdict=mostly_false
 
 # With LOG_FORMAT=json (default in prod), output is JSON for Grafana Loki
@@ -242,13 +239,13 @@ docker logs -f spin-cycle-dev-worker
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LLAMA_URL` | `http://joi:3101` | Instruct LLM endpoint (fast, structured output: decompose, synthesize) |
-| `LLAMA_REASONING_URL` | `http://joi:3102` | Thinking LLM endpoint (chain-of-thought: research, judge) |
+| `LLAMA_URL` | `http://joi:3101` | Instruct LLM endpoint (fast, structured output: decompose, research, synthesize) |
+| `LLAMA_REASONING_URL` | `http://joi:3102` | Thinking LLM endpoint (chain-of-thought: judge) |
 | `LLAMA_EMBED_URL` | `http://joi:3103` | Embeddings endpoint (not yet used) |
 | `POSTGRES_PASSWORD` | `spin-cycle-dev` | Application Postgres password |
 | `LOG_FORMAT` | `json` (prod) / `pretty` (dev) | Log output format — `json` for Grafana Loki, `pretty` for terminal |
 | `LOG_LEVEL` | `INFO` | Log level — `DEBUG`, `INFO`, `WARNING`, `ERROR` |
-| `NEWSAPI_KEY` | (empty) | NewsAPI key for news search evidence (optional) |
+| `NEWSAPI_KEY` | (empty) | NewsAPI key (not currently wired — future use) |
 | `SERPER_API_KEY` | (empty) | Serper key for Google search evidence |
 | `BRAVE_API_KEY` | (empty) | Brave Search API key |
 | `SEARXNG_URL` | `http://searxng:8080` | SearXNG meta-search endpoint (self-hosted) |
@@ -309,8 +306,7 @@ spin-cycle/
 │   │   ├── brave.py                # Brave Search API
 │   │   ├── web_search.py           # DuckDuckGo
 │   │   ├── wikipedia.py            # Wikipedia API
-│   │   ├── page_fetcher.py         # URL → text extraction
-│   │   └── news_api.py             # NewsAPI
+│   │   └── page_fetcher.py         # URL → text extraction
 │   │
 │   ├── prompts/                    # LLM prompts (heavily documented)
 │   │   └── verification.py         # Decompose, Research, Judge, Synthesize
@@ -329,7 +325,6 @@ spin-cycle/
 │       └── schemas.py              # Pydantic schemas
 │
 └── tests/
-    ├── test_graph.py
     ├── test_health.py
     └── test_schemas.py
 ```

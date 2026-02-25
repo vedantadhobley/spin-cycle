@@ -107,6 +107,8 @@ async def get_claim(
     try:
         claim_uuid = uuid.UUID(claim_id)
     except ValueError:
+        log.warning(logger, MODULE, "invalid_id", "Invalid claim ID format",
+                    claim_id=claim_id)
         raise HTTPException(status_code=400, detail="Invalid claim ID")
 
     result = await session.execute(
@@ -119,7 +121,12 @@ async def get_claim(
     )
     claim = result.scalar_one_or_none()
     if not claim:
+        log.info(logger, MODULE, "not_found", "Claim not found",
+                 claim_id=claim_id)
         raise HTTPException(status_code=404, detail="Claim not found")
+
+    log.debug(logger, MODULE, "get_claim", "Claim retrieved",
+              claim_id=claim_id, status=claim.status)
 
     sub_claim_responses = _build_sub_claim_tree(claim.sub_claims)
 

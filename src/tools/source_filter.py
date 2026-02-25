@@ -146,7 +146,7 @@ def filter_results(results: list[dict], url_key: str = "url") -> list[dict]:
             filtered.append(r)
 
     if blocked_count > 0:
-        log.debug(logger, MODULE, "source_filter", "Filtered low-quality sources",
-                  blocked_count=blocked_count, kept_count=len(filtered))
+        log.info(logger, MODULE, "source_filter", "Filtered low-quality sources",
+                 blocked_count=blocked_count, kept_count=len(filtered))
 
     return filtered

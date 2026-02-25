@@ -17,8 +17,9 @@ No recursion, no tree — follows the approach used by Google's SAFE and FActSco
 
 import json
 import re
+import time
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from langchain_core.messages import SystemMessage, HumanMessage
 from sqlalchemy import select
@@ -66,46 +67,73 @@ async def create_claim(claim_text: str) -> str:
 
 
 @activity.defn
-async def decompose_claim(claim_text: str) -> list[dict]:
-    """Extract atomic verifiable facts from a claim in one flat pass.
+async def decompose_claim(claim_text: str) -> dict:
+    """Extract atomic verifiable facts and thesis from a claim in one pass.
 
-    Returns a flat list of {"text": "..."} dicts, each an atomic fact.
+    Returns a dict with:
+      - "facts": list of {"text": "..."} dicts, each an atomic fact
+      - "thesis_info": {"thesis": "...", "structure": "...", "key_test": "..."}
 
-    If the claim is atomic, returns [{"text": "the original claim"}].
-    If the claim is compound, returns 2-6 atomic facts.
+    If the claim is atomic, facts will be [{"text": "the original claim"}].
+    If the claim is compound, facts will be 2-6 atomic facts.
 
-    Falls back to a single item if JSON parsing fails.
+    Falls back to a single item with no thesis if JSON parsing fails.
     """
     log.info(activity.logger, "decompose", "start", "Decomposing claim",
              claim=claim_text)
     llm = get_llm()
 
+    _t0 = time.monotonic()
     response = await llm.ainvoke([
         SystemMessage(content=DECOMPOSE_SYSTEM),
         HumanMessage(content=DECOMPOSE_USER.format(claim_text=claim_text)),
     ])
+    _latency = int((time.monotonic() - _t0) * 1000)
 
     raw = response.content.strip()
+    log.info(activity.logger, "decompose", "llm_call", "Decompose LLM call complete",
+             model="instruct", latency_ms=_latency)
     log.debug(activity.logger, "decompose", "llm_response", "LLM response received",
               raw=raw)
 
-    # Parse the JSON list from the LLM response
+    # Parse the JSON response — now returns {thesis, structure, key_test, facts}
     try:
-        items = json.loads(raw)
-        if not isinstance(items, list):
-            raise ValueError(f"Expected list, got: {type(items)}")
-        result = _normalize_flat(items)
-        if not result:
-            raise ValueError("LLM returned empty list")
+        parsed = json.loads(raw)
+
+        # Handle both old format (bare list) and new format (object with facts)
+        if isinstance(parsed, list):
+            # Legacy: bare list of strings
+            facts = _normalize_flat(parsed)
+            thesis_info = {
+                "thesis": None,
+                "structure": "simple",
+                "key_test": None,
+            }
+        elif isinstance(parsed, dict) and "facts" in parsed:
+            facts = _normalize_flat(parsed["facts"])
+            thesis_info = {
+                "thesis": parsed.get("thesis"),
+                "structure": parsed.get("structure", "simple"),
+                "key_test": parsed.get("key_test"),
+            }
+        else:
+            raise ValueError(f"Unexpected format: {type(parsed)}")
+
+        if not facts:
+            raise ValueError("LLM returned empty facts list")
+
     except (json.JSONDecodeError, ValueError) as e:
         log.warning(activity.logger, "decompose", "parse_failed",
                     "Failed to parse LLM decomposition, using original claim",
                     error=str(e), raw=raw)
-        result = [{"text": claim_text}]
+        facts = [{"text": claim_text}]
+        thesis_info = {"thesis": None, "structure": "simple", "key_test": None}
 
     log.info(activity.logger, "decompose", "done", "Claim decomposed",
-             claim=claim_text, sub_count=len(result))
-    return result
+             claim=claim_text, sub_count=len(facts),
+             thesis=thesis_info.get("thesis"),
+             structure=thesis_info.get("structure"))
+    return {"facts": facts, "thesis_info": thesis_info}
 
 
 def _normalize_flat(items: list) -> list[dict]:
@@ -169,9 +197,9 @@ async def judge_subclaim(claim_text: str, sub_claim: str, evidence: list[dict]) 
 
     This is the critical evaluation step. The LLM looks at the evidence
     gathered by the research agent and determines:
-      - Does the evidence SUPPORT the claim? → "true"
-      - Does the evidence CONTRADICT the claim? → "false"
-      - Is the claim broadly correct but has inaccuracies? → "partially_true"
+      - Does the evidence SUPPORT the claim? → "true" or "mostly_true"
+      - Does the evidence CONTRADICT the claim? → "false" or "mostly_false"
+      - Is the picture mixed? → "mixed"
       - Is there not enough evidence to decide? → "unverifiable"
 
     The key constraint: the LLM must reason ONLY from the provided evidence,
@@ -200,24 +228,68 @@ async def judge_subclaim(claim_text: str, sub_claim: str, evidence: list[dict]) 
             "evidence": [],
         }
 
+    # Filter out agent_summary — it's the research agent's interpretation,
+    # not primary evidence. The judge should reason from sources only.
+    source_evidence = [
+        ev for ev in evidence
+        if ev.get("source_type") != "agent_summary"
+    ]
+
+    # Cap evidence to keep the judge prompt manageable.
+    # The thinking model's chain-of-thought scales super-linearly with
+    # evidence count — 34 items can take >180s while 20 takes ~60s.
+    # 20 unique items is plenty for a well-grounded verdict.
+    MAX_JUDGE_EVIDENCE = 20
+    if len(source_evidence) > MAX_JUDGE_EVIDENCE:
+        log.info(activity.logger, "judge", "evidence_capped",
+                 "Capping evidence for judge prompt",
+                 original=len(source_evidence), capped=MAX_JUDGE_EVIDENCE)
+        source_evidence = source_evidence[:MAX_JUDGE_EVIDENCE]
+
+    # Log which URLs the judge will see — critical for debugging verdicts
+    evidence_urls = [
+        ev.get("source_url") or "N/A"
+        for ev in source_evidence
+    ]
+    source_types = {}
+    for ev in source_evidence:
+        st = ev.get("source_type", "unknown")
+        source_types[st] = source_types.get(st, 0) + 1
+    log.info(activity.logger, "judge", "evidence_summary",
+             "Evidence prepared for judge",
+             sub_claim=sub_claim,
+             evidence_count=len(source_evidence),
+             source_types=source_types,
+             urls=evidence_urls)
+
     # Format evidence for the LLM prompt
     evidence_parts = []
-    for i, ev in enumerate(evidence, 1):
+    for i, ev in enumerate(source_evidence, 1):
         source = ev.get("source_type", "unknown")
+        title = ev.get("title", "")
         content = ev.get("content", "")
         url = ev.get("source_url") or "N/A"
-        evidence_parts.append(f"[{i}] Source: {source} | URL: {url}\n{content}")
+        header = f"[{i}] Source: {source}"
+        if title:
+            header += f" | {title}"
+        header += f" | URL: {url}"
+        evidence_parts.append(f"{header}\n{content}")
     evidence_text = "\n\n".join(evidence_parts)
 
     llm = get_reasoning_llm()
+    _t0 = time.monotonic()
     response = await llm.ainvoke([
-        SystemMessage(content=JUDGE_SYSTEM),
+        SystemMessage(content=JUDGE_SYSTEM.format(current_date=date.today().isoformat())),
         HumanMessage(content=JUDGE_USER.format(
             claim_text=claim_text,
             sub_claim=sub_claim,
             evidence_text=evidence_text,
         )),
     ])
+    _latency = int((time.monotonic() - _t0) * 1000)
+    log.info(activity.logger, "judge", "llm_call", "Judge LLM call complete",
+             model="thinking", latency_ms=_latency,
+             sub_claim=sub_claim)
 
     raw = response.content.strip()
 
@@ -241,8 +313,11 @@ async def judge_subclaim(claim_text: str, sub_claim: str, evidence: list[dict]) 
         reasoning = result.get("reasoning", "")
         nuance = result.get("nuance") or None
 
-        # Validate verdict is one of our expected values
-        valid_verdicts = {"true", "false", "partially_true", "unverifiable"}
+        # Validate verdict is one of our expected values (full 6-level scale)
+        valid_verdicts = {
+            "true", "mostly_true", "mixed",
+            "mostly_false", "false", "unverifiable",
+        }
         if verdict not in valid_verdicts:
             log.warning(activity.logger, "judge", "invalid_verdict",
                         "Invalid verdict from LLM, falling back to unverifiable",
@@ -281,6 +356,7 @@ async def synthesize_verdict(
     node_text: str,
     child_results: list[dict],
     is_final: bool = True,
+    thesis_info: dict | None = None,
 ) -> dict:
     """Combine child verdicts into a single verdict for a tree node.
 
@@ -315,7 +391,17 @@ async def synthesize_verdict(
             "This is the FINAL OVERALL verdict for the original claim. "
             "Your verdict is the definitive assessment."
         )
-        synthesis_framing = f"Original claim: {claim_text}"
+        # Build thesis context for the synthesizer
+        thesis_block = ""
+        if thesis_info and thesis_info.get("thesis"):
+            thesis_block = (
+                f"\n\nSPEAKER'S THESIS: {thesis_info['thesis']}\n"
+                f"Claim structure: {thesis_info.get('structure', 'simple')}\n"
+                f"Key test: {thesis_info.get('key_test', 'N/A')}\n"
+                f"\nEvaluate whether THIS THESIS survives the sub-verdicts, "
+                f"not just whether a majority of individual facts are true."
+            )
+        synthesis_framing = f"Original claim: {claim_text}{thesis_block}"
     else:
         synthesis_context = (
             f'This is an INTERMEDIATE verdict for one aspect of a larger claim: '
@@ -328,8 +414,10 @@ async def synthesize_verdict(
         )
 
     llm = get_llm()
+    t0 = time.monotonic()
     response = await llm.ainvoke([
         SystemMessage(content=SYNTHESIZE_SYSTEM.format(
+            current_date=date.today().isoformat(),
             synthesis_context=synthesis_context,
         )),
         HumanMessage(content=SYNTHESIZE_USER.format(
@@ -337,6 +425,10 @@ async def synthesize_verdict(
             sub_verdicts_text=sub_verdicts_text,
         )),
     ])
+    latency_ms = round((time.monotonic() - t0) * 1000)
+    log.info(activity.logger, "synthesize", "llm_call",
+             "Synthesize LLM call completed",
+             model="instruct", latency_ms=latency_ms, is_final=is_final)
 
     raw = response.content.strip()
     log.debug(activity.logger, "synthesize", "llm_response", "LLM response received",

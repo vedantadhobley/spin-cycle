@@ -35,8 +35,10 @@ async def search_serper(query: str, max_results: int = 5) -> list[dict]:
     if not SERPER_API_KEY:
         return []
 
+    import time as _time
     log.debug(logger, MODULE, "serper_start", "Serper search starting",
               query=query, max_results=max_results)
+    _t0 = _time.monotonic()
 
     async with httpx.AsyncClient() as client:
         try:
@@ -73,8 +75,9 @@ async def search_serper(query: str, max_results: int = 5) -> list[dict]:
 
             results = filter_results(results)[:max_results]
 
-            log.debug(logger, MODULE, "serper_done", "Serper search complete",
-                      query=query, result_count=len(results))
+            log.info(logger, MODULE, "serper_done", "Serper search complete",
+                     query=query, result_count=len(results),
+                     latency_ms=int((_time.monotonic() - _t0) * 1000))
             return results
 
         except Exception as e:
@@ -99,6 +102,8 @@ def get_serper_tool():
         This searches the full Google index — the most comprehensive
         web search available.
         """
+        log.info(logger, MODULE, "serper_query", "Serper search",
+                 query=query)
         try:
             results = await search_serper(query, max_results=5)
         except Exception as e:
