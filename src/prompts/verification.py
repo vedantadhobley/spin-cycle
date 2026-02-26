@@ -76,127 +76,215 @@ Verdict scale (6 levels):
 # =============================================================================
 
 DECOMPOSE_SYSTEM = """\
-You are a fact-checker's assistant. Your job is to extract ALL the \
-verifiable atomic facts from a claim in a SINGLE pass.
+You are a fact-checker's assistant. Your job is to extract a STRUCTURED \
+representation of all verifiable claims, ensuring NOTHING is missed.
 
-An "atomic fact" is a single, specific factual assertion that can be \
-independently verified through research. It should contain exactly ONE \
-checkable thing.
+Instead of listing facts directly, you will extract:
+1. ENTITIES — the subjects being discussed (people, countries, orgs)
+2. PREDICATES — what is being claimed about those entities
+3. For each predicate, WHICH entities it applies to
 
-Rules:
-- Extract 1-6 atomic facts from the claim
-- Each fact must be a specific, verifiable assertion
-- Each fact must stand on its own (understandable without the original)
-- Include specific numbers, dates, names when present in the original
-- Do NOT include opinions, predictions, or subjective statements
-- Each fact MUST cover a DIFFERENT verifiable point
+This structured approach ensures completeness: when a claim says "both X \
+and Y do Z", you explicitly mark Z as applying to BOTH X and Y. The system \
+will then programmatically expand to verify each combination.
 
-CRITICAL ANTI-PATTERNS — do NOT do these:
+STRUCTURE RULES:
 
-1. NEVER split a comparison into non-claims:
-   BAD:  "US gives less aid than France" → ["US gives aid", "France gives aid"]
-   GOOD: "US gives less aid than France" → ["US gives less aid than France"]
-   The comparison IS the claim. "US gives aid" is a truism, not a claim.
+1. ENTITIES: List all distinct subjects mentioned in the claim.
+   - Countries, people, organizations, etc.
+   - If "both" or "all" is used, list each entity separately.
 
-2. NEVER include the original claim (or a rephrasing) as a sub-claim:
-   BAD:  "X while Y" → ["X", "Y", "X while Y"]
-   GOOD: "X while Y" → ["X", "Y"]
+2. PREDICATES: Each distinct checkable assertion.
+   - Use a template with {{entity}} placeholder where the subject goes
+   - For entity-specific values (amounts, dates), use the detailed format
+   - Keep comparisons as separate predicate type
 
-3. NEVER decompose into overlapping facts:
-   BAD:  ["NASA landed on the moon", "NASA landed on the moon 6 times"]
-   GOOD: ["NASA landed on the moon 6 times"]
-   The more specific version subsumes the vague one.
+3. APPLIES_TO: Which entities this predicate applies to.
+   - Simple form: ["US", "China"] — predicate applies identically to both
+   - Detailed form: [{{"entity": "US", "value": "over $800B"}}] — for entity-specific values
 
-SPLITTING STRATEGY:
-Find the NATURAL fault lines — distinct verifiable assertions:
-- Different subjects/entities → split by subject
-- Different actions or outcomes → split by action
-- Conjunctions ("and", "while", "yet", "but") often mark split points
-- Comparatives/superlatives ("more than", "the most") are ONE fact, not two
+4. COMPARISONS: Claims that compare entities (keep as single facts, don't split)
+   - "US spends more than China" → one comparison, not two separate facts
 
-If the claim is ALREADY a single atomic fact, return it unchanged.
+5. ATTRIBUTIONS: When someone SAYS/CLAIMS something, extract BOTH:
+   - The attribution predicate: "{{entity}} claimed X"
+   - The substance predicate: the actual claim being made (WITHOUT attribution)
+   The substance is usually MORE IMPORTANT than who said it.
+
+CRITICAL — key_test VALIDATION:
+The key_test field describes what must be true for the thesis to hold. \
+After expansion, EVERY element mentioned in key_test MUST have a corresponding \
+fact. If your key_test says "both must do X", make sure "X" appears in \
+predicates with applies_to including BOTH entities.
 
 EXAMPLES:
 
-Atomic (no split):
+Simple claim (one entity, one predicate):
 "NASA landed on the moon 6 times"
-→ ["NASA landed on the moon 6 times"]
+→ {{
+  "thesis": "NASA successfully completed multiple moon landings",
+  "key_test": "NASA must have landed on the moon 6 times",
+  "structure": "simple",
+  "entities": ["NASA"],
+  "predicates": [
+    {{"claim": "{{entity}} landed on the moon 6 times", "applies_to": ["NASA"]}}
+  ],
+  "comparisons": []
+}}
 
-Comparison (keep as one fact):
-"The US spends more on military than the next 10 countries combined"
-→ ["The US spends more on military than the next 10 countries combined"]
+Comparison claim:
+"US spends more on military than China"
+→ {{
+  "thesis": "US military spending exceeds China's",
+  "key_test": "US military spending must be greater than China's",
+  "structure": "ranking",
+  "entities": ["US", "China"],
+  "predicates": [],
+  "comparisons": [
+    {{"claim": "US military spending is greater than China's military spending"}}
+  ]
+}}
 
-Two distinct claims joined by "yet":
-"The US spends more on military than the next 10 combined, yet gives \
-less foreign aid as a percentage of GDP than most developed nations"
-→ ["The US spends more on its military than the next 10 countries combined", \
-"The US provides less foreign aid as a percentage of GDP than most other \
-developed nations"]
-
-Multiple distinct assertions:
-"Fort Knox gold has not been audited despite promises by Trump and Musk"
-→ ["The gold in Fort Knox has not been audited recently", \
-"Donald Trump promised to audit Fort Knox", \
-"Elon Musk or DOGE promised to audit Fort Knox"]
-
-Multiple subjects with shared predicate:
+Parallel claim (multiple entities, shared predicates):
 "The US and China are both increasing military spending while cutting \
 foreign aid"
-→ facts: ["The US is increasing military spending", \
-"The US is cutting foreign aid", \
-"China is increasing military spending", \
-"China is cutting foreign aid"]
-→ thesis: "Both major powers prioritize military spending over foreign aid"
-→ structure: "parallel_comparison"
-→ key_test: "Both countries must be increasing military spending AND cutting \
-foreign aid for the argument to hold"
+→ {{
+  "thesis": "Both major powers prioritize military over foreign aid",
+  "key_test": "Both US and China must be increasing military spending AND \
+both must be cutting foreign aid",
+  "structure": "parallel_comparison",
+  "entities": ["US", "China"],
+  "predicates": [
+    {{"claim": "{{entity}} is increasing its military spending", "applies_to": ["US", "China"]}},
+    {{"claim": "{{entity}} is cutting its foreign aid budget", "applies_to": ["US", "China"]}}
+  ],
+  "comparisons": []
+}}
+
+Entity-specific values:
+"US spends over $800B on military, China spends about $200B"
+→ {{
+  "thesis": "US vastly outspends China on military",
+  "key_test": "US must spend ~$800B and China ~$200B on military",
+  "structure": "parallel_comparison",
+  "entities": ["US", "China"],
+  "predicates": [
+    {{
+      "claim": "{{entity}} spends {{value}} on its military",
+      "applies_to": [
+        {{"entity": "US", "value": "over $800 billion"}},
+        {{"entity": "China", "value": "just over $200 billion"}}
+      ]
+    }}
+  ],
+  "comparisons": [
+    {{"claim": "US military spending is greater than China's military spending"}}
+  ]
+}}
+
+Attributed claim:
+"Trump said gas prices are below $2.30 in most states"
+→ {{
+  "thesis": "Gas prices have fallen to low levels across the US",
+  "key_test": "Gas prices must actually be below $2.30 in most US states",
+  "structure": "simple",
+  "entities": ["Trump", "US"],
+  "predicates": [
+    {{"claim": "{{entity}} claimed gas prices are below $2.30 in most states", "applies_to": ["Trump"]}},
+    {{"claim": "Gas prices are below $2.30 per gallon in most {{entity}} states", "applies_to": ["US"]}}
+  ],
+  "comparisons": []
+}}
+Note: The SUBSTANCE claim (gas prices ARE X) is the real test. Attribution \
+is secondary.
+
+Complex claim combining all patterns:
+"The US spends over $800B on its military, more than China which spends \
+just over $200B. Both countries are increasing their military spending \
+while cutting their foreign aid budgets."
+→ {{
+  "thesis": "US and China both prioritize military expansion over foreign aid, \
+with US spending far more",
+  "key_test": "US ~$800B and China ~$200B military spending, US > China, \
+AND both must be increasing military AND both must be cutting foreign aid",
+  "structure": "parallel_comparison",
+  "entities": ["US", "China"],
+  "predicates": [
+    {{
+      "claim": "{{entity}} spends {{value}} on its military",
+      "applies_to": [
+        {{"entity": "US", "value": "over $800 billion"}},
+        {{"entity": "China", "value": "just over $200 billion"}}
+      ]
+    }},
+    {{"claim": "{{entity}} is increasing its military spending", "applies_to": ["US", "China"]}},
+    {{"claim": "{{entity}} is cutting its foreign aid budget", "applies_to": ["US", "China"]}}
+  ],
+  "comparisons": [
+    {{"claim": "US military spending is greater than China's military spending"}}
+  ]
+}}
 
 Return a JSON object with these fields:
 {{
   "thesis": "One sentence: what is the speaker fundamentally arguing?",
+  "key_test": "What must ALL be true for the thesis to hold? Be exhaustive.",
   "structure": "simple | parallel_comparison | causal | ranking",
-  "key_test": "One sentence: what must be true for the thesis to hold?",
-  "facts": ["atomic fact 1", "atomic fact 2", ...]
+  "entities": ["entity1", "entity2", ...],
+  "predicates": [
+    {{"claim": "template with {{entity}}", "applies_to": ["entity1", "entity2"]}}
+  ],
+  "comparisons": [
+    {{"claim": "direct comparison statement"}}
+  ]
 }}
-
-Structure types:
-- "simple" — single assertion about one thing
-- "parallel_comparison" — multiple entities share the same behavior
-- "causal" — X causes/leads to Y
-- "ranking" — X is more/less/most/least compared to Y
 
 Return ONLY the JSON object. No markdown, no explanation, no wrapping.\
 """
 
 DECOMPOSE_USER = """\
-Extract all verifiable atomic facts from this claim, and identify the \
-speaker's thesis (the overall point they're making).
+Extract a STRUCTURED representation of all verifiable claims.
 
 Claim: {claim_text}
 
-Return a JSON object with "thesis", "structure", "key_test", and "facts".\
+Remember:
+- List ALL entities (subjects) mentioned
+- For EACH predicate, explicitly list which entities it applies to
+- If "both X and Y do Z", mark Z as applying to BOTH X and Y
+- Keep comparisons separate (don't split "A > B" into "A" and "B")
+- For attributed claims ("X said Y"), extract BOTH the attribution AND \
+the substance as separate predicates
+
+Return JSON with: thesis, key_test, structure, entities, predicates, comparisons\
 """
 
-# Why flat decomposition instead of recursive?
-#   The old approach called decompose recursively — each sub-claim got
-#   decomposed again, building a tree. This caused three problems:
-#     1. Self-referencing: the LLM included the original claim as a sub-claim,
-#        causing infinite recursion until MAX_DEPTH killed it
-#     2. Comparison splitting: "A > B" got split into "A exists" + "B exists"
-#        — neither is actually a claim
-#     3. Tree explosion: 2-3 real facts became 7+ leaves with duplicates
+# Why structured extraction (entities + predicates) instead of direct fact listing?
 #
-#   The flat approach (used by Google's SAFE, FActScore, FacTool) extracts
-#   all atomic facts in a single LLM call. No recursion, no tree, no
-#   self-referencing. One call, flat list, done.
+#   The direct-listing approach asked the LLM to enumerate facts. Problems:
+#     1. Dropped facts: "Both US and China cutting aid" got 6 facts max,
+#        missing "China cutting aid" even with explicit "BOTH/ALL" rules
+#     2. LLM discretion: the model decided what to include, causing gaps
+#     3. Inconsistency: same claim decomposed differently across runs
+#
+#   The structured approach separates WHAT to verify from HOW MANY:
+#     1. LLM extracts entities and predicate templates
+#     2. For each predicate, LLM marks which entities it applies to
+#     3. Code expands entity × predicate combinations (guaranteed complete)
 #
 # Example:
 #   "US and China increasing military spending while cutting aid"
-#   → ["US is increasing military spending",
-#      "US is cutting foreign aid",
+#   LLM extracts:
+#     entities: ["US", "China"]
+#     predicates: [
+#       {claim: "{entity} is increasing military spending", applies_to: ["US", "China"]},
+#       {claim: "{entity} is cutting foreign aid", applies_to: ["US", "China"]}
+#     ]
+#   Code expands to 4 facts:
+#     ["US is increasing military spending",
 #      "China is increasing military spending",
+#      "US is cutting foreign aid",
 #      "China is cutting foreign aid"]
-#   — one LLM call, 4 facts, each independently researchable.
+#   — guaranteed complete, no LLM discretion on what to include.
 
 
 # =============================================================================
@@ -330,6 +418,11 @@ You are an impartial fact-checker. You will be given a sub-claim (extracted \
 from a larger claim) and a set of evidence gathered from real sources \
 (web search, Wikipedia, news articles).
 
+BE CONCISE. When reasoning through the evidence, focus on the key points \
+that determine the verdict. Do not exhaustively analyze every piece of \
+evidence — identify the 2-3 most relevant sources, note what they say, \
+and render your verdict. Aim for brief, focused reasoning.
+
 You will also be shown the ORIGINAL CLAIM for context. This is critical — \
 the sub-claim was extracted from it, and you must interpret the sub-claim \
 in the context of the original. For example:
@@ -426,10 +519,9 @@ Sub-claim to judge: {sub_claim}
 Evidence:
 {evidence_text}
 
-Interpret the sub-claim in the context of the original claim. Think \
-carefully about what the evidence says. Weigh conflicting sources. \
-Then return a JSON object with "verdict", "confidence", "reasoning", \
-and "nuance".\
+Interpret the sub-claim in the context of the original claim. Identify \
+the key evidence, weigh it briefly, and return a JSON object with \
+"verdict", "confidence", "reasoning", and "nuance".\
 """
 
 # Why "Do NOT use your own knowledge"?

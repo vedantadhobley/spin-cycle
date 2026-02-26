@@ -138,11 +138,11 @@ def build_research_agent():
     how to research (search strategies, when to stop, what to report).
     See RESEARCH_SYSTEM in src/prompts/verification.py for the full prompt.
     """
-    # Instruct model — not the thinking model.  The ReAct loop is pure
-    # tool-routing: pick a search query, call the tool, repeat.  The thinking
-    # model wastes ~25-45s per iteration generating <think> blocks nobody
-    # reads, which eats the entire timeout budget.  Instruct produces the
-    # same search queries in ~3s per iteration.
+    # thinking=off — the ReAct loop is pure tool-routing: pick a search
+    # query, call the tool, repeat.  Thinking mode wastes ~25-45s per
+    # iteration generating <think> blocks nobody reads, which eats the
+    # entire timeout budget.  With thinking off, the same search queries
+    # are produced in ~3s per iteration.
     #
     # temperature=0 for deterministic search queries.  The agent's job is
     # routing — "search for X", "fetch Y" — not creative writing.  temp=0
@@ -320,7 +320,7 @@ def extract_evidence(messages: list) -> list[dict]:
     return evidence
 
 
-async def research_claim(sub_claim: str, max_steps: int = 30, timeout_secs: int = 120) -> list[dict]:
+async def research_claim(sub_claim: str, max_steps: int = 22, timeout_secs: int = 120) -> list[dict]:
     """Run the research agent to gather evidence for a sub-claim.
 
     This is the main entry point called by the research_subclaim activity.
@@ -329,7 +329,7 @@ async def research_claim(sub_claim: str, max_steps: int = 30, timeout_secs: int 
         sub_claim: The specific sub-claim to find evidence for.
         max_steps: Maximum number of graph steps (prevents infinite loops).
                    Each tool call costs ~2 steps (agent node + tool node).
-                   30 steps allows ~14 tool calls — generous budget for
+                   22 steps allows ~10 tool calls — sufficient budget for
                    the instruct model which processes each step in ~3s.
                    The prompt's 5-6 tool call budget and the timeout_secs
                    are the real limiters, not max_steps.

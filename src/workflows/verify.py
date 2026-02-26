@@ -2,16 +2,22 @@
 
 Flat pipeline — no recursion:
   1. Decompose the claim into atomic verifiable facts (one LLM call)
-  2. Research + judge each fact (batched for concurrency)
-  3. Synthesize all verdicts into a final result
-  4. Store the result
+  2. Research all facts (batched, thinking=off — fast)
+  3. Judge all facts (batched, thinking=on — slow but separate phase)
+  4. Synthesize all verdicts into a final result
+  5. Store the result
+
+Research and judge are SEPARATE PHASES to prevent slow judge calls
+(thinking=on, generating thousands of tokens) from starving the
+faster research agents (thinking=off). This was causing research
+timeouts when judge and research overlapped.
 
 This follows the approach used by Google's SAFE (NeurIPS 2024) and FActScore:
 extract all facts in one pass, verify each independently, aggregate.
 
-Concurrency is tuned for llama.cpp on joi. With --parallel 2 on the thinking
-model, MAX_CONCURRENT=2 gives each research agent a dedicated slot — no
-interleaving overhead, predictable ~3 min per fact.
+Concurrency is tuned for vLLM on joi. With --parallel set on the unified
+Qwen3.5 model, MAX_CONCURRENT=2 gives each research agent a dedicated slot — no
+interleaving overhead.
 """
 
 import asyncio
@@ -36,8 +42,8 @@ MODULE = "workflow"
 # 6 facts × ~4 min each = ~12 min per batch of 2 = ~12 min total. Reasonable.
 MAX_FACTS = 6
 
-# Maximum concurrent research+judge pipelines. Matched to --parallel 2 on
-# joi's thinking model — each agent gets a dedicated inference slot.
+# Maximum concurrent research+judge pipelines. Matched to --parallel on
+# joi's Qwen3.5 instance — each agent gets a dedicated inference slot.
 MAX_CONCURRENT = 2
 
 
@@ -46,9 +52,9 @@ class VerifyClaimWorkflow:
     """Orchestrates the full claim verification pipeline.
 
     Flat pipeline:
-    1. Decompose claim into atomic facts (1 LLM call, instruct model)
-    2. For each fact: research with ReAct agent + judge (thinking model)
-    3. Synthesize all sub-verdicts into final verdict (instruct model)
+    1. Decompose claim into atomic facts (1 LLM call, thinking=off)
+    2. For each fact: research with ReAct agent + judge (thinking=on)
+    3. Synthesize all sub-verdicts into final verdict (thinking=off)
     4. Store result in database
     """
 
@@ -100,48 +106,68 @@ class VerifyClaimWorkflow:
                  thesis=thesis_info.get("thesis"),
                  structure=thesis_info.get("structure"))
 
-        # Step 2: Research + judge each fact
-        # Process in batches of MAX_CONCURRENT for parallel execution
-        async def _research_and_judge(fact_text: str) -> dict:
-            """Research a single fact and judge it."""
-            log.info(workflow.logger, MODULE, "fact_start",
-                     "Processing atomic fact",
+        # Step 2: Research all facts first (thinking=off, fast)
+        # Then judge all facts (thinking=on, slow)
+        # This prevents slow judge calls from starving faster research agents.
+        
+        async def _research(fact_text: str) -> tuple[str, list]:
+            """Research a single fact, return (fact_text, evidence)."""
+            log.info(workflow.logger, MODULE, "research_start",
+                     "Researching fact",
                      claim_id=claim_id, fact=fact_text)
-
             evidence = await workflow.execute_activity(
                 research_subclaim,
                 args=[fact_text],
                 start_to_close_timeout=timedelta(seconds=180),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
-
-            result = await workflow.execute_activity(
+            return (fact_text, evidence)
+        
+        async def _judge(fact_text: str, evidence: list) -> dict:
+            """Judge a single fact given its evidence."""
+            return await workflow.execute_activity(
                 judge_subclaim,
                 args=[claim_text, fact_text, evidence],
                 start_to_close_timeout=timedelta(seconds=300),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
-            return result
 
-        sub_results = []
+        # Phase 1: Research all facts in batches
+        all_evidence = []  # list of (fact_text, evidence)
         for i in range(0, len(atomic_facts), MAX_CONCURRENT):
             batch = atomic_facts[i:i + MAX_CONCURRENT]
             batch_num = i // MAX_CONCURRENT + 1
-            log.info(workflow.logger, MODULE, "batch_start",
-                     "Starting fact batch",
-                     claim_id=claim_id,
-                     batch_num=batch_num,
-                     batch_size=len(batch))
+            log.info(workflow.logger, MODULE, "research_batch_start",
+                     "Starting research batch",
+                     claim_id=claim_id, batch_num=batch_num, batch_size=len(batch))
+
+            _t0 = workflow.time()
+            batch_evidence = list(await asyncio.gather(
+                *[_research(fact["text"]) for fact in batch]
+            ))
+            _batch_ms = round((workflow.time() - _t0) * 1000)
+            log.info(workflow.logger, MODULE, "research_batch_done",
+                     "Research batch completed",
+                     claim_id=claim_id, batch_num=batch_num, latency_ms=_batch_ms)
+            all_evidence.extend(batch_evidence)
+
+        # Phase 2: Judge all facts in batches (now no research to compete with)
+        sub_results = []
+        for i in range(0, len(all_evidence), MAX_CONCURRENT):
+            batch = all_evidence[i:i + MAX_CONCURRENT]
+            batch_num = i // MAX_CONCURRENT + 1
+            log.info(workflow.logger, MODULE, "judge_batch_start",
+                     "Starting judge batch",
+                     claim_id=claim_id, batch_num=batch_num, batch_size=len(batch))
 
             _t0 = workflow.time()
             batch_results = list(await asyncio.gather(
-                *[_research_and_judge(fact["text"]) for fact in batch]
+                *[_judge(fact_text, evidence) for fact_text, evidence in batch]
             ))
             _batch_ms = round((workflow.time() - _t0) * 1000)
-            log.info(workflow.logger, MODULE, "batch_done",
-                     "Fact batch completed",
-                     claim_id=claim_id, batch_num=batch_num,
-                     batch_size=len(batch), latency_ms=_batch_ms)
+            log.info(workflow.logger, MODULE, "judge_batch_done",
+                     "Judge batch completed",
+                     claim_id=claim_id, batch_num=batch_num, latency_ms=_batch_ms)
             sub_results.extend(batch_results)
 
         # Step 3: Synthesize all verdicts into final result

@@ -55,7 +55,7 @@ Because we're putting the spin through the wringer.
 | Agent framework | [LangGraph](https://langchain-ai.github.io/langgraph/) | ReAct agent for autonomous evidence gathering |
 | LLM toolkit | [LangChain](https://python.langchain.com/) | ChatOpenAI client, tool wrappers, message types |
 | Workflow engine | [Temporal](https://temporal.io/) | Durable execution, retries, scheduling, visibility |
-| LLM | Qwen3-VL-30B-A3B (on joi via llama.cpp) | Instruct (:3101) for decompose/research/synthesize, Thinking (:3102) for judge |
+| LLM | Qwen3.5-35B-A3B (on joi via llama.cpp/ROCm) | Single instance, ~38 tok/s sustained throughput |
 | Database | PostgreSQL 16 + SQLAlchemy 2.0 (async) | Claims, sub-claims, evidence, verdicts |
 | API | FastAPI | REST endpoints for claim submission and querying |
 
@@ -76,7 +76,8 @@ The claim triggers `VerifyClaimWorkflow` — a flat pipeline of 5 activities:
 ```
 create_claim          Creates DB record (skipped if called via API)
     ↓
-decompose_claim       LLM extracts atomic facts + thesis (intent, structure, key_test)
+decompose_claim       LLM extracts entities + predicates + thesis
+                      Code expands entity × predicate to atomic facts
     ↓
 For each batch of 2 facts (parallel):
     research_subclaim   LangGraph ReAct agent searches
@@ -90,6 +91,8 @@ synthesize_verdict    LLM combines sub-verdicts using the speaker's thesis
     ↓
 store_result          Writes results to Postgres
 ```
+
+The **structured extraction** approach ensures completeness: when a claim says "both X and Y do Z", the LLM extracts entities `[X, Y]` and predicate `"do Z"`, then code expands to verify Z for both X and Y. No facts are dropped.
 
 The thesis extraction ensures the synthesizer understands the **intent** of the claim, not just the individual facts. For example, a claim saying "both US and China are cutting foreign aid" is rated `mostly_false` even though 5/6 sub-facts are true — because China is actually *increasing* foreign aid, which breaks the parallel comparison.
 
@@ -239,8 +242,7 @@ docker logs -f spin-cycle-dev-worker
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LLAMA_URL` | `http://joi:3101` | Instruct LLM endpoint (fast, structured output: decompose, research, synthesize) |
-| `LLAMA_REASONING_URL` | `http://joi:3102` | Thinking LLM endpoint (chain-of-thought: judge) |
+| `LLAMA_URL` | `http://joi:3101` | LLM endpoint (Qwen3.5-35B-A3B, unified thinking/non-thinking) |
 | `LLAMA_EMBED_URL` | `http://joi:3103` | Embeddings endpoint (not yet used) |
 | `POSTGRES_PASSWORD` | `spin-cycle-dev` | Application Postgres password |
 | `LOG_FORMAT` | `json` (prod) / `pretty` (dev) | Log output format — `json` for Grafana Loki, `pretty` for terminal |

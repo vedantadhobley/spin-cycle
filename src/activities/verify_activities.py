@@ -27,7 +27,7 @@ from temporalio import activity
 
 from src.db.session import async_session
 from src.db.models import Claim, SubClaim, Evidence, Verdict
-from src.llm import get_llm, get_reasoning_llm
+from src.llm import get_llm
 from src.prompts.verification import (
     DECOMPOSE_SYSTEM,
     DECOMPOSE_USER,
@@ -70,12 +70,14 @@ async def create_claim(claim_text: str) -> str:
 async def decompose_claim(claim_text: str) -> dict:
     """Extract atomic verifiable facts and thesis from a claim in one pass.
 
+    Uses STRUCTURED extraction (entities + predicates + comparisons) and then
+    programmatically expands entity × predicate combinations. This ensures
+    completeness — when a claim says "both X and Y do Z", we're guaranteed
+    to verify Z for both X and Y.
+
     Returns a dict with:
       - "facts": list of {"text": "..."} dicts, each an atomic fact
       - "thesis_info": {"thesis": "...", "structure": "...", "key_test": "..."}
-
-    If the claim is atomic, facts will be [{"text": "the original claim"}].
-    If the claim is compound, facts will be 2-6 atomic facts.
 
     Falls back to a single item with no thesis if JSON parsing fails.
     """
@@ -92,17 +94,31 @@ async def decompose_claim(claim_text: str) -> dict:
 
     raw = response.content.strip()
     log.info(activity.logger, "decompose", "llm_call", "Decompose LLM call complete",
-             model="instruct", latency_ms=_latency)
+             model="thinking=off", latency_ms=_latency)
     log.debug(activity.logger, "decompose", "llm_response", "LLM response received",
               raw=raw)
 
-    # Parse the JSON response — now returns {thesis, structure, key_test, facts}
+    # Parse the JSON response — now structured with entities/predicates/comparisons
     try:
         parsed = json.loads(raw)
 
-        # Handle both old format (bare list) and new format (object with facts)
-        if isinstance(parsed, list):
-            # Legacy: bare list of strings
+        # Handle new structured format
+        if isinstance(parsed, dict) and "predicates" in parsed:
+            facts = _expand_structured(parsed)
+            thesis_info = {
+                "thesis": parsed.get("thesis"),
+                "structure": parsed.get("structure", "simple"),
+                "key_test": parsed.get("key_test"),
+            }
+            log.info(activity.logger, "decompose", "expanded",
+                     "Structured extraction expanded to facts",
+                     entities=parsed.get("entities", []),
+                     predicate_count=len(parsed.get("predicates", [])),
+                     comparison_count=len(parsed.get("comparisons", [])),
+                     expanded_fact_count=len(facts))
+
+        # Handle legacy format (bare list or {facts: [...]})
+        elif isinstance(parsed, list):
             facts = _normalize_flat(parsed)
             thesis_info = {
                 "thesis": None,
@@ -120,7 +136,7 @@ async def decompose_claim(claim_text: str) -> dict:
             raise ValueError(f"Unexpected format: {type(parsed)}")
 
         if not facts:
-            raise ValueError("LLM returned empty facts list")
+            raise ValueError("LLM returned empty facts/predicates")
 
     except (json.JSONDecodeError, ValueError) as e:
         log.warning(activity.logger, "decompose", "parse_failed",
@@ -134,6 +150,67 @@ async def decompose_claim(claim_text: str) -> dict:
              thesis=thesis_info.get("thesis"),
              structure=thesis_info.get("structure"))
     return {"facts": facts, "thesis_info": thesis_info}
+
+
+def _expand_structured(parsed: dict) -> list[dict]:
+    """Expand structured extraction (entities × predicates) into flat facts.
+
+    This is the key to ensuring completeness. Instead of relying on the LLM
+    to list every fact, we:
+    1. Get the entities and predicate templates
+    2. Programmatically expand each predicate for each applicable entity
+    3. Add comparisons directly (they're already complete facts)
+
+    Example:
+      entities: ["US", "China"]
+      predicates: [{"claim": "{entity} is cutting aid", "applies_to": ["US", "China"]}]
+    Expands to:
+      ["US is cutting aid", "China is cutting aid"]
+    """
+    facts = []
+    seen = set()  # Deduplicate
+
+    # Expand predicates
+    for pred in parsed.get("predicates", []):
+        claim_template = pred.get("claim", "")
+        applies_to = pred.get("applies_to", [])
+
+        for item in applies_to:
+            if isinstance(item, str):
+                # Simple form: entity name directly
+                entity = item.strip()
+                fact_text = claim_template.replace("{entity}", entity)
+                fact_text = fact_text.replace("{{entity}}", entity)
+            elif isinstance(item, dict):
+                # Detailed form: {"entity": "US", "value": "over $800B"}
+                entity = item.get("entity", "").strip()
+                value = item.get("value", "").strip()
+                fact_text = claim_template.replace("{entity}", entity)
+                fact_text = fact_text.replace("{{entity}}", entity)
+                fact_text = fact_text.replace("{value}", value)
+                fact_text = fact_text.replace("{{value}}", value)
+            else:
+                continue
+
+            # Clean up any remaining braces the LLM might have added
+            # e.g., "{US}" → "US", "{over $800 billion}" → "over $800 billion"
+            fact_text = re.sub(r'\{([^}]+)\}', r'\1', fact_text)
+            fact_text = fact_text.strip()
+            
+            if fact_text and fact_text not in seen:
+                seen.add(fact_text)
+                facts.append({"text": fact_text})
+
+    # Add comparisons directly (they're already complete facts)
+    for comp in parsed.get("comparisons", []):
+        comp_text = comp.get("claim", "").strip()
+        # Clean up any braces here too
+        comp_text = re.sub(r'\{([^}]+)\}', r'\1', comp_text)
+        if comp_text and comp_text not in seen:
+            seen.add(comp_text)
+            facts.append({"text": comp_text})
+
+    return facts
 
 
 def _normalize_flat(items: list) -> list[dict]:
@@ -276,7 +353,10 @@ async def judge_subclaim(claim_text: str, sub_claim: str, evidence: list[dict]) 
         evidence_parts.append(f"{header}\n{content}")
     evidence_text = "\n\n".join(evidence_parts)
 
-    llm = get_reasoning_llm()
+    # Use non-thinking mode for judge - the structured prompt already guides
+    # reasoning, and thinking mode generates 5000-9500 tokens of internal
+    # monologue that takes 3-4 minutes without improving verdict quality.
+    llm = get_llm()
     _t0 = time.monotonic()
     response = await llm.ainvoke([
         SystemMessage(content=JUDGE_SYSTEM.format(current_date=date.today().isoformat())),
@@ -288,10 +368,11 @@ async def judge_subclaim(claim_text: str, sub_claim: str, evidence: list[dict]) 
     ])
     _latency = int((time.monotonic() - _t0) * 1000)
     log.info(activity.logger, "judge", "llm_call", "Judge LLM call complete",
-             model="thinking", latency_ms=_latency,
+             model="thinking=off", latency_ms=_latency,
              sub_claim=sub_claim)
 
     raw = response.content.strip()
+    original_raw = raw  # Keep original for fallback
 
     # Strip <think>...</think> tags from the thinking model's output.
     # The thinking model always produces chain-of-thought before its answer;
@@ -301,6 +382,26 @@ async def judge_subclaim(claim_text: str, sub_claim: str, evidence: list[dict]) 
         log.debug(activity.logger, "judge", "thinking", "Model reasoning captured",
                   thinking=think_match.group(1))
         raw = raw[think_match.end():].strip()
+
+        # If nothing remains after stripping think tags, try to find JSON
+        # anywhere in the original response (some models embed it in thinking)
+        if not raw:
+            log.warning(activity.logger, "judge", "empty_after_think",
+                        "No content after </think>, searching for JSON in full response")
+            # Try parsing from each '{' in the original until one works
+            decoder = json.JSONDecoder()
+            for i, char in enumerate(original_raw):
+                if char == '{':
+                    try:
+                        # raw_decode handles trailing content after valid JSON
+                        parsed_candidate, end_idx = decoder.raw_decode(original_raw[i:])
+                        if isinstance(parsed_candidate, dict) and "verdict" in parsed_candidate:
+                            raw = original_raw[i:i + end_idx]
+                            log.debug(activity.logger, "judge", "json_recovered",
+                                      "Found JSON in original response")
+                            break
+                    except json.JSONDecodeError:
+                        continue
 
     log.debug(activity.logger, "judge", "llm_response", "LLM response received",
               raw=raw)
@@ -428,7 +529,7 @@ async def synthesize_verdict(
     latency_ms = round((time.monotonic() - t0) * 1000)
     log.info(activity.logger, "synthesize", "llm_call",
              "Synthesize LLM call completed",
-             model="instruct", latency_ms=latency_ms, is_final=is_final)
+             model="thinking=off", latency_ms=latency_ms, is_final=is_final)
 
     raw = response.content.strip()
     log.debug(activity.logger, "synthesize", "llm_response", "LLM response received",

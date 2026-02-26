@@ -4,26 +4,28 @@ Where spin-cycle is, where it needs to go, and what each improvement actually do
 
 ---
 
-## What We Have (v0.4)
+## What We Have (v0.5)
 
-A working end-to-end claim verification pipeline with **flat decomposition + thesis-aware synthesis**:
+A working end-to-end claim verification pipeline with **structured extraction + thesis-aware synthesis**:
 - Manual claim submission via API
-- LLM decomposes claims into **atomic facts + thesis** in one call — captures the speaker's intent (thesis, structure, key_test)
+- LLM extracts **structured representation** (entities, predicates, comparisons) + thesis — code expands `entity × predicate` combinations to guarantee completeness
+- **Thesis extraction** captures the speaker's intent (thesis, structure, key_test) for synthesis
 - Atomic sub-claims researched + judged **in parallel batches** (MAX_CONCURRENT=2) via `asyncio.gather`
 - **Thesis-aware synthesis** — evaluates whether the speaker's argument survives the evidence, not just whether a majority of facts are true
 - **Unified 6-level verdict scale**: `true | mostly_true | mixed | mostly_false | false | unverifiable` with spirit-vs-substance guidance
 - **Single synthesis activity** uses the thesis as primary rubric when available
-- LangGraph ReAct research agent gathers evidence with dynamically loaded tools (temperature=0.0 for deterministic queries)
-- **Source quality filtering** — domain blocklist (~40 domains) silently drops Reddit, Quora, social media, content farms from all search results
+- LangGraph ReAct research agent gathers evidence with dynamically loaded tools (22 max steps, ~10 tool calls per fact)
+- **Source quality filtering** — domain blocklist (~70 domains) silently drops Reddit, Quora, social media, content farms from all search results
 - **3-tier source hierarchy** in prompts — primary documents (charters, legislation, data) > independent reporting (Reuters, BBC) > interested-party statements (government websites, politician claims). Government sites explicitly classified as political actor communications, not neutral sources
-- Thinking model evaluates evidence and renders verdicts (instruct model for everything else)
+- **All pipeline steps use thinking=off** — llama.cpp lacks thinking token limits, so thinking mode generates excessive internal monologue (5000-9500 tokens) without improving output quality
+- **ROCm backend** for AMD GPU optimization (~38 tok/s sustained throughput)
 - **Importance-weighted synthesis** — verdicts weighed by significance, not count
 - **Date-aware prompts** — all prompts include `Today's date: {current_date}` so the LLM references current data
 - Results stored in Postgres with sub-claims, evidence, and reasoning chains
 - Top-level synthesis reasoning + nuance exposed in API responses
 - Temporal orchestrates everything with retries and durability (5 activities, 1 workflow)
 - Production-grade structured JSON logging (for Grafana Loki, pretty format for dev) — INFO for pipeline milestones, DEBUG for per-query tool noise
-- LLM max_tokens configured to prevent truncated output (2048 instruct, 4096 reasoning)
+- LLM max_tokens configured to prevent truncated output (2048 for all steps)
 
 **Search tools (env-var gated — set the key to enable):**
 - **SearXNG** (self-hosted meta-search, free, aggregates 70+ engines) — `SEARXNG_URL`

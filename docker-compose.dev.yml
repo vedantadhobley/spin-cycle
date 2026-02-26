@@ -7,8 +7,7 @@
 #   4503: SearXNG (meta-search engine)
 #
 # External services (joi via Docker DNS → systemd-resolved):
-#   - joi:3101 (LLM API - llama.cpp chat/vision)
-#   - joi:3102 (LLM API - llama.cpp thinking/reasoning)
+#   - joi:3101 (LLM API - llama.cpp Qwen3.5-35B-A3B, unified thinking/non-thinking)
 #   - joi:3103 (LLM API - llama.cpp embeddings)
 #
 # Internal ports (not exposed):
@@ -38,7 +37,6 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-spin-cycle-dev}
       TEMPORAL_HOST: spin-cycle-dev-temporal:7233
       LLAMA_URL: ${LLAMA_URL}
-      LLAMA_REASONING_URL: ${LLAMA_REASONING_URL}
       LLAMA_EMBED_URL: ${LLAMA_EMBED_URL}
       NEWSAPI_KEY: ${NEWSAPI_KEY:-}
       SERPER_API_KEY: ${SERPER_API_KEY:-}
@@ -77,7 +75,6 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-spin-cycle-dev}
       TEMPORAL_HOST: spin-cycle-dev-temporal:7233
       LLAMA_URL: ${LLAMA_URL}
-      LLAMA_REASONING_URL: ${LLAMA_REASONING_URL}
       LLAMA_EMBED_URL: ${LLAMA_EMBED_URL}
       NEWSAPI_KEY: ${NEWSAPI_KEY:-}
       SERPER_API_KEY: ${SERPER_API_KEY:-}

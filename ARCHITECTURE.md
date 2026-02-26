@@ -110,49 +110,87 @@ A claim enters the system (via API or extraction) and is processed as a **flat p
 
 ### Model Assignment
 
-| Step | Model | Why |
-|------|-------|-----|
-| decompose_claim | Instruct (`:3101`) | Structured JSON output, no reasoning needed |
-| research_subclaim | Instruct (`:3101`) | ReAct tool-routing — picking search queries. Thinking model wastes ~25-45s/iteration on `<think>` blocks |
-| judge_subclaim | Thinking (`:3102`) | Genuine reasoning under uncertainty — weighing conflicting evidence |
-| synthesize_verdict | Instruct (`:3101`) | Structured aggregation of sub-verdicts |
+All steps use the same **Qwen3.5-35B-A3B** instance on joi (:3101), now running on **ROCm** for improved AMD GPU performance (~38 tok/s sustained throughput).
 
-### Step 1: decompose_claim (flat atomic fact extraction + thesis)
+Thinking mode is toggled per-request via `chat_template_kwargs`, but currently **disabled for all steps**:
+
+| Step | Mode | Why |
+|------|------|-----|
+| decompose_claim | `enable_thinking=False` | Structured JSON output, no reasoning needed |
+| research_subclaim | `enable_thinking=False` | ReAct tool-routing — picking search queries. Thinking wastes ~25-45s/iteration |
+| judge_subclaim | `enable_thinking=False` | Structured prompt guides reasoning. Thinking mode generates 5000-9500 tokens (3-4 min) without improving verdict quality — llama.cpp has no way to limit thinking tokens |
+| synthesize_verdict | `enable_thinking=False` | Structured aggregation of sub-verdicts |
+
+**Why thinking is disabled everywhere:**
+llama.cpp's `--reasoning-budget` flag only supports `-1` (unlimited) or `0` (disabled) — no intermediate values for token limits. The model generates excessive internal monologue before responding. Until llama.cpp adds proper `max_thinking_tokens` support (or we migrate to vLLM which supports it), thinking mode is impractical.
+
+### Step 1: decompose_claim (structured entity-predicate extraction + thesis)
 
 **File:** `src/activities/verify_activities.py`
 **Prompt:** `src/prompts/verification.py` → `DECOMPOSE_SYSTEM` / `DECOMPOSE_USER`
 
-The LLM breaks a text into its **atomic, independently verifiable facts** and extracts a **thesis** — all in one call. No recursion, no tree structure.
+The LLM extracts a **structured representation** of the claim — entities, predicates, and comparisons — which is then **programmatically expanded** into atomic facts. This ensures completeness: when a claim says "both X and Y do Z", we're guaranteed to verify Z for both X and Y.
 
 ```
-Input:  "The US and China are both increasing military spending while cutting foreign aid"
-Output: {
-  "thesis": "The US and China are prioritizing military spending over foreign aid.",
+Input:  "The US spends over $800B on military, more than China at $200B. 
+         Both countries are increasing military spending while cutting foreign aid."
+         
+LLM extracts structured representation:
+{
+  "thesis": "US and China both prioritize military over aid, with US spending more",
+  "key_test": "US ~$800B, China ~$200B, US > China, AND both must be increasing 
+               military AND both must be cutting foreign aid",
   "structure": "parallel_comparison",
-  "key_test": "Both countries must show increased military spending AND decreased foreign aid.",
-  "facts": [
-    { "text": "The US is increasing military spending" },
-    { "text": "China is increasing military spending" },
-    { "text": "The US is cutting foreign aid" },
-    { "text": "China is cutting foreign aid" }
+  "entities": ["US", "China"],
+  "predicates": [
+    {"claim": "{entity} spends {value} on its military", 
+     "applies_to": [{"entity": "US", "value": "over $800 billion"}, 
+                    {"entity": "China", "value": "just over $200 billion"}]},
+    {"claim": "{entity} is increasing its military spending", 
+     "applies_to": ["US", "China"]},
+    {"claim": "{entity} is cutting its foreign aid budget", 
+     "applies_to": ["US", "China"]}
+  ],
+  "comparisons": [
+    {"claim": "US military spending is greater than China's military spending"}
   ]
 }
+
+Code expands entity × predicate to guarantee completeness:
+[
+  "US spends over $800 billion on its military",
+  "China spends just over $200 billion on its military",
+  "US is increasing its military spending",
+  "China is increasing its military spending",
+  "US is cutting its foreign aid budget",
+  "China is cutting its foreign aid budget",      ← guaranteed to be included!
+  "US military spending is greater than China's"
+]
 ```
 
-The **thesis extraction** (piggybacked on decompose) captures the speaker's rhetorical intent:
+**Why structured extraction instead of direct fact listing?**
+
+The old approach asked the LLM to list facts directly. It would drop facts — e.g., extracting 6 facts and missing "China cutting aid" even with explicit "BOTH/ALL" rules. The LLM's discretion was the problem.
+
+The new approach:
+1. LLM extracts structure: entities, predicate templates, which entities each applies to
+2. Code expands `entity × predicate` combinations — no LLM discretion
+3. key_test validation ensures completeness
+
+The **thesis extraction** captures the speaker's rhetorical intent:
 - `thesis` — the argument the speaker is making
 - `structure` — `simple`, `parallel_comparison`, `causal`, or `ranking`
-- `key_test` — what must be true for the thesis to hold
+- `key_test` — what must ALL be true for the thesis to hold
 
-This is passed to the synthesizer so it evaluates whether the speaker's **argument** survives the evidence, not just whether a majority of sub-facts are individually true. Without this, a claim comparing two countries could be rated `mostly_true` if 5 of 6 facts check out — even if the one false fact (e.g., China cutting aid when it's actually increasing) completely invalidates the speaker's thesis.
+This is passed to the synthesizer so it evaluates whether the speaker's **argument** survives the evidence. Without this, a claim comparing two countries could be rated `mostly_true` if 5 of 6 facts check out — even if the one false fact (e.g., China NOT cutting aid) completely invalidates the speaker's parallel comparison.
 
-The key design insight: **claims are flat structures, not hierarchical ones.** Recursive decomposition caused tree explosion — the LLM would include the original claim as a sub-claim, causing infinite recursion, and split comparisons into truisms ("US spends money on military" — trivially true). Flat extraction avoids both problems.
+**Expansion implementation** (`_expand_structured()` in verify_activities.py):
+- Simple form: `["US", "China"]` → substitute directly into `{entity}` placeholder
+- Detailed form: `[{"entity": "US", "value": "$800B"}]` → substitute both `{entity}` and `{value}`
+- Comparisons pass through directly (already complete facts)
+- Deduplication prevents redundant facts
 
-The prompt includes explicit anti-patterns: never split comparisons, never include the original claim as a sub-fact, never decompose into overlapping facts. Max 6 atomic facts per claim.
-
-The output is normalized via `_normalize_flat()`: bare strings become `{"text": "..."}` dicts, and legacy group structures are flattened into their leaves.
-
-Decompose and synthesize use the instruct model for clean JSON output. Judge uses the thinking model for chain-of-thought reasoning — its `<think>...</think>` blocks are stripped before parsing. If JSON parsing fails, we fall back to the original claim as a single sub-claim.
+The output is normalized via `_expand_structured()` for the new format (entities/predicates/comparisons) or `_normalize_flat()` for legacy formats.
 
 All prompts include `Today's date: {current_date}` (formatted at call time) so the LLM knows the current date when evaluating temporal claims.
 
@@ -170,8 +208,9 @@ This is where the LangGraph ReAct agent runs. For each **atomic fact**:
 4. LLM reads results → decides if it needs more → calls another tool or stops
 5. Typically: 2-4 tool calls per sub-claim, 6-10 agent steps
 6. Agent timeout: 120s (soft), 180s (Temporal hard limit)
+7. Max steps: 22 (allows ~10 tool calls before hard stop)
 
-The research agent uses the **instruct model**, not the thinking model. The ReAct loop is pure tool-routing — picking search queries and deciding when to stop. The thinking model wastes ~25-45s per iteration generating `<think>` blocks that nobody reads, just to produce an 8-token tool call. The instruct model produces the same search queries in ~3s per iteration.
+The research agent uses **thinking=off**. The ReAct loop is pure tool-routing — picking search queries and deciding when to stop. Thinking mode wastes ~25-45s per iteration generating `<think>` blocks that nobody reads, just to produce an 8-token tool call. With thinking off, the same search queries are produced in ~3s per iteration.
 
 **Tools available to the agent:**
 - `searxng_search` — SearXNG meta-search (news, general web). Self-hosted, no API key.
@@ -196,7 +235,7 @@ After the agent finishes, we extract evidence from the conversation:
 **File:** `src/activities/verify_activities.py`
 **Prompt:** `src/prompts/verification.py` → `JUDGE_SYSTEM` / `JUDGE_USER`
 
-The LLM evaluates evidence for a single sub-claim. This is NOT agentic — it's a single LLM call with structured output.
+The LLM evaluates evidence for a single sub-claim. This is NOT agentic — it's a single LLM call with structured output. Uses **thinking=off** — the structured prompt guides reasoning explicitly, and thinking mode generates 5000-9500 tokens (3-4 min) without improving verdict quality.
 
 The critical constraint: **"Do NOT use your own knowledge."** The LLM must reason only from the evidence provided. This is what makes verdicts trustworthy — they're grounded in real, citable sources.
 
@@ -283,25 +322,25 @@ VerifyClaimWorkflow
 ```
 
 Key properties:
-- **Flat, not recursive** — no tree, no recursion, no MAX_DEPTH. One decompose call produces all atomic facts + thesis.
+- **Flat, not recursive** — no tree, no recursion, no MAX_DEPTH. One decompose call produces structured extraction + thesis.
+- **Structured expansion** — LLM extracts entities + predicates, code expands `entity × predicate` combinations. Guarantees completeness for "both/all" claims.
 - **Thesis-aware** — the decompose step extracts the speaker's intent (thesis, structure, key_test) and passes it to synthesis. The synthesizer evaluates whether the argument survives the evidence, not just whether a majority of facts are true.
-- **MAX_FACTS = 6** — safety limit. Complex claims are capped at 6 facts.
-- **MAX_CONCURRENT = 2** — matched to `--parallel 2` on the LLM server. Two research agents run simultaneously, each getting half the GPU bandwidth.
+- **No hard fact limit** — fact count is driven by extracted entities × predicates, not an arbitrary cap. Complex claims get full coverage.
+- **MAX_CONCURRENT = 2** — limits parallel research+judge pipelines to match GPU bandwidth. Two research agents run simultaneously.
 - **Single synthesis** — `synthesize_verdict` combines all fact-level judgments into one final verdict. Single-fact claims skip synthesis entirely.
 - **Temporal retries per activity** — if one research call fails, only that activity retries (max 3 attempts).
 - **Date-aware** — all prompts include `Today's date: {current_date}` so the LLM references current data, not training cutoff data.
 
 ### GPU Compute Constraints
 
-The LLMs run on joi via llama.cpp with `--parallel N` slots. This multiplexes concurrent requests onto a single GPU — it does NOT parallelize them. N concurrent requests = each takes ~Nx longer, total throughput is constant.
+The LLM runs on joi via llama.cpp with **ROCm backend** (AMD GPU optimization). `--parallel N` slots multiplex concurrent requests onto a single GPU — it does NOT parallelize them. N concurrent requests = each takes ~Nx longer, total throughput is constant (~38 tok/s sustained).
 
-| Service | Port | `--parallel` | Why |
-|---------|------|-------------|-----|
-| Instruct | `:3101` | 4 | Shared with found-footy (4 concurrent) |
-| Thinking | `:3102` | 2 | Judge uses 2 concurrent (matched to MAX_CONCURRENT=2) |
-| Embedding | `:3103` | 4 | Fast, low-latency |
+| Service | Port | `--parallel` | Backend | Notes |
+|---------|------|-------------|---------|-------|
+| Qwen3.5 | `:3101` | 4 | ROCm | Unified model, thinking toggled per-request |
+| Embedding | `:3103` | 4 | Vulkan | Fast, low-latency |
 
-`MAX_CONCURRENT=2` is matched to `--parallel 2` on the thinking model. Each agent gets ~50% GPU bandwidth. Higher concurrency doesn't improve wall-clock time — it just increases per-request latency.
+`MAX_CONCURRENT=2` limits parallel research+judge pipelines. Higher concurrency doesn't improve wall-clock time — it just increases per-request latency.
 
 ---
 
@@ -558,15 +597,15 @@ All models use SQLAlchemy 2.0 declarative base (`src/db/models.py`):
 
 ### Models
 
-Two models running on joi via llama.cpp, each serving a different role:
+One unified model running on joi via llama.cpp, with thinking toggled per-request:
 
-| Port | Model | Role | Used By |
+| Port | Model | Mode | Used By |
 |------|-------|------|--------|
-| `:3101` | Qwen3-VL-30B-A3B-Instruct | Fast structured output | decompose, research, synthesize |
-| `:3102` | Qwen3-VL-30B-A3B-Thinking | Chain-of-thought reasoning | judge |
-| `:3103` | (embeddings — not yet used) | Semantic similarity | planned: evidence caching |
+| `:3101` | Qwen3.5-35B-A3B | `enable_thinking=False` | decompose, research, synthesize |
+| `:3101` | Qwen3.5-35B-A3B | `enable_thinking=True` | judge |
+| `:3103` | (embeddings — not yet used) | — | planned: evidence caching |
 
-Same base architecture (30B params, 3B active MoE), different fine-tunes. The instruct model produces direct responses without chain-of-thought. The thinking model produces `<think>...</think>` blocks that are stripped before parsing.
+30B params, 3B active MoE. Thinking mode is toggled via `chat_template_kwargs` in the request body. When thinking is enabled, the model produces `<think>...</think>` blocks that are stripped before parsing.
 
 ### Connection Path
 
@@ -583,35 +622,31 @@ All LLM calls go through `src/llm.py`:
 ```python
 from langchain_openai import ChatOpenAI
 
-def get_llm(temperature=0.1):           # Instruct — fast, structured
+def get_llm(temperature=0.1):           # thinking=off — used for ALL pipeline steps
     return ChatOpenAI(
         base_url=f"{LLAMA_URL}/v1",     # :3101
-        model="Qwen3-VL-30B-A3B-Instruct",
+        model="Qwen3.5-35B-A3B",
         temperature=temperature,
         max_tokens=2048,
+        model_kwargs={"chat_template_kwargs": {"enable_thinking": False}},
     )
 
-def get_reasoning_llm(temperature=0.2):  # Thinking — slower, better reasoning
-    return ChatOpenAI(
-        base_url=f"{LLAMA_REASONING_URL}/v1",  # :3102
-        model="Qwen3-VL-30B-A3B-Thinking",
-        temperature=temperature,
-        max_tokens=4096,
-    )
+# get_reasoning_llm() also exists (thinking=on) but is UNUSED — kept for experiments.
+# llama.cpp lacks max_thinking_tokens support, so thinking mode is impractical.
 ```
 
-`max_tokens` is set explicitly to prevent llama.cpp's default `n_predict` from cutting off LLM output mid-JSON. The reasoning model gets a higher limit (4096) because it produces `<think>` blocks before the actual answer.
+`max_tokens` is set explicitly to prevent llama.cpp's default `n_predict` from cutting off LLM output mid-JSON.
 
 ### Prompt Design
 
 All prompts live in `src/prompts/verification.py` with extensive inline documentation explaining:
 - What each prompt does and why it's designed that way
-- The model assignment strategy (instruct vs thinking) and why
+- Why thinking mode is disabled for all steps (llama.cpp limitation)
 - Example inputs and outputs
 - Design constraints (e.g., "Do NOT use your own knowledge")
 
 Four prompt pairs (system + user):
-1. `DECOMPOSE_SYSTEM` / `DECOMPOSE_USER` — extract atomic facts in one flat pass
+1. `DECOMPOSE_SYSTEM` / `DECOMPOSE_USER` — structured entity-predicate extraction, code expands combinations
 2. `RESEARCH_SYSTEM` / `RESEARCH_USER` — guide the research agent (includes source quality rules)
 3. `JUDGE_SYSTEM` / `JUDGE_USER` — evaluate evidence for a sub-claim
 4. `SYNTHESIZE_SYSTEM` / `SYNTHESIZE_USER` — combine child verdicts (importance-weighted, adapts via `is_final` parameter)
@@ -692,8 +727,7 @@ spin-cycle-dev-adminer           :4502  ← Postgres web UI (Dracula theme)
 
 ### External Services
 
-- `joi:3101` — LLM instruct API (llama.cpp, via Tailscale)
-- `joi:3102` — LLM thinking/reasoning API (llama.cpp, via Tailscale)
+- `joi:3101` — LLM API (llama.cpp Qwen3.5-35B-A3B, unified thinking/non-thinking, via Tailscale)
 - `joi:3103` — LLM embeddings API (llama.cpp, via Tailscale)
 - SearXNG — self-hosted meta-search (configured via `SEARXNG_URL`)
 - DuckDuckGo — web search (no API key)
@@ -858,7 +892,7 @@ Config: `~/workspace/monitor/promtail/promtail.yml`
 | `store_result` | **Done** | Writes flat result to Postgres (all sub-claims as leaves) |
 | Source quality filtering | **Done** | Domain blocklist (~40 domains) filters all search results + page fetches |
 | Prompts | **Done** | 4 prompt pairs documented in `src/prompts/verification.py` |
-| LLM connectivity | **Done** | Dual-model: instruct (:3101, max_tokens=2048) + thinking (:3102, max_tokens=4096) on joi |
+| LLM connectivity | **Done** | Unified Qwen3.5 on :3101 — `enable_thinking` toggled per-request (off: decompose/research/synthesize, on: judge) |
 | Logging | **Done** | Structured JSON logging via `src/utils/logging.py`, Promtail → Loki → Grafana |
 | Tests | **Done** | Health endpoint, schema validation |
 

@@ -1,27 +1,30 @@
 """Shared LLM client configuration.
 
-All LLM calls in the project go through this module. It provides two clients:
+All LLM calls in the project go through this module.
 
-  get_llm()           → Instruct model (fast, structured output)
-                        Used for decompose + synthesize steps.
+  get_llm()           → Non-thinking mode (fast, structured output)
+                        Used for ALL pipeline steps (decompose, research,
+                        judge, synthesize).
 
-  get_reasoning_llm() → Thinking model (slower, chain-of-thought reasoning)
-                        Used for research + judge steps.
+  get_reasoning_llm() → Thinking mode (chain-of-thought reasoning)
+                        CURRENTLY UNUSED. Kept for future experiments.
+                        llama.cpp has no way to limit thinking tokens,
+                        so the model generates 5000-9500 tokens of internal
+                        monologue (3-4 min) per call. Not worth the cost.
 
-Both models run on joi (our local llama.cpp server via Tailscale MagicDNS).
-They share the same Qwen3-VL-30B-A3B architecture (30B params, 3B active)
-but are fine-tuned differently:
+Both clients hit the **same** Qwen3.5-35B-A3B instance on joi. Qwen3.5
+unified thinking and non-thinking into one model — the mode is toggled
+per-request via chat_template_kwargs:
 
-  - Instruct: optimised for instruction following and structured output.
-    No chain-of-thought — fast, direct responses.
+  enable_thinking=False  → Direct response, no <think> blocks.
+                           Fast, good at structured output and tool-routing.
 
-  - Thinking: optimised for multi-step reasoning. Produces <think>...</think>
-    blocks before answering. Better at weighing conflicting evidence and
-    making nuanced judgments.
+  enable_thinking=True   → Produces <think>...</think> before answering.
+                           Better at weighing conflicting evidence and
+                           making nuanced judgments.
 
 Port allocation on joi:
-  :3101 — Instruct (Qwen3-VL-30B-A3B-Instruct)
-  :3102 — Thinking (Qwen3-VL-30B-A3B-Thinking)
+  :3101 — Qwen3.5-35B-A3B (unified thinking + non-thinking)
   :3103 — Embeddings (not yet used)
 
 We use LangChain's ChatOpenAI because joi's llama.cpp server exposes an
@@ -38,22 +41,22 @@ from src.utils.logging import log, get_logger
 MODULE = "llm"
 logger = get_logger()
 
-# Instruct model — fast, structured output
+# Single model instance — thinking mode toggled per-request
 LLAMA_URL = os.getenv("LLAMA_URL", "http://joi:3101")
-INSTRUCT_MODEL = "Qwen3-VL-30B-A3B-Instruct"
-
-# Thinking model — slower, better reasoning
-LLAMA_REASONING_URL = os.getenv("LLAMA_REASONING_URL", "http://joi:3102")
-REASONING_MODEL = "Qwen3-VL-30B-A3B-Thinking"
+MODEL = "Qwen3.5-35B-A3B"
 
 
 def get_llm(temperature: float = 0.1) -> ChatOpenAI:
-    """Get the instruct LLM client.
+    """Get the LLM client with thinking disabled.
 
     Use for tasks that need fast, structured output:
       - decompose_claim (JSON array)
       - research_subclaim (ReAct tool-routing — picking search queries)
       - synthesize_verdict (JSON object)
+
+    Thinking is disabled via chat_template_kwargs. This avoids wasting
+    ~25-45s per call on <think> blocks that don't improve tool-routing
+    or structured output quality.
 
     Args:
         temperature: 0.0 = deterministic, 1.0 = creative.
@@ -62,38 +65,37 @@ def get_llm(temperature: float = 0.1) -> ChatOpenAI:
     client = ChatOpenAI(
         base_url=f"{LLAMA_URL}/v1",
         api_key="not-needed",
-        model=INSTRUCT_MODEL,
+        model=MODEL,
         temperature=temperature,
         max_tokens=2048,
+        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
     )
-    log.debug(logger, MODULE, "instruct_init", "Instruct LLM client created",
-              base_url=LLAMA_URL, model=INSTRUCT_MODEL, temperature=temperature)
+    log.debug(logger, MODULE, "llm_init", "LLM client created (thinking=off)",
+              base_url=LLAMA_URL, model=MODEL, temperature=temperature)
     return client
 
 
 def get_reasoning_llm(temperature: float = 0.2) -> ChatOpenAI:
-    """Get the thinking/reasoning LLM client.
+    """Get the LLM client with thinking enabled.
 
-    Use for tasks that benefit from chain-of-thought reasoning:
-      - judge_subclaim (weighing conflicting evidence, calibrating confidence)
+    CURRENTLY UNUSED in the pipeline. Kept for future experiments.
 
-    NOT used for research — the ReAct loop is pure tool-routing where
-    <think> blocks waste ~25-45s per iteration without improving query
-    quality.  Research uses the instruct model via get_llm() instead.
+    Problem: llama.cpp doesn't support limiting thinking tokens.
+    The model generates 5000-9500 thinking tokens (3-4 min at 40 tok/s)
+    before producing output. This makes thinking mode impractical for
+    production use without server-side token limits.
 
-    The thinking model produces <think>...</think> blocks before its answer.
-    Callers should strip these before parsing structured output.
-
-    Slightly higher default temperature (0.2) to allow more exploratory
-    reasoning without becoming unreliable.
+    When/if llama.cpp adds max_thinking_tokens support (or we switch
+    to vLLM which has it), this can be re-enabled for judge_subclaim.
     """
     client = ChatOpenAI(
-        base_url=f"{LLAMA_REASONING_URL}/v1",
+        base_url=f"{LLAMA_URL}/v1",
         api_key="not-needed",
-        model=REASONING_MODEL,
+        model=MODEL,
         temperature=temperature,
-        max_tokens=4096,
+        max_tokens=16384,  # Large buffer for thinking + response
+        extra_body={"chat_template_kwargs": {"enable_thinking": True}},
     )
-    log.debug(logger, MODULE, "reasoning_init", "Reasoning LLM client created",
-              base_url=LLAMA_REASONING_URL, model=REASONING_MODEL, temperature=temperature)
+    log.debug(logger, MODULE, "reasoning_init", "LLM client created (thinking=on)",
+              base_url=LLAMA_URL, model=MODEL, temperature=temperature)
     return client
