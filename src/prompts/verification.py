@@ -1061,6 +1061,13 @@ Be calibrated: if the evidence is decent but not overwhelming, use 0.7 \
 or 0.75 — not 0.95. Only use 0.9+ when the evidence is rock-solid from \
 multiple authoritative sources.
 
+OUTPUT QUALITY — proofread before returning:
+- Re-read your output. Fix typos. "priming" is not "primary".
+- Use correct English. No made-up words, no mangled spellings.
+- "primary" (verb) → "primaried" (past tense), "primary challenges" (noun).
+- Do NOT write "primarings", "priming efforts", or similar gibberish.
+- This output is shown to users. Errors make us look incompetent.
+
 Return a JSON object:
 {{
   "verdict": "true|mostly_true|mixed|mostly_false|false|unverifiable",
@@ -1214,6 +1221,13 @@ Confidence scoring (USE THE FULL RANGE):
 - Below 0.40 — Very uncertain. Mostly guesswork.
 
 Do NOT default to 0.9+. Be honest about uncertainty.
+
+OUTPUT QUALITY — proofread before returning:
+- Re-read your output. Fix typos. "priming" is not "primary".
+- Use correct English. No made-up words, no mangled spellings.
+- "primary" (verb) → "primaried" (past tense), "primary challenges" (noun).
+- Do NOT write "primarings", "priming efforts", or similar gibberish.
+- This output is shown to users. Errors make us look incompetent.
 
 Return a JSON object:
 {{
