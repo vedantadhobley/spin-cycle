@@ -209,8 +209,8 @@ counter-evidence to look for.
 ### Added: Regulatory Anomaly Detection
 
   WHY: Legal claims can be technically accurate while hiding problematic
-  patterns. The AIPAC case is instructive: "not required to register as
-  foreign agent" is legally accurate, but the exemption itself may be
+  patterns. A lobbying organization "not required to register as foreign
+  agent" may be legally accurate, but the exemption itself may be
   anomalous. These 5 patterns detect when "legal" doesn't mean "proper":
 
   1. CARVE-OUT SUSPICION:
@@ -350,8 +350,8 @@ STRUCTURE RULES:
 
 6. TEMPORAL: When sequence or timing matters ("X before Y", "X after Z"):
    - Extract the temporal relationship as its own predicate
-   - "Trump fired Comey after the investigation started" needs BOTH:
-     a) "Trump fired Comey"
+   - "Official X fired investigator Y after the investigation started" needs BOTH:
+     a) "Official X fired investigator Y"
      b) "The firing occurred after the investigation started"
    - Timeline verification requires knowing WHEN each event occurred.
 
@@ -909,8 +909,31 @@ statements are NOT independent evidence. Examples:
 saying "we don't coordinate" is NOT verification — it's a denial by the accused.
 - Claim: "Company Y polluted the river" → Company Y's sustainability page \
 saying they're environmentally responsible is NOT evidence they didn't pollute.
-- Claim: "Politician Z took bribes" → Politician Z's denial is NOT \
-evidence of innocence.
+- Claim: "Agency Z mishandled investigation" → Agency Z's statement that \
+it followed proper procedures is NOT evidence of innocence.
+
+CRITICAL: NEWS REPORTS QUOTING SELF-SERVING STATEMENTS ARE STILL SELF-SERVING.
+When Reuters, AP, or any outlet reports "Agency X says it found no evidence \
+of Y" — the underlying source is still Agency X. The journalistic wrapper \
+does not convert a self-serving statement into independent verification.
+- "Agency says agency investigation found no wrongdoing" → Agency is source, \
+regardless of which outlet reports it. Applies equally to any agency (FBI, \
+DOJ, IRS, EPA, foreign agencies, etc.).
+- "Company says its own audit found no problems" → Company is the source.
+- "Government concludes government acted properly" → circular.
+
+To verify claims ABOUT an organization, you need sources EXTERNAL to that \
+organization. Look for:
+- Independent investigations (congressional, journalistic, NGO)
+- Whistleblower testimony
+- Court findings or legal proceedings
+- Third-party audits
+- Documents contradicting official statements
+
+If the only evidence for a claim about X comes from X itself (even via \
+news reports quoting X), note this limitation explicitly: "Primary evidence \
+for this conclusion comes from the organization being evaluated; independent \
+verification was not found in available sources."
 
 Self-serving statements can establish what an organization's OFFICIAL \
 POSITION is, but they cannot verify whether that position is TRUE. Treat \
@@ -1062,11 +1085,10 @@ or 0.75 — not 0.95. Only use 0.9+ when the evidence is rock-solid from \
 multiple authoritative sources.
 
 OUTPUT QUALITY — proofread before returning:
-- Re-read your output. Fix typos. "priming" is not "primary".
-- Use correct English. No made-up words, no mangled spellings.
-- "primary" (verb) → "primaried" (past tense), "primary challenges" (noun).
-- Do NOT write "primarings", "priming efforts", or similar gibberish.
-- This output is shown to users. Errors make us look incompetent.
+- Re-read your output before submitting. Fix any typos or garbled words.
+- Use correct English grammar and spelling throughout.
+- Verify each word is the word you intended — similar-sounding words are easy to confuse.
+- This output is shown directly to users. Quality matters.
 
 Return a JSON object:
 {{
@@ -1223,11 +1245,10 @@ Confidence scoring (USE THE FULL RANGE):
 Do NOT default to 0.9+. Be honest about uncertainty.
 
 OUTPUT QUALITY — proofread before returning:
-- Re-read your output. Fix typos. "priming" is not "primary".
-- Use correct English. No made-up words, no mangled spellings.
-- "primary" (verb) → "primaried" (past tense), "primary challenges" (noun).
-- Do NOT write "primarings", "priming efforts", or similar gibberish.
-- This output is shown to users. Errors make us look incompetent.
+- Re-read your output before submitting. Fix any typos or garbled words.
+- Use correct English grammar and spelling throughout.
+- Verify each word is the word you intended — similar-sounding words are easy to confuse.
+- This output is shown directly to users. Quality matters.
 
 Return a JSON object:
 {{

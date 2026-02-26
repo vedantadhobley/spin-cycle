@@ -27,3 +27,6 @@ duckduckgo-search>=7.0.0
 # Page fetcher (HTML parsing)
 beautifulsoup4>=4.12.0
 lxml>=5.0.0
+
+# Text cleanup (grammar/spell check for LLM output)
+language-tool-python>=2.8.0

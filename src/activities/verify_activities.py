@@ -38,6 +38,7 @@ from src.prompts.verification import (
 )
 from src.tools.source_ratings import get_source_rating_sync, format_source_tag
 from src.utils.logging import log
+from src.utils.text_cleanup import cleanup_text
 
 
 @activity.defn
@@ -475,6 +476,11 @@ async def judge_subclaim(claim_text: str, sub_claim: str, evidence: list[dict]) 
         reasoning = f"Failed to parse LLM judgment: {raw}"
         nuance = None
 
+    # Clean up reasoning and nuance text using LanguageTool
+    # This catches grammar oddities from quantized model outputs
+    reasoning = cleanup_text(reasoning)
+    nuance = cleanup_text(nuance)
+
     log.info(activity.logger, "judge", "done", "Sub-claim judged",
              sub_claim=sub_claim, verdict=verdict, confidence=confidence,
              nuance=nuance if nuance else None)
@@ -601,6 +607,11 @@ async def synthesize_verdict(
         confidence = 0.0
         reasoning = f"Failed to parse LLM synthesis: {raw}"
         nuance = None
+
+    # Clean up reasoning and nuance text using LanguageTool
+    # This catches grammar oddities from quantized model outputs
+    reasoning = cleanup_text(reasoning)
+    nuance = cleanup_text(nuance)
 
     log.info(activity.logger, "synthesize", "done", "Verdict synthesized",
              node=node_text, is_final=is_final, verdict=verdict,
