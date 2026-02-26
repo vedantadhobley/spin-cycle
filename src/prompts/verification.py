@@ -68,6 +68,243 @@ Verdict scale (6 levels):
   - mostly_false: Most sub-claims are contradicted by evidence
   - false: All sub-claims are clearly contradicted
   - unverifiable: Not enough evidence to judge either way
+
+
+================================================================================
+PROMPT DESIGN DOCUMENTATION
+================================================================================
+
+This section documents the patterns, rules, and detection mechanisms built into
+each prompt and WHY they exist. This serves as a reference when reviewing or
+extending the prompts.
+
+
+## DECOMPOSE_SYSTEM — Claim Pattern Recognition
+
+The decompose prompt extracts structured representations of claims. Beyond the
+basic entity/predicate structure, it recognizes special patterns that require
+different verification approaches:
+
+### Core Structure (Rules 1-5)
+  1. ENTITIES: Subjects being discussed (people, countries, orgs)
+  2. PREDICATES: Assertions about entities, with {entity} placeholders
+  3. APPLIES_TO: Which entities each predicate applies to
+  4. COMPARISONS: Kept as single facts ("A > B"), not split
+  5. ATTRIBUTIONS: Extract BOTH "X said Y" AND the substance Y itself
+
+### Special Claim Patterns (Rules 6-15)
+
+  6. TEMPORAL ("X after Y", "X before Z"):
+     WHY: Sequence matters. "Fired after investigation started" has different
+     implications than just "fired." Need to verify WHEN each event occurred.
+
+  7. CAUSAL ("X caused Y", "X leads to Y"):
+     WHY: Causation requires MORE than correlation. "Tax cuts caused job growth"
+     needs evidence of causal mechanism, not just temporal coincidence. This is
+     one of the most common misleading claim types.
+
+  8. NEGATION ("X never did Y", "X has not Z"):
+     WHY: Proving absence is fundamentally harder than proving presence. You
+     need comprehensive evidence that something DIDN'T happen. One counter-
+     example disproves a "never" claim.
+
+  9. SUPERLATIVE ("first", "only", "largest", "most"):
+     WHY: Extreme claims require exhaustive verification. "Only democracy in
+     the region" needs proof that NO OTHER country qualifies. One counter-
+     example = false.
+
+  10. QUANTIFIED ("all", "most", "some", "few"):
+      WHY: The quantifier dramatically changes the truth threshold. "All
+      scientists agree" vs "most agree" vs "some agree" are very different
+      claims. Must preserve the exact quantifier.
+
+  11. CONDITIONAL ("If X then Y"):
+      WHY: Both the condition AND consequence need verification, plus the
+      relationship between them. May be inherently unverifiable if the
+      condition hasn't occurred.
+
+  12. TREND ("increasing", "growing", "declining"):
+      WHY: Trends require time-series data, not snapshots. Must specify or
+      infer the timeframe. A single data point cannot prove a trend.
+
+  13. DEFINITION ("X qualifies as Y"):
+      WHY: Category membership can be contested. "Is X a democracy?" depends
+      on whose definition. Must note when the category itself is disputed.
+
+  14. CONSENSUS ("scientists agree", "experts say"):
+      WHY: Requires evidence of actual expert survey or meta-analysis. One
+      expert saying something is not consensus. Cherry-picked quotes mislead.
+
+  15. NORMATIVE vs FACTUAL:
+      WHY: We can only verify facts, not opinions. "The unjust war" contains
+      both factual (there is a war) and normative (it's unjust) elements.
+      Must separate and flag the normative parts as opinions.
+
+### Falsifying Conditions
+The key_test field now includes falsifying conditions: what would DISPROVE
+the thesis? This forces adversarial thinking and helps research know what
+counter-evidence to look for.
+
+### Structure Types
+  - simple: One entity, one predicate
+  - parallel_comparison: Multiple entities, shared predicates
+  - ranking: Comparison between entities
+  - causal: Cause-effect relationship claimed
+  - temporal_sequence: Events with timeline relationship
+  - superlative: Extreme/exclusive claims
+  - negation: Absence claims
+
+
+## RESEARCH_SYSTEM — Evidence Gathering
+
+### Source Tiers (existing)
+  - Tier 1: Primary documents (strongest)
+  - Tier 2: Independent reporting
+  - Tier 3: Interested-party statements (weakest)
+
+### Added Guidance
+
+  RECENCY MATTERS:
+  WHY: A 2019 article about military spending is outdated for 2025 claims.
+  For current situations, prefer recent sources. For historical events,
+  older authoritative sources are fine.
+
+  STATISTICAL/NUMERICAL CLAIMS — METHODOLOGY:
+  WHY: Numbers without methodology context are misleading. "Military spending"
+  can include/exclude different categories. Different sources define and
+  measure things differently. Need to understand HOW the number was calculated.
+
+  WHEN REPUTABLE SOURCES CONFLICT:
+  WHY: Sometimes Reuters says X and BBC says Y. This is important information.
+  Don't pick one — gather both and let the judge weigh them. Conflicting
+  expert sources = genuinely uncertain question.
+
+  PRIMARY SOURCE PURSUIT:
+  WHY: "According to a DOJ report" in news → find the actual DOJ report.
+  Secondary reporting may mischaracterize or cherry-pick from primary sources.
+  Always try to find the original document when cited.
+
+  UNVERIFIABLE CLAIM TYPES:
+  WHY: Some claims CANNOT be verified no matter how hard we search:
+    - Future predictions ("X will happen")
+    - Private communications ("Behind closed doors, X said Y")
+    - Internal motivations ("X did Y because Z")
+    - Counterfactuals ("If X hadn't, then Y wouldn't")
+  Must recognize these and flag them rather than endlessly searching.
+
+
+## JUDGE_SYSTEM — Evidence Evaluation
+
+### Source Handling (existing)
+  - Source rating tags (bias + factual reporting)
+  - Government sources as interested parties
+  - Self-serving statements (org's own denial is not evidence)
+
+### Legal/Regulatory Claims (existing)
+  - Verify legal fact
+  - Check for selective application
+  - Note contested status
+  - Distinguish legality from legitimacy
+
+### Added: Regulatory Anomaly Detection
+
+  WHY: Legal claims can be technically accurate while hiding problematic
+  patterns. The AIPAC case is instructive: "not required to register as
+  foreign agent" is legally accurate, but the exemption itself may be
+  anomalous. These 5 patterns detect when "legal" doesn't mean "proper":
+
+  1. CARVE-OUT SUSPICION:
+     Does the entity benefit from a rule specifically designed to exempt them?
+     If comparable entities DO comply but this one doesn't, flag the anomaly.
+     "This exemption appears to apply specifically to this entity."
+
+  2. ENFORCEMENT ASYMMETRY:
+     Is the law enforced against some but not others for similar conduct?
+     Same behavior + different treatment = selective enforcement.
+     Note who gets prosecuted and who doesn't.
+
+  3. REGULATORY CAPTURE:
+     Did the entity influence the rule that benefits them?
+     Lobbying history, revolving door appointments, drafting involvement.
+     "X lobbied for the exemption X now benefits from."
+
+  4. LETTER VS SPIRIT:
+     Does technical compliance defeat the law's purpose?
+     A law meant to expose foreign influence that doesn't catch actual
+     foreign influence has failed its intent. Note when this occurs.
+
+  5. PRECEDENT INCONSISTENCY:
+     Have similar cases been decided differently?
+     If entity A was required but entity B (similar conduct) wasn't,
+     there's an inconsistency worth flagging.
+
+### Added: Rhetorical Trap Detection
+
+  WHY: Claims can be technically accurate while being misleading. These
+  patterns catch common ways that truth is weaponized:
+
+  1. CHERRY-PICKING:
+     A true data point that is unrepresentative. One good quarter doesn't
+     prove a trend. "This statistic is accurate but selectively chosen."
+
+  2. CORRELATION ≠ CAUSATION:
+     "X went up when Y went up" is NOT "X caused Y." Look for evidence of
+     causal mechanism, not just temporal coincidence.
+
+  3. DEFINITION GAMES:
+     The answer depends on how terms are defined. "Is X a democracy?"
+     depends whose definition. Note: "True by definition A, false by B."
+
+  4. TIME-SENSITIVITY:
+     True then, not now (or vice versa). Circumstances change.
+     "This was accurate in [year] but circumstances have changed."
+
+  5. SURVIVORSHIP BIAS:
+     Multiple sources may trace to one origin. 5 articles citing the same
+     study = ONE source, not five. Look for independent corroboration.
+
+  6. STATISTICAL FRAMING:
+     Correct number, misleading presentation. "Crime up 50%" from 2 to 3
+     incidents is technically true but misleading. Note relative vs absolute.
+
+  7. ANECDOTAL VS SYSTEMATIC:
+     One case does not prove a pattern. "X happened to Y" doesn't mean X
+     is common. "This example is real but not shown to be representative."
+
+  8. FALSE BALANCE:
+     Don't treat 1 dissenting source as equal to 10 corroborating.
+     Scientific consensus vs one outlier is not "both sides."
+     Weight by quality AND quantity, not just existence of disagreement.
+
+
+## SYNTHESIZE_SYSTEM — Verdict Combination
+
+### Core Logic (existing)
+  - Weigh by importance, not count
+  - Core assertion drives verdict
+  - Use thesis as rubric
+  - Propagate nuance
+
+### Added Handling
+
+  CORRELATED SUB-CLAIMS:
+  WHY: If multiple sub-claims share the same evidence source, don't
+  double-count. Three "true" from the same Wikipedia article are weaker
+  than three "true" from Reuters, AP, and an academic study.
+
+  CONFLICTING NUANCES:
+  WHY: Sub-claim nuances may point different directions. Don't just
+  concatenate them — synthesize into a coherent picture. "The number is
+  exaggerated" + "the pattern is real" → "Specific figures overstated,
+  but underlying trend is supported."
+
+  UNVERIFIABLE SUB-CLAIMS:
+  WHY: If the CORE assertion is unverifiable, the overall verdict should
+  be unverifiable — you can't confirm a claim whose central element can't
+  be checked. Multiple unverifiable sub-claims should significantly drag
+  down confidence.
+
+================================================================================
 """
 
 
@@ -111,11 +348,74 @@ STRUCTURE RULES:
    - The substance predicate: the actual claim being made (WITHOUT attribution)
    The substance is usually MORE IMPORTANT than who said it.
 
+6. TEMPORAL: When sequence or timing matters ("X before Y", "X after Z"):
+   - Extract the temporal relationship as its own predicate
+   - "Trump fired Comey after the investigation started" needs BOTH:
+     a) "Trump fired Comey"
+     b) "The firing occurred after the investigation started"
+   - Timeline verification requires knowing WHEN each event occurred.
+
+7. CAUSAL: When causation is claimed ("X caused Y", "X leads to Y"):
+   - Mark these explicitly — causation requires MORE than correlation
+   - "Tax cuts caused job growth" needs evidence of CAUSAL MECHANISM, \
+not just "tax cuts happened" and "jobs grew"
+   - Extract as: {{"claim": "{{cause}} caused {{effect}}", "type": "causal"}}
+
+8. NEGATION: When ABSENCE is claimed ("X never did Y", "X has not Z"):
+   - These are HARDER to verify — you must prove something DIDN'T happen
+   - Flag negations explicitly so research knows to look comprehensively
+   - One counterexample disproves a "never" claim
+
+9. SUPERLATIVE: When EXTREMES are claimed ("first", "only", "largest", "most"):
+   - These require EXHAUSTIVE verification — one counterexample = false
+   - "X is the only democracy in the region" needs evidence that NO OTHER \
+country qualifies, not just that X qualifies
+   - "X was the first to Y" needs evidence no one did it earlier
+
+10. QUANTIFIED: When SCOPE matters ("all", "most", "some", "few", "many"):
+   - The quantifier dramatically changes the truth threshold
+   - "All scientists agree" vs "most scientists agree" vs "some scientists"
+   - Extract the EXACT quantifier — don't paraphrase "most" as "many"
+
+11. CONDITIONAL: When IF-THEN logic is claimed ("If X then Y"):
+   - Both the condition AND the consequence need verification
+   - The relationship between them also needs verification
+   - May be unverifiable if the condition hasn't occurred
+
+12. TREND: When DIRECTION is claimed ("increasing", "growing", "declining"):
+   - Requires time-series data, not a snapshot
+   - Must specify or infer the timeframe (this year? decade? ever?)
+   - A single data point cannot prove a trend
+
+13. DEFINITION: When CATEGORY MEMBERSHIP is claimed ("X qualifies as Y"):
+   - The criteria for category Y may be contested
+   - "X is a democracy" depends on whose definition of democracy
+   - Extract both the classification AND note if the category is contested
+
+14. CONSENSUS: When AGREEMENT is claimed ("scientists agree", "experts say"):
+   - Requires evidence of actual expert survey or meta-analysis
+   - One expert saying something ≠ consensus
+   - Extract as a claim that needs systematic evidence, not cherry-picked quotes
+
+15. NORMATIVE vs FACTUAL — CRITICAL DISTINCTION:
+   - NORMATIVE: "X should do Y", "X ought to", "X is wrong/right to"
+   - FACTUAL: "X did Y", "X is Y", "X has Y"
+   - We can only verify FACTUAL claims. Normative claims are opinions.
+   - If a claim mixes both, extract the factual parts and FLAG the normative.
+   - Example: "The government should stop the unjust war" →
+     - Factual (verifiable): "There is a war"
+     - Normative (opinion): "The war is unjust", "should stop"
+
 CRITICAL — key_test VALIDATION:
 The key_test field describes what must be true for the thesis to hold. \
 After expansion, EVERY element mentioned in key_test MUST have a corresponding \
 fact. If your key_test says "both must do X", make sure "X" appears in \
 predicates with applies_to including BOTH entities.
+
+FALSIFYING CONDITIONS — Think adversarially:
+Also consider: what would DISPROVE this thesis? If the speaker claims \
+"both countries are cutting aid" and one is INCREASING aid, the thesis \
+fails. Include a "falsifies_if" note in key_test when useful.
 
 EXAMPLES:
 
@@ -206,7 +506,8 @@ while cutting their foreign aid budgets."
   "thesis": "US and China both prioritize military expansion over foreign aid, \
 with US spending far more",
   "key_test": "US ~$800B and China ~$200B military spending, US > China, \
-AND both must be increasing military AND both must be cutting foreign aid",
+AND both must be increasing military AND both must be cutting foreign aid. \
+Falsifies if: either country is increasing aid, or spending figures are >50% off.",
   "structure": "parallel_comparison",
   "entities": ["US", "China"],
   "predicates": [
@@ -225,11 +526,94 @@ AND both must be increasing military AND both must be cutting foreign aid",
   ]
 }}
 
+Temporal claim:
+"The president fired the FBI director after the investigation began"
+→ {{
+  "thesis": "The firing occurred in response to an ongoing investigation",
+  "key_test": "The director was fired AND the investigation had already \
+started before the firing date. Falsifies if: firing preceded investigation.",
+  "structure": "temporal_sequence",
+  "entities": ["president", "FBI director"],
+  "predicates": [
+    {{"claim": "{{entity}} fired the FBI director", "applies_to": ["president"]}},
+    {{"claim": "An investigation was ongoing at the time of the firing", "applies_to": ["FBI director"]}},
+    {{"claim": "The firing occurred AFTER the investigation began", "type": "temporal"}}
+  ],
+  "comparisons": []
+}}
+
+Causal claim:
+"The tax cuts caused record job growth"
+→ {{
+  "thesis": "Tax policy directly produced employment gains",
+  "key_test": "Tax cuts happened AND job growth occurred AND there is \
+evidence of causal link (not just correlation). Falsifies if: job growth \
+preceded tax cuts, or other factors better explain growth.",
+  "structure": "causal",
+  "entities": ["tax cuts", "job growth"],
+  "predicates": [
+    {{"claim": "Tax cuts were implemented", "applies_to": ["tax cuts"]}},
+    {{"claim": "Record job growth occurred", "applies_to": ["job growth"]}},
+    {{"claim": "The tax cuts caused the job growth", "type": "causal"}}
+  ],
+  "comparisons": []
+}}
+Note: CAUSAL claims require evidence of mechanism, not just temporal coincidence.
+
+Superlative claim:
+"Country X is the only democracy in the region"
+→ {{
+  "thesis": "Country X uniquely holds democratic status in its region",
+  "key_test": "Country X must be a democracy AND no other country in the \
+region qualifies as a democracy. Falsifies if: any other regional country \
+is also a democracy (by reasonable definition).",
+  "structure": "superlative",
+  "entities": ["Country X", "the region"],
+  "predicates": [
+    {{"claim": "{{entity}} is a democracy", "applies_to": ["Country X"]}},
+    {{"claim": "No other country in the region is a democracy", "type": "superlative"}}
+  ],
+  "comparisons": []
+}}
+Note: SUPERLATIVE claims require exhaustive verification. One counterexample = false.
+
+Negation claim:
+"The facility has never been independently audited"
+→ {{
+  "thesis": "No external audit of the facility has ever occurred",
+  "key_test": "There must be no record of any independent audit ever \
+occurring. Falsifies if: even ONE independent audit is documented.",
+  "structure": "negation",
+  "entities": ["the facility"],
+  "predicates": [
+    {{"claim": "{{entity}} has never had an independent audit", "type": "negation", "applies_to": ["the facility"]}}
+  ],
+  "comparisons": []
+}}
+Note: NEGATION claims are hard to verify — must prove absence. One counterexample disproves.
+
+Mixed normative/factual claim:
+"The unjust embargo has lasted over 60 years"
+→ {{
+  "thesis": "A long-standing embargo exists (with speaker's value judgment attached)",
+  "key_test": "An embargo must exist AND it must have lasted 60+ years. \
+NOTE: 'unjust' is a normative judgment — we verify facts, not opinions.",
+  "structure": "simple",
+  "entities": ["the embargo"],
+  "predicates": [
+    {{"claim": "{{entity}} has lasted over 60 years", "applies_to": ["the embargo"]}},
+    {{"claim": "The embargo is unjust", "type": "normative", "applies_to": ["the embargo"], \
+"note": "OPINION — cannot be fact-checked"}}
+  ],
+  "comparisons": []
+}}
+Note: Normative claims (should/ought/right/wrong) are flagged but not verified.
+
 Return a JSON object with these fields:
 {{
   "thesis": "One sentence: what is the speaker fundamentally arguing?",
-  "key_test": "What must ALL be true for the thesis to hold? Be exhaustive.",
-  "structure": "simple | parallel_comparison | causal | ranking",
+  "key_test": "What must ALL be true for the thesis to hold? Include falsifying conditions.",
+  "structure": "simple | parallel_comparison | causal | ranking | temporal_sequence | superlative | negation",
   "entities": ["entity1", "entity2", ...],
   "predicates": [
     {{"claim": "template with {{entity}}", "applies_to": ["entity1", "entity2"]}}
@@ -254,6 +638,12 @@ Remember:
 - Keep comparisons separate (don't split "A > B" into "A" and "B")
 - For attributed claims ("X said Y"), extract BOTH the attribution AND \
 the substance as separate predicates
+- For TEMPORAL claims ("X after Y"), extract the sequence relationship
+- For CAUSAL claims ("X caused Y"), mark as type: causal — requires mechanism evidence
+- For NEGATION claims ("X never Y"), mark as type: negation — hard to prove absence
+- For SUPERLATIVE claims ("first", "only", "largest"), mark as type: superlative
+- For NORMATIVE claims ("should", "ought", "unjust"), flag as opinions, not facts
+- Include falsifying conditions in key_test: what would DISPROVE the thesis?
 
 Return JSON with: thesis, key_test, structure, entities, predicates, comparisons\
 """
@@ -308,6 +698,12 @@ you MUST do at least one search for the OPPOSITE perspective. For example:
 This prevents one-sided evidence that misleads the judge. A claim about a \
 complex topic needs evidence from both angles.
 
+RECENCY MATTERS:
+For claims about CURRENT situations (policies, spending, relationships), \
+prefer recent sources (last 1-2 years). A 2019 article about military \
+spending may be outdated for a claim about 2025. For HISTORICAL claims \
+(past events, completed actions), older authoritative sources are fine.
+
 ACCEPTABLE sources (use ONLY these), ranked by reliability:
 
 TIER 1 — Primary documents (STRONGEST evidence):
@@ -338,6 +734,37 @@ website describing its own policies is SPIN, not fact — look for the \
 actual legislation, treaty text, or charter instead. Always prefer \
 Tier 1 primary documents over Tier 3 statements. When Tier 1 and Tier 3 \
 conflict, Tier 1 wins.
+
+STATISTICAL/NUMERICAL CLAIMS — LOOK FOR METHODOLOGY:
+When a claim involves numbers (spending, percentages, counts):
+- Don't just find ONE source with THE NUMBER — look for methodology
+- Different sources may define/measure things differently
+- "Military spending" can include/exclude different categories
+- Note the source of the data AND how it was calculated
+- If sources disagree on numbers, gather BOTH and note the discrepancy
+
+WHEN REPUTABLE SOURCES CONFLICT:
+Sometimes Reuters says X and BBC says Y. This is important information.
+- Gather BOTH conflicting sources — don't pick one
+- Note the exact disagreement clearly
+- The judge will weigh them; you just gather the evidence
+- Conflicting expert sources = genuinely uncertain question
+
+PRIMARY SOURCE PURSUIT:
+When news reports cite a document, study, or official record, try to find \
+the ORIGINAL. "According to a DOJ report" → search for the actual DOJ report. \
+"A study found..." → find the study itself. Secondary reporting may \
+mischaracterize or cherry-pick from primary sources.
+
+CLAIM TYPES THAT MAY BE UNVERIFIABLE — recognize and flag these:
+- FUTURE predictions: "X will happen" — cannot verify until it happens
+- PRIVATE communications: "Behind closed doors, X said Y" — may be unknowable
+- INTERNAL motivations: "X did Y because Z" — intent is often unverifiable
+- COUNTERFACTUALS: "If X hadn't, then Y wouldn't" — hypotheticals can't be tested
+- PURE OPINION dressed as fact: "X is the best/worst" with no objective metric
+
+If a claim falls into these categories, gather what evidence exists but \
+note that definitive verification may not be possible.
 
 NEVER cite these — they are NOT credible sources:
 - Reddit, Quora, Stack Exchange, or any forum/comment section
@@ -478,17 +905,117 @@ if convicted.
 SELF-SERVING STATEMENTS (the organization IS the claim subject):
 When evaluating a claim ABOUT an organization, that organization's own \
 statements are NOT independent evidence. Examples:
-- Claim: "AIPAC coordinates with Israeli government" → aipac.org saying \
-"we don't coordinate" is NOT verification — it's a denial by the accused.
-- Claim: "Company X polluted the river" → Company X's website saying \
-they're environmentally responsible is NOT evidence they didn't pollute.
-- Claim: "Politician Y took bribes" → Politician Y's denial is NOT \
+- Claim: "Organization X coordinates with foreign government" → X's website \
+saying "we don't coordinate" is NOT verification — it's a denial by the accused.
+- Claim: "Company Y polluted the river" → Company Y's sustainability page \
+saying they're environmentally responsible is NOT evidence they didn't pollute.
+- Claim: "Politician Z took bribes" → Politician Z's denial is NOT \
 evidence of innocence.
 
 Self-serving statements can establish what an organization's OFFICIAL \
 POSITION is, but they cannot verify whether that position is TRUE. Treat \
 them like defendant testimony — note what they claim, but require \
 independent corroboration. A denial is just a denial until proven otherwise.
+
+LEGAL/REGULATORY CLAIMS (legality ≠ legitimacy):
+When a claim's truth hinges on law, regulation, or official classification:
+1. VERIFY the legal fact — is this actually the law/rule/classification?
+2. CHECK for selective application — are comparable entities treated \
+differently under the same rule? If so, the law exists but its application \
+may be inconsistent or politically motivated.
+3. NOTE contested status — is the rule under legal challenge, facing \
+reform efforts, or subject to widespread ethical criticism?
+
+A claim like "X doesn't have to register as Y" may be legally accurate \
+while omitting that similar entities DO register, or that exemption is \
+contested. Your verdict addresses LEGAL ACCURACY. Use nuance to flag:
+- Inconsistent enforcement ("Others with similar activities register")
+- Active challenges ("This classification is under DOJ review")
+- Gap between legal and ethical ("Legally exempt, but critics argue...")
+
+Legality answers what the rule IS. It does not answer whether the rule \
+is just, consistently applied, or should exist. Don't conflate "legal" \
+with "proper" — note the distinction when relevant.
+
+REGULATORY ANOMALY DETECTION:
+When evaluating legal/regulatory claims, actively look for these red flags:
+
+1. CARVE-OUT SUSPICION: Does the entity benefit from a rule that seems \
+specifically designed to exempt them?
+   - "X doesn't have to do Y" → who else does Y? Is X the only one exempt?
+   - If comparable entities DO comply, the exemption is anomalous.
+   - Note: "This exemption appears to apply specifically to this entity \
+or a narrow class of similar entities."
+
+2. ENFORCEMENT ASYMMETRY: Is the law enforced against some but not others?
+   - Same behavior, different treatment = selective enforcement
+   - Note who gets prosecuted and who doesn't for similar conduct.
+   - If evidence shows uneven enforcement, flag it in nuance.
+
+3. REGULATORY CAPTURE: Did the entity influence the rule that benefits them?
+   - Lobbying history, revolving door appointments, drafting involvement
+   - If the regulated helped write the regulation, note it.
+   - "X lobbied for the exemption X now benefits from" is relevant context.
+
+4. LETTER VS SPIRIT: Does the legal technicality contradict the law's purpose?
+   - A law meant to expose foreign influence that doesn't catch actual \
+foreign influence has failed its purpose.
+   - Note when technical compliance defeats the regulation's stated goal.
+   - "Legally compliant, but this appears to circumvent the law's intent."
+
+5. PRECEDENT INCONSISTENCY: Have similar cases been decided differently?
+   - If entity A was required to register but entity B (with similar conduct) \
+wasn't, there's an inconsistency worth noting.
+   - Historical enforcement patterns matter.
+
+Your verdict addresses LEGAL/FACTUAL ACCURACY. Your nuance should flag any \
+of the above anomalies. "Legally accurate, but benefits from what critics \
+call a loophole" is a valid and important nuance.
+
+RHETORICAL TRAPS — patterns that mislead even when technically accurate:
+
+1. CHERRY-PICKING: A true data point that is unrepresentative.
+   - One good quarter doesn't prove a trend. One bad incident doesn't prove a pattern.
+   - If evidence suggests the cited fact is an outlier, note it.
+   - "This statistic is accurate but appears selectively chosen."
+
+2. CORRELATION ≠ CAUSATION: "X went up when Y went up" ≠ "X caused Y".
+   - Two things happening together is not proof one caused the other.
+   - Look for evidence of causal mechanism, not just temporal coincidence.
+   - "Evidence shows correlation, but causation is not established."
+
+3. DEFINITION GAMES: The answer depends on how you define terms.
+   - "Is X a democracy?" depends whose definition you use.
+   - If the claim's truth hinges on a contested definition, note it.
+   - "True by definition A, but false by definition B."
+
+4. TIME-SENSITIVITY: True then, not now (or vice versa).
+   - Circumstances change. A 2015 fact may not be a 2025 fact.
+   - If evidence is dated, note whether the claim is still current.
+   - "This was accurate in [year] but circumstances have since changed."
+
+5. SURVIVORSHIP BIAS: Multiple sources may trace to one origin.
+   - If 5 articles all cite the same study, that's ONE source, not five.
+   - Look for independent corroboration, not just repetition.
+   - "Multiple sources repeat this claim, but they appear to share a common origin."
+
+6. STATISTICAL FRAMING: Correct number, misleading presentation.
+   - "Crime up 50%" from 2 to 3 incidents is technically true but misleading.
+   - Relative vs absolute numbers can distort perception.
+   - "The number is accurate but the framing may overstate the significance."
+
+7. ANECDOTAL VS SYSTEMATIC: One case does not prove a pattern.
+   - "X happened to person Y" doesn't mean X is common.
+   - Look for whether evidence shows a pattern or just an instance.
+   - "This example is real but the evidence doesn't establish it's representative."
+
+8. FALSE BALANCE: Don't treat 1 dissenting source as equal to 10 corroborating.
+   - Scientific consensus vs one outlier paper is not "both sides."
+   - Weight by quality and quantity of evidence, not just existence of disagreement.
+   - When evidence is lopsided, say so clearly.
+
+When you detect any of these patterns, note them in the nuance field. The \
+verdict should reflect accuracy; the nuance should reflect context.
 
 Verdict scale (use the FULL range — do not collapse to just true/false):
 - "true" — evidence clearly supports the claim as stated
@@ -635,6 +1162,27 @@ whether THAT ARGUMENT survives the sub-verdicts.
 For example, if the thesis is "both countries prioritize military over \
 aid" and one country is doing the OPPOSITE (increasing aid), the thesis \
 itself breaks — that's not a minor detail, it undermines the argument.
+
+CORRELATED SUB-CLAIMS — avoid double-counting:
+If multiple sub-claims were verified using the SAME evidence source, don't \
+count them as independent confirmations. Three "true" verdicts from the \
+same Wikipedia article are weaker than three "true" verdicts from Reuters, \
+AP, and an academic study. Look at the reasoning to see if sub-claims share \
+a common evidence base.
+
+CONFLICTING NUANCES — synthesize, don't concatenate:
+Sub-claims may have nuance notes that point in different directions. Your \
+job is to synthesize these into a coherent overall picture, not just list \
+them all. If one sub-claim says "the number is exaggerated" and another \
+says "the pattern is real," weave these into: "The specific figures are \
+overstated, but the underlying trend is supported."
+
+UNVERIFIABLE SUB-CLAIMS — handle with care:
+If the CORE assertion's sub-claim is "unverifiable," the overall verdict \
+should likely be "unverifiable" — you can't confirm a claim whose central \
+element can't be checked. If only a DETAIL is unverifiable, note it but \
+let the core drive the verdict. Multiple unverifiable sub-claims should \
+drag confidence down significantly.
 
 Verdict scale:
 - "true" — Core assertion AND key details are well-supported
