@@ -1,4 +1,9 @@
-"""Claim submission and query endpoints."""
+"""Claim submission and query endpoints.
+
+Claims are queued to ensure only one verification runs at a time,
+preventing LLM contention. The workflow triggers the next queued
+claim when it completes.
+"""
 
 import uuid
 from typing import Optional
@@ -7,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from temporalio.client import Client as TemporalClient
 
 from src.data.schemas import ClaimSubmit, ClaimResponse, VerdictResponse, ClaimListResponse, SubClaimResponse
 from src.db.models import Claim, SubClaim, Verdict
@@ -18,6 +24,24 @@ MODULE = "claims"
 logger = get_logger()
 
 TASK_QUEUE = "spin-cycle-verify"
+
+
+async def count_running_workflows(temporal: TemporalClient) -> int:
+    """Count currently running verification workflows."""
+    count = 0
+    async for _ in temporal.list_workflows(
+        'WorkflowType="VerifyClaimWorkflow" AND ExecutionStatus="Running"'
+    ):
+        count += 1
+    return count
+
+
+async def count_queued_claims(session: AsyncSession) -> int:
+    """Count claims waiting in queue."""
+    result = await session.execute(
+        select(func.count(Claim.id)).where(Claim.status == "queued")
+    )
+    return result.scalar() or 0
 
 router = APIRouter()
 
@@ -64,31 +88,49 @@ async def submit_claim(
     request: Request,
     session: AsyncSession = Depends(get_session),
 ):
-    """Submit a claim for verification."""
+    """Submit a claim for verification.
+    
+    Claims are queued to ensure sequential processing (one at a time).
+    If no workflow is running, starts immediately. Otherwise, queued.
+    """
+    temporal = request.app.state.temporal
+    
+    # Check if any verification is currently running
+    running_count = await count_running_workflows(temporal)
+    
+    # Determine initial status
+    if running_count > 0:
+        initial_status = "queued"
+    else:
+        initial_status = "pending"
+    
     claim = Claim(
         text=body.text,
         source_url=body.source,
         source_name=body.source_name,
-        status="pending",
+        status=initial_status,
     )
     session.add(claim)
     await session.commit()
     await session.refresh(claim)
 
     claim_id = str(claim.id)
-    log.info(logger, MODULE, "submitted", "Claim submitted",
-             claim_id=claim_id, text=body.text)
-
-    # Kick off Temporal workflow
-    temporal = request.app.state.temporal
-    await temporal.start_workflow(
-        VerifyClaimWorkflow.run,
-        args=[claim_id, body.text],
-        id=f"verify-{claim_id}",
-        task_queue=TASK_QUEUE,
-    )
-    log.info(logger, MODULE, "workflow_started", "Verification workflow started",
-             claim_id=claim_id)
+    
+    if initial_status == "queued":
+        # Get queue position
+        queue_position = await count_queued_claims(session)
+        log.info(logger, MODULE, "queued", "Claim queued for verification",
+                 claim_id=claim_id, queue_position=queue_position)
+    else:
+        # No workflow running — start immediately
+        await temporal.start_workflow(
+            VerifyClaimWorkflow.run,
+            args=[claim_id, body.text],
+            id=f"verify-{claim_id}",
+            task_queue=TASK_QUEUE,
+        )
+        log.info(logger, MODULE, "workflow_started", "Verification workflow started",
+                 claim_id=claim_id)
 
     return ClaimResponse(
         id=claim_id,

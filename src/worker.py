@@ -34,6 +34,7 @@ from src.activities.verify_activities import (  # noqa: E402
     judge_subclaim,
     synthesize_verdict,
     store_result,
+    start_next_queued_claim,
 )
 
 TASK_QUEUE = "spin-cycle-verify"
@@ -59,6 +60,7 @@ async def main():
             judge_subclaim,
             synthesize_verdict,
             store_result,
+            start_next_queued_claim,
         ],
         # Serialize activity execution - only one LLM call at a time
         # Workflows may still interleave but activities (where LLM calls happen)
@@ -67,7 +69,7 @@ async def main():
     )
 
     log.info(logger, MODULE, "ready", "Worker listening",
-             task_queue=TASK_QUEUE, activity_count=6, workflow_count=1)
+             task_queue=TASK_QUEUE, activity_count=7, workflow_count=1)
     await worker.run()
 
 

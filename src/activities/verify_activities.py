@@ -710,3 +710,61 @@ async def store_result(claim_id: str, result: dict) -> None:
 
         log.info(activity.logger, "store", "done", "Result stored in database",
                  claim_id=claim_id, verdict=result.get("verdict"))
+
+
+@activity.defn
+async def start_next_queued_claim() -> str | None:
+    """Check for queued claims and start the next one.
+    
+    Called at the end of each workflow to trigger the next claim in queue.
+    Returns the claim_id if a workflow was started, None otherwise.
+    """
+    import os
+    from temporalio.client import Client as TemporalClient
+    
+    TEMPORAL_HOST = os.getenv("TEMPORAL_HOST", "localhost:7233")
+    TASK_QUEUE = "spin-cycle-verify"
+    
+    async with async_session() as session:
+        # Find oldest queued claim
+        result = await session.execute(
+            select(Claim)
+            .where(Claim.status == "queued")
+            .order_by(Claim.created_at.asc())
+            .limit(1)
+        )
+        claim = result.scalar_one_or_none()
+        
+        if not claim:
+            log.info(activity.logger, "queue", "empty", "No queued claims")
+            return None
+        
+        claim_id = str(claim.id)
+        claim_text = claim.text
+        
+        # Update status to pending before starting workflow
+        claim.status = "pending"
+        claim.updated_at = datetime.now(timezone.utc)
+        await session.commit()
+        
+        log.info(activity.logger, "queue", "starting_next", 
+                 "Starting next queued claim",
+                 claim_id=claim_id)
+    
+    # Connect to Temporal and start the workflow
+    # Import here to avoid circular dependency with workflow module
+    from src.workflows.verify import VerifyClaimWorkflow
+    
+    temporal = await TemporalClient.connect(TEMPORAL_HOST)
+    await temporal.start_workflow(
+        VerifyClaimWorkflow.run,
+        args=[claim_id, claim_text],
+        id=f"verify-{claim_id}",
+        task_queue=TASK_QUEUE,
+    )
+    
+    log.info(activity.logger, "queue", "workflow_started",
+             "Queued claim workflow started",
+             claim_id=claim_id)
+    
+    return claim_id

@@ -33,6 +33,7 @@ with workflow.unsafe.imports_passed_through():
         judge_subclaim,
         synthesize_verdict,
         store_result,
+        start_next_queued_claim,
     )
     from src.utils.logging import log
 
@@ -195,6 +196,14 @@ class VerifyClaimWorkflow:
             args=[claim_id, result],
             start_to_close_timeout=timedelta(seconds=30),
             retry_policy=RetryPolicy(maximum_attempts=3),
+        )
+
+        # Step 5: Start next queued claim (if any)
+        # This ensures claims process sequentially - one at a time
+        await workflow.execute_activity(
+            start_next_queued_claim,
+            start_to_close_timeout=timedelta(seconds=30),
+            retry_policy=RetryPolicy(maximum_attempts=2),
         )
 
         log.info(workflow.logger, MODULE, "complete", "Verification complete",

@@ -50,7 +50,7 @@ class VerdictResponse(BaseModel):
     """Full verdict response for a claim."""
     id: str
     text: str
-    status: Literal["pending", "processing", "verified", "flagged"]
+    status: Literal["queued", "pending", "processing", "verified", "flagged"]
     source: Optional[str] = None
     source_name: Optional[str] = None
     verdict: Optional[Literal["true", "mostly_true", "mixed", "mostly_false", "false", "unverifiable"]] = None
