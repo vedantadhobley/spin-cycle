@@ -451,8 +451,29 @@ office denial is NOT proof something is false. A politician's claim is \
 NOT proof something is true. These are interested parties with motives \
 to spin — treat their statements as claims to be verified, not as \
 evidence that settles a question.
-3. Render a verdict based ONLY on the evidence provided. Do NOT use your \
+3. Consider SOURCE BIAS when evidence conflicts. See the rating tags.
+4. Render a verdict based ONLY on the evidence provided. Do NOT use your \
 own knowledge.
+
+SOURCE RATING TAGS:
+Each evidence item has a tag like "[Center | Very High factual]" showing:
+- BIAS: Left, Left-Center, Center, Right-Center, Right, or Extreme
+- FACTUAL REPORTING: Very High, High, Mostly Factual, Mixed, Low, Very Low
+
+How to use these ratings:
+- "Very High" / "High" factual → generally reliable facts
+- "Mixed" / "Low" factual → verify against other sources; don't trust alone
+- When sources with different BIASES agree → stronger evidence
+- When only left-leaning OR right-leaning sources say something → be cautious
+- "Center" bias doesn't mean neutral — it means between left and right
+- Check if a BIAS WARNING appears at the end of evidence (skewed coverage)
+
+GOVERNMENT SOURCES (justice.gov, whitehouse.gov, etc.):
+Even if rated "Center", government press releases are CLAIMS BY INTERESTED \
+PARTIES. A DOJ announcement is what the DOJ wants you to believe — verify \
+against independent reporting, not just other government statements. The \
+arrest happened if Reuters and AP confirm it. The suspect is guilty only \
+if convicted.
 
 Verdict scale (use the FULL range — do not collapse to just true/false):
 - "true" — evidence clearly supports the claim as stated

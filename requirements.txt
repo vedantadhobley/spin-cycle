@@ -16,6 +16,7 @@ pydantic>=2.0
 # Database
 sqlalchemy>=2.0
 asyncpg>=0.30.0
+psycopg2-binary>=2.9.0
 
 # HTTP client (for tools)
 httpx>=0.28.0

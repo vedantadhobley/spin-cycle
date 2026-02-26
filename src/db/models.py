@@ -87,3 +87,36 @@ class Verdict(Base):
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     claim = relationship("Claim", back_populates="verdict")
+
+
+class SourceRating(Base):
+    """Cached media bias/factual ratings from MBFC and similar services."""
+    __tablename__ = "source_ratings"
+
+    domain = Column(String(256), primary_key=True)  # e.g., "reuters.com"
+    bias = Column(
+        Enum(
+            "extreme-left", "left", "left-center", "center",
+            "right-center", "right", "extreme-right", "satire", "conspiracy-pseudoscience",
+            name="bias_rating"
+        ),
+        nullable=True,
+    )
+    bias_score = Column(Float, nullable=True)  # Numeric bias: -10 (far left) to +10 (far right)
+    factual_reporting = Column(
+        Enum("very-high", "high", "mostly-factual", "mixed", "low", "very-low", name="factual_rating"),
+        nullable=True,
+    )
+    credibility = Column(
+        Enum("high", "medium", "low", name="credibility_rating"),
+        nullable=True,
+    )
+    country = Column(String(128), nullable=True)  # e.g., "United Kingdom", "Russia"
+    media_type = Column(String(128), nullable=True)  # e.g., "News Wire", "TV Station", "Newspaper"
+    ownership = Column(String(256), nullable=True)  # e.g., "State-Funded", "Thomson Reuters Corp"
+    traffic = Column(String(64), nullable=True)  # e.g., "High Traffic", "Medium Traffic"
+    mbfc_url = Column(String(512), nullable=True)  # Link to MBFC page for reference
+    raw_data = Column(JSONB, nullable=True)  # Store any extra scraped fields
+    scraped_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+

@@ -36,6 +36,7 @@ from src.prompts.verification import (
     SYNTHESIZE_SYSTEM,
     SYNTHESIZE_USER,
 )
+from src.tools.source_ratings import get_source_rating_sync, format_source_tag
 from src.utils.logging import log
 
 
@@ -339,19 +340,53 @@ async def judge_subclaim(claim_text: str, sub_claim: str, evidence: list[dict]) 
               source_types=source_types,
               urls=evidence_urls)
 
-    # Format evidence for the LLM prompt
+    # Format evidence for the LLM prompt with source bias/credibility ratings
     evidence_parts = []
+    bias_distribution = {"left": 0, "center": 0, "right": 0, "unrated": 0}
     for i, ev in enumerate(source_evidence, 1):
         source = ev.get("source_type", "unknown")
         title = ev.get("title", "")
         content = ev.get("content", "")
         url = ev.get("source_url") or "N/A"
-        header = f"[{i}] Source: {source}"
+        
+        # Get source rating (from cache)
+        rating = get_source_rating_sync(url) if url != "N/A" else None
+        rating_tag = format_source_tag(rating)
+        
+        # Track bias distribution for judge context
+        if rating and rating.get("bias"):
+            bias = rating["bias"]
+            if bias in ("left", "extreme-left"):
+                bias_distribution["left"] += 1
+            elif bias in ("right", "extreme-right"):
+                bias_distribution["right"] += 1
+            elif bias in ("center", "left-center", "right-center"):
+                bias_distribution["center"] += 1
+            else:
+                bias_distribution["unrated"] += 1
+        else:
+            bias_distribution["unrated"] += 1
+        
+        header = f"[{i}] {rating_tag} Source: {source}"
         if title:
             header += f" | {title}"
         header += f" | URL: {url}"
         evidence_parts.append(f"{header}\n{content}")
     evidence_text = "\n\n".join(evidence_parts)
+    
+    # Add bias distribution warning if evidence is skewed
+    bias_warning = ""
+    total_rated = bias_distribution["left"] + bias_distribution["center"] + bias_distribution["right"]
+    if total_rated >= 3:
+        left_pct = bias_distribution["left"] / total_rated
+        right_pct = bias_distribution["right"] / total_rated
+        if left_pct > 0.6:
+            bias_warning = "\n\n⚠️ BIAS WARNING: Evidence skews LEFT ({}% of rated sources). Consider whether right-leaning sources have covered this differently.".format(int(left_pct * 100))
+        elif right_pct > 0.6:
+            bias_warning = "\n\n⚠️ BIAS WARNING: Evidence skews RIGHT ({}% of rated sources). Consider whether left-leaning sources have covered this differently.".format(int(right_pct * 100))
+    
+    if bias_warning:
+        evidence_text += bias_warning
 
     # Use non-thinking mode for judge - the structured prompt already guides
     # reasoning, and thinking mode generates 5000-9500 tokens of internal

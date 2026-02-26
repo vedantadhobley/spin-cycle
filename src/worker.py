@@ -60,6 +60,10 @@ async def main():
             synthesize_verdict,
             store_result,
         ],
+        # Serialize activity execution - only one LLM call at a time
+        # Workflows may still interleave but activities (where LLM calls happen)
+        # will be strictly sequential
+        max_concurrent_activities=1,
     )
 
     log.info(logger, MODULE, "ready", "Worker listening",
