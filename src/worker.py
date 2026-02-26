@@ -65,7 +65,7 @@ async def main():
         # Serialize activity execution - only one LLM call at a time
         # Workflows may still interleave but activities (where LLM calls happen)
         # will be strictly sequential
-        max_concurrent_activities=1,
+        max_concurrent_activities=2,
     )
 
     log.info(logger, MODULE, "ready", "Worker listening",

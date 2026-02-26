@@ -194,8 +194,10 @@ def _expand_structured(parsed: dict) -> list[dict]:
                 continue
 
             # Clean up any remaining braces the LLM might have added
-            # e.g., "{US}" → "US", "{over $800 billion}" → "over $800 billion"
-            fact_text = re.sub(r'\{([^}]+)\}', r'\1', fact_text)
+            # e.g., "{US}" → "US", "{{value2}}" → "value2"
+            # Run until no braces remain (handles double braces)
+            while '{' in fact_text and '}' in fact_text:
+                fact_text = re.sub(r'\{+([^{}]+)\}+', r'\1', fact_text)
             fact_text = fact_text.strip()
             
             if fact_text and fact_text not in seen:
@@ -206,7 +208,8 @@ def _expand_structured(parsed: dict) -> list[dict]:
     for comp in parsed.get("comparisons", []):
         comp_text = comp.get("claim", "").strip()
         # Clean up any braces here too
-        comp_text = re.sub(r'\{([^}]+)\}', r'\1', comp_text)
+        while '{' in comp_text and '}' in comp_text:
+            comp_text = re.sub(r'\{+([^{}]+)\}+', r'\1', comp_text)
         if comp_text and comp_text not in seen:
             seen.add(comp_text)
             facts.append({"text": comp_text})

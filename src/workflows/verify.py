@@ -143,13 +143,25 @@ class VerifyClaimWorkflow:
                      claim_id=claim_id, batch_num=batch_num, batch_size=len(batch))
 
             _t0 = workflow.time()
-            batch_evidence = list(await asyncio.gather(
-                *[_research(fact["text"]) for fact in batch]
-            ))
+            batch_results = await asyncio.gather(
+                *[_research(fact["text"]) for fact in batch],
+                return_exceptions=True  # Don't lose batch if one fails
+            )
+            # Filter out failures, keep successful results
+            batch_evidence = []
+            for i, result in enumerate(batch_results):
+                if isinstance(result, Exception):
+                    log.warning(workflow.logger, MODULE, "research_failed",
+                                "Research failed for fact, skipping",
+                                claim_id=claim_id, fact=batch[i]["text"],
+                                error=str(result))
+                else:
+                    batch_evidence.append(result)
             _batch_ms = round((workflow.time() - _t0) * 1000)
             log.info(workflow.logger, MODULE, "research_batch_done",
                      "Research batch completed",
-                     claim_id=claim_id, batch_num=batch_num, latency_ms=_batch_ms)
+                     claim_id=claim_id, batch_num=batch_num, latency_ms=_batch_ms,
+                     succeeded=len(batch_evidence), failed=len(batch) - len(batch_evidence))
             all_evidence.extend(batch_evidence)
 
         # Phase 2: Judge all facts in batches (now no research to compete with)
@@ -162,14 +174,27 @@ class VerifyClaimWorkflow:
                      claim_id=claim_id, batch_num=batch_num, batch_size=len(batch))
 
             _t0 = workflow.time()
-            batch_results = list(await asyncio.gather(
-                *[_judge(fact_text, evidence) for fact_text, evidence in batch]
-            ))
+            batch_results = await asyncio.gather(
+                *[_judge(fact_text, evidence) for fact_text, evidence in batch],
+                return_exceptions=True  # Don't lose batch if one fails
+            )
+            # Filter out failures, keep successful results
+            successful_results = []
+            for i, result in enumerate(batch_results):
+                if isinstance(result, Exception):
+                    fact_text, _ = batch[i]
+                    log.warning(workflow.logger, MODULE, "judge_failed",
+                                "Judge failed for fact, skipping",
+                                claim_id=claim_id, fact=fact_text,
+                                error=str(result))
+                else:
+                    successful_results.append(result)
             _batch_ms = round((workflow.time() - _t0) * 1000)
             log.info(workflow.logger, MODULE, "judge_batch_done",
                      "Judge batch completed",
-                     claim_id=claim_id, batch_num=batch_num, latency_ms=_batch_ms)
-            sub_results.extend(batch_results)
+                     claim_id=claim_id, batch_num=batch_num, latency_ms=_batch_ms,
+                     succeeded=len(successful_results), failed=len(batch) - len(successful_results))
+            sub_results.extend(successful_results)
 
         # Step 3: Synthesize all verdicts into final result
         if len(sub_results) == 1:

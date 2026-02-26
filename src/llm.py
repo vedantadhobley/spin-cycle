@@ -67,7 +67,7 @@ def get_llm(temperature: float = 0.1) -> ChatOpenAI:
         api_key="not-needed",
         model=MODEL,
         temperature=temperature,
-        max_tokens=2048,
+        max_tokens=8192,
         extra_body={"chat_template_kwargs": {"enable_thinking": False}},
     )
     log.debug(logger, MODULE, "llm_init", "LLM client created (thinking=off)",

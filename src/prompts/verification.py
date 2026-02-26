@@ -475,6 +475,21 @@ against independent reporting, not just other government statements. The \
 arrest happened if Reuters and AP confirm it. The suspect is guilty only \
 if convicted.
 
+SELF-SERVING STATEMENTS (the organization IS the claim subject):
+When evaluating a claim ABOUT an organization, that organization's own \
+statements are NOT independent evidence. Examples:
+- Claim: "AIPAC coordinates with Israeli government" → aipac.org saying \
+"we don't coordinate" is NOT verification — it's a denial by the accused.
+- Claim: "Company X polluted the river" → Company X's website saying \
+they're environmentally responsible is NOT evidence they didn't pollute.
+- Claim: "Politician Y took bribes" → Politician Y's denial is NOT \
+evidence of innocence.
+
+Self-serving statements can establish what an organization's OFFICIAL \
+POSITION is, but they cannot verify whether that position is TRUE. Treat \
+them like defendant testimony — note what they claim, but require \
+independent corroboration. A denial is just a denial until proven otherwise.
+
 Verdict scale (use the FULL range — do not collapse to just true/false):
 - "true" — evidence clearly supports the claim as stated
 - "mostly_true" — the core assertion is correct but a specific detail is \
