@@ -36,7 +36,7 @@ from src.prompts.verification import (
     SYNTHESIZE_SYSTEM,
     SYNTHESIZE_USER,
 )
-from src.tools.source_ratings import get_source_rating_sync, format_source_tag
+from src.tools.source_ratings import get_source_rating_sync, format_source_tag, detect_claim_subject_quotes
 from src.utils.logging import log
 from src.utils.text_cleanup import cleanup_text
 
@@ -107,14 +107,22 @@ async def decompose_claim(claim_text: str) -> dict:
         # Handle new structured format
         if isinstance(parsed, dict) and "predicates" in parsed:
             facts = _expand_structured(parsed)
+            
+            # Parse interested_parties - can be list (legacy) or object (new)
+            raw_interested = parsed.get("interested_parties", [])
+            interested_parties_obj = _normalize_interested_parties(raw_interested)
+            
             thesis_info = {
                 "thesis": parsed.get("thesis"),
                 "structure": parsed.get("structure", "simple"),
                 "key_test": parsed.get("key_test"),
+                "entities": parsed.get("entities", []),
+                "interested_parties": interested_parties_obj,
             }
             log.info(activity.logger, "decompose", "expanded",
                      "Structured extraction expanded to facts",
                      entities=parsed.get("entities", []),
+                     interested_parties=interested_parties_obj,
                      predicate_count=len(parsed.get("predicates", [])),
                      comparison_count=len(parsed.get("comparisons", [])),
                      expanded_fact_count=len(facts))
@@ -126,13 +134,18 @@ async def decompose_claim(claim_text: str) -> dict:
                 "thesis": None,
                 "structure": "simple",
                 "key_test": None,
+                "entities": [],
+                "interested_parties": _normalize_interested_parties([]),
             }
         elif isinstance(parsed, dict) and "facts" in parsed:
             facts = _normalize_flat(parsed["facts"])
+            raw_interested = parsed.get("interested_parties", [])
             thesis_info = {
                 "thesis": parsed.get("thesis"),
                 "structure": parsed.get("structure", "simple"),
                 "key_test": parsed.get("key_test"),
+                "entities": parsed.get("entities", []),
+                "interested_parties": _normalize_interested_parties(raw_interested),
             }
         else:
             raise ValueError(f"Unexpected format: {type(parsed)}")
@@ -145,7 +158,7 @@ async def decompose_claim(claim_text: str) -> dict:
                     "Failed to parse LLM decomposition, using original claim",
                     error=str(e), raw=raw)
         facts = [{"text": claim_text}]
-        thesis_info = {"thesis": None, "structure": "simple", "key_test": None}
+        thesis_info = {"thesis": None, "structure": "simple", "key_test": None, "entities": [], "interested_parties": _normalize_interested_parties([])}
 
     log.info(activity.logger, "decompose", "done", "Claim decomposed",
              claim=claim_text, sub_count=len(facts),
@@ -176,6 +189,22 @@ def _expand_structured(parsed: dict) -> list[dict]:
     for pred in parsed.get("predicates", []):
         claim_template = pred.get("claim", "")
         applies_to = pred.get("applies_to", [])
+        
+        # SAFEGUARD: Count {entity} placeholders - if more than one, don't template-expand
+        # This prevents garbled output like "Israel has intent to destroy Israel"
+        entity_count = claim_template.count("{entity}") + claim_template.count("{{entity}}")
+        
+        if entity_count > 1:
+            # Multiple entity placeholders = LLM mistake. Use template as-is (it likely has specific names)
+            # Clean up the braces and add directly
+            fact_text = claim_template
+            while '{' in fact_text and '}' in fact_text:
+                fact_text = re.sub(r'\{+([^{}]+)\}+', r'\1', fact_text)
+            fact_text = fact_text.strip()
+            if fact_text and fact_text not in seen:
+                seen.add(fact_text)
+                facts.append({"text": fact_text})
+            continue  # Skip normal expansion for this predicate
 
         for item in applies_to:
             if isinstance(item, str):
@@ -243,6 +272,116 @@ def _normalize_flat(items: list) -> list[dict]:
     return result
 
 
+def _normalize_interested_parties(raw: list | dict) -> dict:
+    """Normalize interested_parties to a consistent structure.
+    
+    The decomposition now returns interested_parties as an object with:
+    - direct: Organizations immediately involved
+    - institutional: Parent/governing bodies
+    - affiliated_media: News outlets with ownership ties
+    - reasoning: Brief explanation of relationships
+    
+    For backward compatibility, also handles legacy list format.
+    
+    Returns:
+        Dict with keys: all_parties (flat list), direct, institutional,
+        affiliated_media, reasoning
+    """
+    if isinstance(raw, list):
+        # Legacy format: just a flat list of party names
+        return {
+            "all_parties": raw,
+            "direct": raw,
+            "institutional": [],
+            "affiliated_media": [],
+            "reasoning": None,
+        }
+    
+    if isinstance(raw, dict):
+        # New format with categorized parties
+        direct = raw.get("direct", [])
+        institutional = raw.get("institutional", [])
+        affiliated_media = raw.get("affiliated_media", [])
+        reasoning = raw.get("reasoning")
+        
+        # Combine all for easy lookup
+        all_parties = list(set(direct + institutional + affiliated_media))
+        
+        return {
+            "all_parties": all_parties,
+            "direct": direct,
+            "institutional": institutional,
+            "affiliated_media": affiliated_media,
+            "reasoning": reasoning,
+        }
+    
+    # Fallback for unexpected format
+    return {
+        "all_parties": [],
+        "direct": [],
+        "institutional": [],
+        "affiliated_media": [],
+        "reasoning": None,
+    }
+
+
+# Common media outlet domain aliases for better URL matching
+# Maps common name variations to their likely domain patterns
+_MEDIA_DOMAIN_ALIASES = {
+    "washington post": ["washingtonpost", "wapo"],
+    "new york times": ["nytimes", "nyt"],
+    "wall street journal": ["wsj"],
+    "fox news": ["foxnews", "fox"],
+    "los angeles times": ["latimes"],
+    "chicago tribune": ["chicagotribune"],
+    "new york post": ["nypost"],
+    "huffington post": ["huffpost", "huffingtonpost"],
+    "daily mail": ["dailymail"],
+    "the guardian": ["theguardian", "guardian"],
+    "the atlantic": ["theatlantic", "atlantic"],
+    "financial times": ["ft.com"],
+    "daily beast": ["thedailybeast", "dailybeast"],
+}
+
+
+def _url_matches_media(url_lower: str, media_outlet: str) -> bool:
+    """Check if a URL matches a media outlet name, handling common variations.
+    
+    This handles cases like:
+    - "Washington Post" matching washingtonpost.com
+    - "New York Times" matching nytimes.com
+    - "Fox News" matching foxnews.com
+    
+    Args:
+        url_lower: Lowercase URL to check
+        media_outlet: Name of media outlet (e.g., "Washington Post")
+    
+    Returns:
+        True if URL appears to be from this media outlet
+    """
+    media_lower = media_outlet.lower()
+    
+    # Check known aliases first
+    for name, aliases in _MEDIA_DOMAIN_ALIASES.items():
+        if name in media_lower or media_lower in name:
+            for alias in aliases:
+                if alias in url_lower:
+                    return True
+    
+    # Fall back to generic normalization
+    # "Washington Post" -> "washingtonpost"
+    normalized = media_lower.replace(" ", "").replace("the", "")
+    if normalized and len(normalized) > 3 and normalized in url_lower:
+        return True
+    
+    # Also try hyphenated: "washington-post"
+    hyphenated = media_lower.replace(" ", "-")
+    if hyphenated in url_lower:
+        return True
+    
+    return False
+
+
 @activity.defn
 async def research_subclaim(sub_claim: str) -> list[dict]:
     """Research evidence for a sub-claim using the LangGraph ReAct agent.
@@ -274,7 +413,12 @@ async def research_subclaim(sub_claim: str) -> list[dict]:
 
 
 @activity.defn
-async def judge_subclaim(claim_text: str, sub_claim: str, evidence: list[dict]) -> dict:
+async def judge_subclaim(
+    claim_text: str,
+    sub_claim: str,
+    evidence: list[dict],
+    interested_parties: dict | list | None = None,
+) -> dict:
     """Judge a sub-claim based on collected evidence.
 
     This is the critical evaluation step. The LLM looks at the evidence
@@ -292,11 +436,31 @@ async def judge_subclaim(claim_text: str, sub_claim: str, evidence: list[dict]) 
     the sub-claim naturally (e.g., "has not been audited" in the context of
     a claim about promised audits means the promised audit hasn't happened).
 
+    interested_parties: A dict containing:
+      - all_parties: flat list of all interested orgs
+      - direct: orgs immediately involved
+      - institutional: parent/governing bodies
+      - affiliated_media: news outlets with ownership ties
+      - reasoning: explanation of relationships
+    
+    Evidence from interested parties (or their affiliated media) is flagged
+    as self-serving and cannot independently verify or refute claims about them.
+
     If there's no evidence at all, we short-circuit to "unverifiable" without
     bothering the LLM.
     """
+    # Normalize interested_parties to new structure
+    if interested_parties is None:
+        interested_parties = _normalize_interested_parties([])
+    elif isinstance(interested_parties, list):
+        interested_parties = _normalize_interested_parties(interested_parties)
+    
+    all_parties = interested_parties.get("all_parties", [])
+    affiliated_media = interested_parties.get("affiliated_media", [])
+    
     log.info(activity.logger, "judge", "start", "Judging sub-claim",
-             sub_claim=sub_claim, evidence_count=len(evidence))
+             sub_claim=sub_claim, evidence_count=len(evidence),
+             interested_parties=interested_parties)
 
     # No evidence → unverifiable (no point asking the LLM)
     if not evidence:
@@ -347,6 +511,8 @@ async def judge_subclaim(claim_text: str, sub_claim: str, evidence: list[dict]) 
     # Format evidence for the LLM prompt with source bias/credibility ratings
     evidence_parts = []
     bias_distribution = {"left": 0, "center": 0, "right": 0, "unrated": 0}
+    interested_party_count = 0  # Track evidence from interested parties
+    
     for i, ev in enumerate(source_evidence, 1):
         source = ev.get("source_type", "unknown")
         title = ev.get("title", "")
@@ -356,6 +522,37 @@ async def judge_subclaim(claim_text: str, sub_claim: str, evidence: list[dict]) 
         # Get source rating (from cache)
         rating = get_source_rating_sync(url) if url != "N/A" else None
         rating_tag = format_source_tag(rating)
+        
+        interest_warnings = []
+        
+        # Check 1: Is the source URL from affiliated media?
+        # e.g., washingtonpost.com when claim is about Amazon (both owned by Bezos)
+        if affiliated_media and url != "N/A":
+            url_lower = url.lower()
+            for media_outlet in affiliated_media:
+                if _url_matches_media(url_lower, media_outlet):
+                    interest_warnings.append(
+                        f"⚠️ AFFILIATED MEDIA: Source is {media_outlet}, which has ownership ties to claim subject."
+                    )
+                    interested_party_count += 1
+                    log.debug(activity.logger, "judge", "affiliated_media_detected",
+                              "Source URL matches affiliated media",
+                              media=media_outlet, url=url)
+                    break
+        
+        # Check 2: Does the content quote statements from interested parties?
+        # e.g., "FBI stated that..." when claim is about FBI conduct
+        if all_parties:
+            quoted_entities = detect_claim_subject_quotes(content, all_parties)
+            if quoted_entities:
+                interested_party_count += 1
+                entities_str = ", ".join(quoted_entities)
+                interest_warnings.append(
+                    f"⚠️ QUOTES INTERESTED PARTY: {entities_str} — Self-serving statement, NOT independent verification."
+                )
+                log.debug(activity.logger, "judge", "interested_party_quoted",
+                          "Evidence quotes interested party",
+                          entities=quoted_entities, url=url)
         
         # Track bias distribution for judge context
         if rating and rating.get("bias"):
@@ -375,6 +572,11 @@ async def judge_subclaim(claim_text: str, sub_claim: str, evidence: list[dict]) 
         if title:
             header += f" | {title}"
         header += f" | URL: {url}"
+        
+        # Add interest warnings
+        for warning in interest_warnings:
+            header += f"\n    {warning}"
+        
         evidence_parts.append(f"{header}\n{content}")
     evidence_text = "\n\n".join(evidence_parts)
     
@@ -391,6 +593,16 @@ async def judge_subclaim(claim_text: str, sub_claim: str, evidence: list[dict]) 
     
     if bias_warning:
         evidence_text += bias_warning
+    
+    # Add warning if significant portion of evidence is from interested parties
+    if interested_party_count > 0 and all_parties:
+        pct_interested = int(100 * interested_party_count / len(source_evidence))
+        if pct_interested >= 30:
+            parties_str = ", ".join(all_parties[:5])  # Limit display
+            if len(all_parties) > 5:
+                parties_str += f" (+{len(all_parties) - 5} more)"
+            reasoning = interested_parties.get("reasoning") or "These parties have institutional or financial stake in the claim's outcome."
+            evidence_text += f"\n\n⚠️ INTERESTED PARTY WARNING: {pct_interested}% of evidence comes from or quotes interested parties ({parties_str}). {reasoning}\n\nThese sources cannot independently verify claims about themselves. Look for truly INDEPENDENT corroboration."
 
     # Use non-thinking mode for judge - the structured prompt already guides
     # reasoning, and thinking mode generates 5000-9500 tokens of internal

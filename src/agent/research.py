@@ -78,6 +78,7 @@ from src.tools.page_fetcher import get_page_fetcher_tool
 from src.tools.serper import get_serper_tool, is_available as serper_available
 from src.tools.brave import get_brave_tool, is_available as brave_available
 from src.tools.searxng import get_searxng_tool, is_available as searxng_available
+from src.tools.wikidata import get_wikidata_tool
 from src.utils.logging import log, get_logger
 
 MODULE = "research"
@@ -120,6 +121,10 @@ def _build_tool_list() -> list:
 
     # Page fetcher — always available, lets agent read full articles
     tools.append(get_page_fetcher_tool())
+
+    # Wikidata — always available, for discovering ownership/affiliation relationships
+    # Critical for identifying conflicts of interest (e.g., Bezos owns Amazon AND WaPo)
+    tools.append(get_wikidata_tool())
 
     tool_names = [t.name for t in tools]
     log.debug(logger, MODULE, "tools_loaded", "Research agent tools configured",

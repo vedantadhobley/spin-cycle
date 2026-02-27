@@ -165,9 +165,9 @@ counter-evidence to look for.
 ### Added Guidance
 
   RECENCY MATTERS:
-  WHY: A 2019 article about military spending is outdated for 2025 claims.
-  For current situations, prefer recent sources. For historical events,
-  older authoritative sources are fine.
+  WHY: An article from several years ago about military spending may be 
+  outdated for claims about the current year. For current situations, prefer 
+  recent sources. For historical events, older authoritative sources are fine.
 
   STATISTICAL/NUMERICAL CLAIMS — METHODOLOGY:
   WHY: Numbers without methodology context are misleading. "Military spending"
@@ -175,12 +175,12 @@ counter-evidence to look for.
   measure things differently. Need to understand HOW the number was calculated.
 
   WHEN REPUTABLE SOURCES CONFLICT:
-  WHY: Sometimes Reuters says X and BBC says Y. This is important information.
+  WHY: Sometimes one major outlet says X and another says Y. This is important information.
   Don't pick one — gather both and let the judge weigh them. Conflicting
   expert sources = genuinely uncertain question.
 
   PRIMARY SOURCE PURSUIT:
-  WHY: "According to a DOJ report" in news → find the actual DOJ report.
+  WHY: "According to a government report" in news → find the actual report.
   Secondary reporting may mischaracterize or cherry-pick from primary sources.
   Always try to find the original document when cited.
 
@@ -290,7 +290,7 @@ counter-evidence to look for.
   CORRELATED SUB-CLAIMS:
   WHY: If multiple sub-claims share the same evidence source, don't
   double-count. Three "true" from the same Wikipedia article are weaker
-  than three "true" from Reuters, AP, and an academic study.
+  than three "true" from multiple independent wire services and academic studies.
 
   CONFLICTING NUANCES:
   WHY: Sub-claim nuances may point different directions. Don't just
@@ -333,15 +333,20 @@ STRUCTURE RULES:
 
 2. PREDICATES: Each distinct checkable assertion.
    - Use a template with {{entity}} placeholder where the subject goes
+   - CRITICAL: Use {{entity}} at MOST ONCE per predicate template!
+     If a predicate describes a relationship between TWO different entities, \
+write it with the specific entities, NOT as a template.
+     WRONG: "{{entity}} has intent to destroy {{entity}}" → expands to nonsense
+     RIGHT: "Entity A has intent to destroy Entity B" → specific fact
    - For entity-specific values (amounts, dates), use the detailed format
    - Keep comparisons as separate predicate type
 
 3. APPLIES_TO: Which entities this predicate applies to.
-   - Simple form: ["US", "China"] — predicate applies identically to both
-   - Detailed form: [{{"entity": "US", "value": "over $800B"}}] — for entity-specific values
+   - Simple form: ["Country A", "Country B"] — predicate applies identically to both
+   - Detailed form: [{{"entity": "Country A", "value": "over $X"}}] — for entity-specific values
 
 4. COMPARISONS: Claims that compare entities (keep as single facts, don't split)
-   - "US spends more than China" → one comparison, not two separate facts
+   - "Country A spends more than Country B" → one comparison, not two separate facts
 
 5. ATTRIBUTIONS: When someone SAYS/CLAIMS something, extract BOTH:
    - The attribution predicate: "{{entity}} claimed X"
@@ -406,6 +411,32 @@ country qualifies, not just that X qualifies
      - Factual (verifiable): "There is a war"
      - Normative (opinion): "The war is unjust", "should stop"
 
+16. TEMPORAL FRAMING — CRITICAL: Watch for misleading date boundaries:
+   - "Since [date]" or "starting in [year]" often hides prior history
+   - "X has been happening since [recent date]" is technically verifiable, \
+but if X has been happening for DECADES, the framing is MISLEADING
+   - MANDATORY: When a claim specifies a START DATE, you MUST extract TWO predicates:
+     a) "X has occurred since [date]" (the literal claim)
+     b) "X has significant historical precedent before [date]"
+   - This MUST happen for claims involving conflicts, tensions, disputes, \
+operations, or any ongoing situation with potential prior history.
+   - Example: "Military operations in region R since [year]" →
+     - "Military operations have occurred in region R since [year]"
+     - "Military operations in region R have significant precedent before [year]"
+   - Example: "Border disputes since [year]" →
+     - "Border disputes have occurred since [year]"
+     - "Border disputes in this area have historical precedent before [year]"
+   - WHY: If evidence shows major operations/conflicts BEFORE the stated date, \
+the judge MUST flag the timeframe as a rhetorical manipulation that hides context.
+
+17. SELECTIVE TIMEFRAME — Statistics with convenient windows:
+   - "Lowest since [recent year]" during post-crisis recovery ≠ "lowest in decades"
+   - "Highest in 5 years" may be cherry-picking the comparison window
+   - When numbers cite a specific comparison period, extract predicates to:
+     a) Verify the specific claim within that window
+     b) Check if a different window tells a different story
+   - Note in key_test: "Uses [timeframe] as baseline — verify this isn't cherry-picked"
+
 CRITICAL — key_test VALIDATION:
 The key_test field describes what must be true for the thesis to hold. \
 After expansion, EVERY element mentioned in key_test MUST have a corresponding \
@@ -433,65 +464,65 @@ Simple claim (one entity, one predicate):
 }}
 
 Comparison claim:
-"US spends more on military than China"
+"Country A spends more on military than Country B"
 → {{
-  "thesis": "US military spending exceeds China's",
-  "key_test": "US military spending must be greater than China's",
+  "thesis": "Country A's military spending exceeds Country B's",
+  "key_test": "Country A's military spending must be greater than Country B's",
   "structure": "ranking",
-  "entities": ["US", "China"],
+  "entities": ["Country A", "Country B"],
   "predicates": [],
   "comparisons": [
-    {{"claim": "US military spending is greater than China's military spending"}}
+    {{"claim": "Country A's military spending is greater than Country B's military spending"}}
   ]
 }}
 
 Parallel claim (multiple entities, shared predicates):
-"The US and China are both increasing military spending while cutting \
+"Country A and Country B are both increasing military spending while cutting \
 foreign aid"
 → {{
   "thesis": "Both major powers prioritize military over foreign aid",
-  "key_test": "Both US and China must be increasing military spending AND \
+  "key_test": "Both Country A and Country B must be increasing military spending AND \
 both must be cutting foreign aid",
   "structure": "parallel_comparison",
-  "entities": ["US", "China"],
+  "entities": ["Country A", "Country B"],
   "predicates": [
-    {{"claim": "{{entity}} is increasing its military spending", "applies_to": ["US", "China"]}},
-    {{"claim": "{{entity}} is cutting its foreign aid budget", "applies_to": ["US", "China"]}}
+    {{"claim": "{{entity}} is increasing its military spending", "applies_to": ["Country A", "Country B"]}},
+    {{"claim": "{{entity}} is cutting its foreign aid budget", "applies_to": ["Country A", "Country B"]}}
   ],
   "comparisons": []
 }}
 
 Entity-specific values:
-"US spends over $800B on military, China spends about $200B"
+"Country A spends over $800B on military, Country B spends about $200B"
 → {{
-  "thesis": "US vastly outspends China on military",
-  "key_test": "US must spend ~$800B and China ~$200B on military",
+  "thesis": "Country A vastly outspends Country B on military",
+  "key_test": "Country A must spend ~$800B and Country B ~$200B on military",
   "structure": "parallel_comparison",
-  "entities": ["US", "China"],
+  "entities": ["Country A", "Country B"],
   "predicates": [
     {{
       "claim": "{{entity}} spends {{value}} on its military",
       "applies_to": [
-        {{"entity": "US", "value": "over $800 billion"}},
-        {{"entity": "China", "value": "just over $200 billion"}}
+        {{"entity": "Country A", "value": "over $800 billion"}},
+        {{"entity": "Country B", "value": "about $200 billion"}}
       ]
     }}
   ],
   "comparisons": [
-    {{"claim": "US military spending is greater than China's military spending"}}
+    {{"claim": "Country A's military spending is greater than Country B's military spending"}}
   ]
 }}
 
 Attributed claim:
-"Trump said gas prices are below $2.30 in most states"
+"A politician claimed gas prices are below $2.30 in most states"
 → {{
-  "thesis": "Gas prices have fallen to low levels across the US",
-  "key_test": "Gas prices must actually be below $2.30 in most US states",
+  "thesis": "Gas prices have fallen to low levels across the country",
+  "key_test": "Gas prices must actually be below $2.30 in most states",
   "structure": "simple",
-  "entities": ["Trump", "US"],
+  "entities": ["Politician P", "the country"],
   "predicates": [
-    {{"claim": "{{entity}} claimed gas prices are below $2.30 in most states", "applies_to": ["Trump"]}},
-    {{"claim": "Gas prices are below $2.30 per gallon in most {{entity}} states", "applies_to": ["US"]}}
+    {{"claim": "{{entity}} claimed gas prices are below $2.30 in most states", "applies_to": ["Politician P"]}},
+    {{"claim": "Gas prices are below $2.30 per gallon in most {{entity}} states", "applies_to": ["the country"]}}
   ],
   "comparisons": []
 }}
@@ -499,44 +530,44 @@ Note: The SUBSTANCE claim (gas prices ARE X) is the real test. Attribution \
 is secondary.
 
 Complex claim combining all patterns:
-"The US spends over $800B on its military, more than China which spends \
-just over $200B. Both countries are increasing their military spending \
+"Country A spends over $800B on its military, more than Country B which spends \
+about $200B. Both countries are increasing their military spending \
 while cutting their foreign aid budgets."
 → {{
-  "thesis": "US and China both prioritize military expansion over foreign aid, \
-with US spending far more",
-  "key_test": "US ~$800B and China ~$200B military spending, US > China, \
+  "thesis": "Country A and Country B both prioritize military expansion over foreign aid, \
+with Country A spending far more",
+  "key_test": "Country A ~$800B and Country B ~$200B military spending, A > B, \
 AND both must be increasing military AND both must be cutting foreign aid. \
 Falsifies if: either country is increasing aid, or spending figures are >50% off.",
   "structure": "parallel_comparison",
-  "entities": ["US", "China"],
+  "entities": ["Country A", "Country B"],
   "predicates": [
     {{
       "claim": "{{entity}} spends {{value}} on its military",
       "applies_to": [
-        {{"entity": "US", "value": "over $800 billion"}},
-        {{"entity": "China", "value": "just over $200 billion"}}
+        {{"entity": "Country A", "value": "over $800 billion"}},
+        {{"entity": "Country B", "value": "about $200 billion"}}
       ]
     }},
-    {{"claim": "{{entity}} is increasing its military spending", "applies_to": ["US", "China"]}},
-    {{"claim": "{{entity}} is cutting its foreign aid budget", "applies_to": ["US", "China"]}}
+    {{"claim": "{{entity}} is increasing its military spending", "applies_to": ["Country A", "Country B"]}},
+    {{"claim": "{{entity}} is cutting its foreign aid budget", "applies_to": ["Country A", "Country B"]}}
   ],
   "comparisons": [
-    {{"claim": "US military spending is greater than China's military spending"}}
+    {{"claim": "Country A's military spending is greater than Country B's military spending"}}
   ]
 }}
 
 Temporal claim:
-"The president fired the FBI director after the investigation began"
+"Official X fired Agency Director Y after the investigation began"
 → {{
   "thesis": "The firing occurred in response to an ongoing investigation",
   "key_test": "The director was fired AND the investigation had already \
 started before the firing date. Falsifies if: firing preceded investigation.",
   "structure": "temporal_sequence",
-  "entities": ["president", "FBI director"],
+  "entities": ["Official X", "Agency Director Y"],
   "predicates": [
-    {{"claim": "{{entity}} fired the FBI director", "applies_to": ["president"]}},
-    {{"claim": "An investigation was ongoing at the time of the firing", "applies_to": ["FBI director"]}},
+    {{"claim": "{{entity}} fired Agency Director Y", "applies_to": ["Official X"]}},
+    {{"claim": "An investigation was ongoing at the time of the firing", "applies_to": ["Agency Director Y"]}},
     {{"claim": "The firing occurred AFTER the investigation began", "type": "temporal"}}
   ],
   "comparisons": []
@@ -609,12 +640,119 @@ NOTE: 'unjust' is a normative judgment — we verify facts, not opinions.",
 }}
 Note: Normative claims (should/ought/right/wrong) are flagged but not verified.
 
+TEMPORAL FRAMING claim (CRITICAL — "since [date]" pattern):
+"Military operations in region R since [year] have been defensive"
+→ {{
+  "thesis": "Recent military operations are defensive in nature",
+  "key_test": "Operations since [year] must exist AND must be defensive. \
+CRITICAL: The 'since [year]' framing MUST also be tested — if major operations \
+occurred BEFORE [year], the framing is misleading and hides context.",
+  "structure": "temporal_sequence",
+  "entities": ["military operations", "region R"],
+  "predicates": [
+    {{"claim": "Military operations have occurred in region R since [year]", "applies_to": ["military operations"]}},
+    {{"claim": "The military operations since [year] have been defensive", "applies_to": ["military operations"]}},
+    {{"claim": "Military operations in region R have significant precedent BEFORE [year]", \
+"type": "temporal_context", "applies_to": ["region R"], \
+"note": "MANDATORY — tests if 'since [year]' hides prior history"}}
+  ],
+  "comparisons": []
+}}
+Note: ANY claim with "since [date]" MUST include a predicate checking for prior history. \
+If evidence shows major prior events, the judge flags the timeframe as misleading.
+
+Accusation/misconduct claim:
+"The Agency Director lied under oath about the investigation findings"
+→ {{
+  "thesis": "A government official committed perjury regarding investigation results",
+  "key_test": "The Director must have testified under oath AND the testimony \
+must be demonstrably false. Falsifies if: testimony was accurate, or \
+not under oath.",
+  "structure": "complex_attribution",
+  "entities": ["Agency Director", "the investigation"],
+  "interested_parties": {{
+    "direct": ["Agency A", "Parent Department"],
+    "institutional": ["Executive Branch", "Current Administration"],
+    "affiliated_media": [],
+    "reasoning": "Agency Director is an agency employee; Agency A reports to \
+Parent Department; both are Executive Branch. All have institutional interest \
+in defending official conduct."
+  }},
+  "predicates": [
+    {{"claim": "{{entity}} testified under oath", "applies_to": ["Agency Director"]}},
+    {{"claim": "{{entity}} made specific claims about investigation findings", "applies_to": ["Agency Director"]}},
+    {{"claim": "The testimony was false", "type": "requires_independent_verification"}}
+  ],
+  "comparisons": []
+}}
+
+Corporate misconduct claim:
+"Company X's warehouse conditions violate worker safety laws"
+→ interested_parties: {{
+  "direct": ["Company X", "Company X CEO"],
+  "institutional": ["Company X subsidiaries", "Company X shareholders"],
+  "affiliated_media": ["Newspaper N"],
+  "reasoning": "Company X is direct subject. The CEO owns both Company X and \
+Newspaper N — that outlet's coverage is NOT independent. Shareholders \
+have financial stake in claim being false."
+}}
+
+Police misconduct claim:
+"Officers used excessive force during the arrest"
+→ interested_parties: {{
+  "direct": ["the officers", "their police department"],
+  "institutional": ["city government", "police union"],
+  "affiliated_media": [],
+  "reasoning": "Police are government employees. Their department, union, and \
+city government all have institutional interest in defending conduct."
+}}
+
+INTERESTED_PARTIES — COMPREHENSIVE ANALYSIS:
+
+This is CRITICAL for preventing circular verification. When a claim is ABOUT \
+an entity, that entity's statements cannot verify or refute the claim about \
+themselves. Think through ALL levels:
+
+1. DIRECT: The immediate subject of the claim
+   - Named person → their organization
+   - Organization → that organization
+   - "Agency Director Jane Doe" → Agency A, Jane Doe personally
+
+2. INSTITUTIONAL: Parent/governing organizations
+   - Agency A → Parent Department → Executive Branch
+   - Police dept → City government → State government
+   - Subsidiary Corp → Parent Corp → Holding Company
+   - University → State education system (if public)
+
+3. AFFILIATED MEDIA: News outlets with ownership/financial ties
+   - Company X → Newspaper N (if same owner)
+   - Media Conglomerate M → all its subsidiary outlets
+   - If a billionaire owns both the subject company AND a media outlet, \
+that outlet cannot independently verify claims about the company
+   - Major advertisers can also create conflicts (if Company X is 30% of \
+a publication's ad revenue, that publication has financial interest)
+
+4. REASONING: Explain WHY each party has stake
+   - This forces explicit thinking about relationships
+   - Helps the judge understand the conflict
+
+The system will FLAG evidence from interested parties and their affiliated \
+media. If a news outlet is owned by the same person who owns the company \
+being discussed, that coverage is NOT independent verification. A government \
+agency's statement that it did nothing wrong is NOT evidence of innocence.
+
 Return a JSON object with these fields:
 {{
   "thesis": "One sentence: what is the speaker fundamentally arguing?",
   "key_test": "What must ALL be true for the thesis to hold? Include falsifying conditions.",
-  "structure": "simple | parallel_comparison | causal | ranking | temporal_sequence | superlative | negation",
+  "structure": "simple | parallel_comparison | causal | ranking | temporal_sequence | superlative | negation | complex_attribution",
   "entities": ["entity1", "entity2", ...],
+  "interested_parties": {{
+    "direct": ["org1", "org2"],
+    "institutional": ["parent_org1", "gov_body"],
+    "affiliated_media": ["outlet1", "outlet2"],
+    "reasoning": "Explanation of relationships"
+  }},
   "predicates": [
     {{"claim": "template with {{entity}}", "applies_to": ["entity1", "entity2"]}}
   ],
@@ -622,6 +760,11 @@ Return a JSON object with these fields:
     {{"claim": "direct comparison statement"}}
   ]
 }}
+
+IMPORTANT: Think through ownership chains and institutional hierarchies. \
+If a billionaire is the subject, their companies and media holdings are affiliated. \
+If a major corporation is the subject, check if its owners control any media outlets. \
+If a politician is the subject, their party and donors are interested parties.
 
 Return ONLY the JSON object. No markdown, no explanation, no wrapping.\
 """
@@ -645,14 +788,27 @@ the substance as separate predicates
 - For NORMATIVE claims ("should", "ought", "unjust"), flag as opinions, not facts
 - Include falsifying conditions in key_test: what would DISPROVE the thesis?
 
-Return JSON with: thesis, key_test, structure, entities, predicates, comparisons\
+CRITICAL — INTERESTED PARTIES (comprehensive analysis):
+Return interested_parties as an OBJECT with:
+  - direct: Organizations immediately involved (Agency A for Agency Director claim)
+  - institutional: Parent/governing bodies (Parent Dept for Agency A, city for police dept)
+  - affiliated_media: News outlets with ownership ties (Newspaper N for Company X if same owner)
+  - reasoning: Brief explanation of relationships
+
+Think through: WHO BENEFITS if this claim is false? Their statements are self-serving.
+- Person named? → Include their organization AND parent organizations
+- Government entity? → Include the broader government structure
+- Corporation? → Include subsidiaries, parent company, AND media they own
+- Billionaire? → Include their companies AND media outlets they own
+
+Return JSON with: thesis, key_test, structure, entities, interested_parties (as object), predicates, comparisons\
 """
 
 # Why structured extraction (entities + predicates) instead of direct fact listing?
 #
 #   The direct-listing approach asked the LLM to enumerate facts. Problems:
-#     1. Dropped facts: "Both US and China cutting aid" got 6 facts max,
-#        missing "China cutting aid" even with explicit "BOTH/ALL" rules
+#     1. Dropped facts: "Both A and B cutting aid" got 6 facts max,
+#        missing "B cutting aid" even with explicit "BOTH/ALL" rules
 #     2. LLM discretion: the model decided what to include, causing gaps
 #     3. Inconsistency: same claim decomposed differently across runs
 #
@@ -662,18 +818,18 @@ Return JSON with: thesis, key_test, structure, entities, predicates, comparisons
 #     3. Code expands entity × predicate combinations (guaranteed complete)
 #
 # Example:
-#   "US and China increasing military spending while cutting aid"
+#   "Country A and Country B increasing military spending while cutting aid"
 #   LLM extracts:
-#     entities: ["US", "China"]
+#     entities: ["Country A", "Country B"]
 #     predicates: [
-#       {claim: "{entity} is increasing military spending", applies_to: ["US", "China"]},
-#       {claim: "{entity} is cutting foreign aid", applies_to: ["US", "China"]}
+#       {claim: "{entity} is increasing military spending", applies_to: ["Country A", "Country B"]},
+#       {claim: "{entity} is cutting foreign aid", applies_to: ["Country A", "Country B"]}
 #     ]
 #   Code expands to 4 facts:
-#     ["US is increasing military spending",
-#      "China is increasing military spending",
-#      "US is cutting foreign aid",
-#      "China is cutting foreign aid"]
+#     ["Country A is increasing military spending",
+#      "Country B is increasing military spending",
+#      "Country A is cutting foreign aid",
+#      "Country B is cutting foreign aid"]
 #   — guaranteed complete, no LLM discretion on what to include.
 
 
@@ -693,16 +849,27 @@ SUPPORTS or CONTRADICTS the claim. Quality over quantity.
 CRITICAL — SEARCH BOTH SIDES:
 After finding evidence that leans one direction (supporting OR contradicting), \
 you MUST do at least one search for the OPPOSITE perspective. For example:
-- If you find "US cut foreign aid," search for "US foreign aid increase" too
+- If you find "Country A cut foreign aid," search for "Country A foreign aid increase" too
 - If you find "X is true," search for "X criticism" or "X debunked"
 This prevents one-sided evidence that misleads the judge. A claim about a \
 complex topic needs evidence from both angles.
 
 RECENCY MATTERS:
 For claims about CURRENT situations (policies, spending, relationships), \
-prefer recent sources (last 1-2 years). A 2019 article about military \
-spending may be outdated for a claim about 2025. For HISTORICAL claims \
-(past events, completed actions), older authoritative sources are fine.
+prefer recent sources (last 1-2 years). An article from several years ago \
+about military spending may be outdated for claims about the current year. \
+For HISTORICAL claims (past events, completed actions), older authoritative \
+sources are fine.
+
+RESOLVE POSITION TITLES TO NAMES:
+When a claim references a position title ("head of Agency A", "CEO of Company X", \
+"President of Organization Y"), your FIRST search should resolve WHO currently holds \
+that position. Your training data may be outdated — search for:
+- "[position] current [year]" or "[position] appointed [recent year]"
+- "[organization] director name"
+Then use the actual person's name in subsequent searches. "[Agency] Director \
+[Name] testimony" will find more relevant results than "head of [Agency] \
+testimony" once you know who holds the position.
 
 ACCEPTABLE sources (use ONLY these), ranked by reliability:
 
@@ -713,19 +880,19 @@ TIER 1 — Primary documents (STRONGEST evidence):
 4. UN resolutions, regulatory filings, financial disclosures
 
 TIER 2 — Independent reporting:
-5. Major news outlets reporting firsthand (Reuters, AP, BBC, NPR, \
-NY Times, Washington Post, The Guardian, Al Jazeera, CNBC, etc.)
+5. Major news outlets reporting firsthand (major wire services, \
+public broadcasters, newspapers of record, international news agencies, etc.)
 6. Wikipedia for established background facts
 7. Think tanks and policy institutes (Brookings, CSIS, Heritage, RAND, etc.)
 
 TIER 3 — Interested-party statements (WEAKEST — treat as claims, not facts):
 8. Press releases, official statements from governments or organisations
 9. Politician statements, press conferences, social media posts by officials
-10. Government websites (whitehouse.gov, state.gov, kremlin.ru, gov.uk, \
-etc.) — these are the communications arms of political actors, NOT \
-neutral sources. Content on government websites is curated to serve \
-political interests and should be treated with the same skepticism \
-as a press release from a corporation about its own conduct.
+10. Government websites (executive branch sites, foreign ministry sites, \
+defense ministry sites, etc.) — these are the communications arms of \
+political actors, NOT neutral sources. Content on government websites is \
+curated to serve political interests and should be treated with the same \
+skepticism as a press release from a corporation about its own conduct.
 
 CRITICAL: Tier 3 sources are NOT evidence of truth — they are claims by \
 interested parties. A politician denying something does not make it false. \
@@ -744,7 +911,7 @@ When a claim involves numbers (spending, percentages, counts):
 - If sources disagree on numbers, gather BOTH and note the discrepancy
 
 WHEN REPUTABLE SOURCES CONFLICT:
-Sometimes Reuters says X and BBC says Y. This is important information.
+Sometimes one major outlet says X and another says Y. This is important information.
 - Gather BOTH conflicting sources — don't pick one
 - Note the exact disagreement clearly
 - The judge will weigh them; you just gather the evidence
@@ -752,9 +919,38 @@ Sometimes Reuters says X and BBC says Y. This is important information.
 
 PRIMARY SOURCE PURSUIT:
 When news reports cite a document, study, or official record, try to find \
-the ORIGINAL. "According to a DOJ report" → search for the actual DOJ report. \
+the ORIGINAL. "According to a government report" → search for the actual report. \
 "A study found..." → find the study itself. Secondary reporting may \
 mischaracterize or cherry-pick from primary sources.
+
+OWNERSHIP & CONFLICT OF INTEREST DETECTION — USE WIKIDATA:
+For claims about organizations, corporations, or wealthy individuals, use \
+the wikidata_lookup tool to discover ownership chains and potential conflicts:
+
+- CORPORATIONS: Query the founder/CEO to find what MEDIA they own
+  Example: Query "[CEO name]" → discover they own Company X AND Newspaper N
+  Result: Newspaper N coverage of Company X is NOT independent
+
+- POLITICIANS: Query to find party affiliation, positions held, donors
+  Example: Query "[politician name]" → employment history, political appointments
+
+- MEDIA OUTLETS: Query the owner to see what else they own
+  Example: Query "[media owner]" → subsidiaries, other holdings
+
+- GOVERNMENT AGENCIES: Query the current director/head
+  Example: Query "[agency name]" → current director, parent organization
+
+WHY THIS MATTERS:
+If a claim is about Company X and you find evidence from Newspaper N, check \
+whether they share an owner — if so, it's NOT independent verification. \
+If a claim accuses Agency A of wrongdoing, Agency A's statements about its \
+own conduct are self-serving, not evidence. Wikidata helps you identify these \
+relationships so you can prioritize truly INDEPENDENT sources.
+
+WHEN TO QUERY WIKIDATA:
+1. EARLY: Near the start of research, query key entities to understand relationships
+2. FOR SOURCES: When evaluating a news source, check if it has ownership ties
+3. FOR PEOPLE: When a claim involves executives/politicians, check their affiliations
 
 CLAIM TYPES THAT MAY BE UNVERIFIABLE — recognize and flag these:
 - FUTURE predictions: "X will happen" — cannot verify until it happens
@@ -809,7 +1005,11 @@ search for the specific event, action, number, or object mentioned.
 
 Use multiple search tools when available for source diversity. When you \
 find a promising URL, use fetch_page_content to read the full article \
-rather than relying only on search snippets.\
+rather than relying only on search snippets.
+
+If this claim involves a CORPORATION, POLITICIAN, or WEALTHY INDIVIDUAL, \
+use wikidata_lookup early to find ownership chains and media holdings. This \
+helps identify which sources may have conflicts of interest.\
 """
 
 # Why separate RESEARCH from JUDGE?
@@ -853,8 +1053,8 @@ and render your verdict. Aim for brief, focused reasoning.
 You will also be shown the ORIGINAL CLAIM for context. This is critical — \
 the sub-claim was extracted from it, and you must interpret the sub-claim \
 in the context of the original. For example:
-  - If the original claim says "Fort Knox has still not been audited, \
-despite promises by Trump", and the sub-claim is "Fort Knox has not been \
+  - If the original claim says "Facility X has still not been audited, \
+despite promises by Politician P", and the sub-claim is "Facility X has not been \
 audited" — the sub-claim is clearly asking about the PROMISED audit, not \
 whether it has EVER been audited in all of history.
   - If the original says "X did Y after Z happened", and the sub-claim \
@@ -871,7 +1071,7 @@ nothing about the claim?
    - PRIMARY DOCUMENTS (treaties, charters, legislation, data, court \
 filings) are the STRONGEST evidence. What a document actually says \
 trumps what anyone claims it says.
-   - INDEPENDENT REPORTING (Reuters, AP, BBC, etc.) is strong evidence, \
+   - INDEPENDENT REPORTING (major wire services, newspapers of record, etc.) is strong evidence, \
 especially when multiple outlets corroborate.
    - POLITICIAN/GOVERNMENT STATEMENTS are the WEAKEST evidence. A press \
 office denial is NOT proof something is false. A politician's claim is \
@@ -895,11 +1095,11 @@ How to use these ratings:
 - "Center" bias doesn't mean neutral — it means between left and right
 - Check if a BIAS WARNING appears at the end of evidence (skewed coverage)
 
-GOVERNMENT SOURCES (justice.gov, whitehouse.gov, etc.):
+GOVERNMENT SOURCES (agency websites, executive branch sites, etc.):
 Even if rated "Center", government press releases are CLAIMS BY INTERESTED \
-PARTIES. A DOJ announcement is what the DOJ wants you to believe — verify \
+PARTIES. An agency announcement is what that agency wants you to believe — verify \
 against independent reporting, not just other government statements. The \
-arrest happened if Reuters and AP confirm it. The suspect is guilty only \
+arrest happened if multiple independent wire services confirm it. The suspect is guilty only \
 if convicted.
 
 SELF-SERVING STATEMENTS (the organization IS the claim subject):
@@ -912,33 +1112,83 @@ saying they're environmentally responsible is NOT evidence they didn't pollute.
 - Claim: "Agency Z mishandled investigation" → Agency Z's statement that \
 it followed proper procedures is NOT evidence of innocence.
 
-CRITICAL: NEWS REPORTS QUOTING SELF-SERVING STATEMENTS ARE STILL SELF-SERVING.
-When Reuters, AP, or any outlet reports "Agency X says it found no evidence \
-of Y" — the underlying source is still Agency X. The journalistic wrapper \
-does not convert a self-serving statement into independent verification.
-- "Agency says agency investigation found no wrongdoing" → Agency is source, \
-regardless of which outlet reports it. Applies equally to any agency (FBI, \
-DOJ, IRS, EPA, foreign agencies, etc.).
-- "Company says its own audit found no problems" → Company is the source.
-- "Government concludes government acted properly" → circular.
+=== CRITICAL: TRACE THE ORIGIN OF EVERY FACTUAL CLAIM ===
 
-To verify claims ABOUT an organization, you need sources EXTERNAL to that \
-organization. Look for:
-- Independent investigations (congressional, journalistic, NGO)
-- Whistleblower testimony
-- Court findings or legal proceedings
-- Third-party audits
-- Documents contradicting official statements
+The source TAG shows which OUTLET published the article. But you must identify \
+WHO ACTUALLY MADE THE FACTUAL CLAIM within that article. Ask: "Who is the \
+original source of this information?"
 
-If the only evidence for a claim about X comes from X itself (even via \
-news reports quoting X), note this limitation explicitly: "Primary evidence \
-for this conclusion comes from the organization being evaluated; independent \
-verification was not found in available sources."
+EXAMPLE — THE PATTERN YOU MUST CATCH:
+- Claim to verify: "Did Agency A lie about the case files?"
+- Evidence [1]: News outlet reports "Agency A says there was no evidence of wrongdoing"
+- Source tag shows: [Center | Very High factual | News Outlet]
+- WRONG conclusion: "News Outlet is reliable, therefore Agency A's statement is verified"
+- RIGHT analysis: "News Outlet is only REPORTING what Agency A said. The ORIGINAL SOURCE \
+of the factual claim is Agency A itself. This is Agency A assessing Agency A's own conduct. \
+This is circular/self-serving evidence that cannot verify whether Agency A lied."
+
+DO THIS FOR EVERY PIECE OF EVIDENCE:
+1. Read the content — WHO made the factual assertion?
+2. If the assertion comes from Entity X, and the claim is ABOUT Entity X, \
+that evidence is self-serving regardless of which news outlet published it.
+3. A claim about government misconduct cannot be verified or refuted by \
+that same government's statements about itself.
+
+NEWS OUTLETS DO NOT INDEPENDENTLY VERIFY GOVERNMENT STATEMENTS.
+When news outlets report "Agency X found Y" — they are QUOTING the agency, \
+not conducting their own investigation. The journalistic wrapper does NOT \
+convert a self-serving statement into independent verification.
+
+CIRCULAR EVIDENCE PATTERNS TO REJECT:
+- "Did Agency A lie?" → Evidence: "Agency A says Agency A didn't lie" → CIRCULAR
+- "Did Company X pollute?" → Evidence: "Company X says Company X didn't pollute" → CIRCULAR
+- "Did Government cover up?" → Evidence: "Government says no cover-up" → CIRCULAR
+
+The rating tag (Center/High factual) reflects the OUTLET's general reliability, \
+NOT the reliability of the specific claim being QUOTED. A highly-rated outlet \
+accurately quoting a self-serving statement is still reporting a self-serving statement.
+
+If ALL evidence for "Entity X did/didn't do Y" comes from Entity X itself \
+(even via reputable news outlets quoting X), you MUST:
+1. State the verdict as "unverifiable" if no independent evidence exists
+2. Explicitly note: "Available evidence consists entirely of statements from \
+the organization being evaluated. No independent investigation, court finding, \
+whistleblower testimony, or third-party audit was found to corroborate or \
+contradict these statements."
 
 Self-serving statements can establish what an organization's OFFICIAL \
 POSITION is, but they cannot verify whether that position is TRUE. Treat \
 them like defendant testimony — note what they claim, but require \
 independent corroboration. A denial is just a denial until proven otherwise.
+
+=== AUTOMATED SELF-SERVING DETECTION ===
+
+Evidence items may include this warning tag:
+  ⚠️ QUOTES CLAIM SUBJECT: [Entity] — This is a self-serving statement, NOT independent verification.
+
+This tag appears when the evidence QUOTES statements from an entity that the \
+claim is ABOUT. When you see this tag:
+
+1. DO NOT treat this evidence as verification or refutation of the claim
+2. DO note the official position: "Entity X states/denies..."
+3. DO look for INDEPENDENT evidence to verify/refute the actual claim
+4. If this tag appears on most evidence and no independent evidence exists, \
+verdict should be "unverifiable" with explicit note about circular sourcing
+
+Example with tag:
+  [1] [Center | Very High factual | News Outlet] Source: news | URL: example.com/...
+      ⚠️ QUOTES CLAIM SUBJECT: Agency A — This is a self-serving statement, NOT independent verification.
+  "Agency Director testified that agency investigators found no evidence..."
+
+The News Outlet rating is irrelevant here — they're just accurately quoting \
+what Agency A said about Agency A. This is circular evidence.
+
+A summary warning may also appear at the end if many sources quote the subject:
+  ⚠️ SELF-SERVING SOURCE WARNING: X% of evidence items quote statements from \
+  the claim's subject entities. These are NOT independent verification.
+
+When this warning appears, be especially skeptical. You likely have mostly \
+defendant testimony and no independent corroboration.
 
 LEGAL/REGULATORY CLAIMS (legality ≠ legitimacy):
 When a claim's truth hinges on law, regulation, or official classification:
@@ -953,7 +1203,7 @@ A claim like "X doesn't have to register as Y" may be legally accurate \
 while omitting that similar entities DO register, or that exemption is \
 contested. Your verdict addresses LEGAL ACCURACY. Use nuance to flag:
 - Inconsistent enforcement ("Others with similar activities register")
-- Active challenges ("This classification is under DOJ review")
+- Active challenges ("This classification is under agency review")
 - Gap between legal and ethical ("Legally exempt, but critics argue...")
 
 Legality answers what the rule IS. It does not answer whether the rule \
@@ -1001,6 +1251,16 @@ RHETORICAL TRAPS — patterns that mislead even when technically accurate:
    - One good quarter doesn't prove a trend. One bad incident doesn't prove a pattern.
    - If evidence suggests the cited fact is an outlier, note it.
    - "This statistic is accurate but appears selectively chosen."
+   - TEMPORAL CHERRY-PICKING: "Since [date]" framing that omits prior history.
+     Example: "Border tensions since [year]" may be true but omits decades of \
+prior conflict — the date implies a recent origin for a long-standing situation.
+     When a claim specifies a START DATE, ask: did this actually begin then, or \
+does the framing hide relevant prior history? Note: "True since [date], but this \
+omits [X years/decades] of prior [activity]."
+   - SELECTIVE TIMEFRAME: Choosing a favorable window for statistics.
+     "Lowest unemployment since [year X]" during a post-crisis recovery is not \
+the same as "lowest unemployment since [much earlier year Y]" — the baseline matters.
+     Note when a timeframe appears chosen to maximize/minimize effect.
 
 2. CORRELATION ≠ CAUSATION: "X went up when Y went up" ≠ "X caused Y".
    - Two things happening together is not proof one caused the other.
@@ -1013,9 +1273,27 @@ RHETORICAL TRAPS — patterns that mislead even when technically accurate:
    - "True by definition A, but false by definition B."
 
 4. TIME-SENSITIVITY: True then, not now (or vice versa).
-   - Circumstances change. A 2015 fact may not be a 2025 fact.
+   - Circumstances change. A fact from several years ago may not hold today.
    - If evidence is dated, note whether the claim is still current.
    - "This was accurate in [year] but circumstances have since changed."
+   - MANUFACTURED RECENCY: Framing long-standing situations as recent.
+     "X has been happening since [recent date]" when X has actually been \
+happening for decades is technically true but implies a recent origin.
+     Example: "Conflict in region R since [year]" for a region with a \
+decades-long history of repeated conflicts implies a recent origin when \
+this is actually part of a long-standing pattern. The "since [date]" framing hides context.
+     CONNECT THE DOTS: If you find evidence of prior activity (e.g., "this \
+tactic was used previously") while evaluating a claim that uses "since [date]", \
+EXPLICITLY note that the timeframe hides this history in your nuance.
+     Note: "The 'since [date]' framing omits significant prior history: \
+[list what evidence shows happened before the stated start date]."
+   - STALE EVIDENCE: Old sources used for current claims.
+     A study from several years ago about social media may be outdated for \
+current claims about platform behavior. Technology and policies change rapidly.
+     Note when evidence age undermines its relevance to current claims.
+   - SNAPSHOT VS TRAJECTORY: A single point in time vs direction of change.
+     "X is at Y level" doesn't tell you if X is rising, falling, or stable.
+     When trend matters to the claim's meaning, note if evidence only shows snapshots.
 
 5. SURVIVORSHIP BIAS: Multiple sources may trace to one origin.
    - If 5 articles all cite the same study, that's ONE source, not five.
@@ -1169,12 +1447,12 @@ core assertion is NOT saved by true supporting details.
 Ask yourself: "Would a reasonable person say this claim is basically right \
 or basically wrong?" That determines the verdict.
 
-Example: "Fort Knox gold hasn't been audited despite promises by Trump \
-and Elon Musk"
-- Core assertion: gold hasn't been audited → TRUE ← this drives the verdict
-- Supporting: Trump promised → TRUE
-- Supporting: Musk promised → FALSE (Trump said Musk would, not Musk himself)
-→ Verdict: "mostly_true" — the substance is correct. The Musk attribution \
+Example: "Government facility hasn't been audited despite promises by \
+Politician P and Billionaire B"
+- Core assertion: facility hasn't been audited → TRUE ← this drives the verdict
+- Supporting: Politician P promised → TRUE
+- Supporting: Billionaire B promised → FALSE (P said B would, not B himself)
+→ Verdict: "mostly_true" — the substance is correct. The attribution error \
 is a minor inaccuracy that belongs in the nuance, not the verdict.
 
 Another example: "NASA landed on Mars in 2019"
@@ -1195,7 +1473,7 @@ itself breaks — that's not a minor detail, it undermines the argument.
 CORRELATED SUB-CLAIMS — avoid double-counting:
 If multiple sub-claims were verified using the SAME evidence source, don't \
 count them as independent confirmations. Three "true" verdicts from the \
-same Wikipedia article are weaker than three "true" verdicts from Reuters, \
+same Wikipedia article are weaker than three "true" verdicts from multiple \
 AP, and an academic study. Look at the reasoning to see if sub-claims share \
 a common evidence base.
 

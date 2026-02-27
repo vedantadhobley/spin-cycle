@@ -41,7 +41,7 @@ MODULE = "workflow"
 
 # Maximum atomic facts to process. If decomposition returns more, we cap it.
 # 6 facts × ~4 min each = ~12 min per batch of 2 = ~12 min total. Reasonable.
-MAX_FACTS = 6
+MAX_FACTS = 10
 
 # Maximum concurrent research+judge pipelines. Matched to --parallel on
 # joi's Qwen3.5 instance — each agent gets a dedicated inference slot.
@@ -92,6 +92,18 @@ class VerifyClaimWorkflow:
 
         atomic_facts = decomposition["facts"]
         thesis_info = decomposition.get("thesis_info", {})
+        
+        # interested_parties is now an object with all_parties, direct, institutional, affiliated_media
+        interested_parties = thesis_info.get("interested_parties", {})
+        if isinstance(interested_parties, list):
+            # Legacy format - convert to new structure
+            interested_parties = {
+                "all_parties": interested_parties,
+                "direct": interested_parties,
+                "institutional": [],
+                "affiliated_media": [],
+                "reasoning": None,
+            }
 
         # Cap to prevent runaway decompositions
         if len(atomic_facts) > MAX_FACTS:
@@ -105,7 +117,8 @@ class VerifyClaimWorkflow:
                  claim_id=claim_id, fact_count=len(atomic_facts),
                  facts=[f["text"] for f in atomic_facts],
                  thesis=thesis_info.get("thesis"),
-                 structure=thesis_info.get("structure"))
+                 structure=thesis_info.get("structure"),
+                 interested_parties=interested_parties)
 
         # Step 2: Research all facts first (thinking=off, fast)
         # Then judge all facts (thinking=on, slow)
@@ -128,7 +141,7 @@ class VerifyClaimWorkflow:
             """Judge a single fact given its evidence."""
             return await workflow.execute_activity(
                 judge_subclaim,
-                args=[claim_text, fact_text, evidence],
+                args=[claim_text, fact_text, evidence, interested_parties],
                 start_to_close_timeout=timedelta(seconds=300),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
