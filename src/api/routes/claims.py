@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from temporalio.client import Client as TemporalClient
 
-from src.data.schemas import ClaimSubmit, ClaimResponse, VerdictResponse, ClaimListResponse, SubClaimResponse
+from src.schemas import ClaimSubmit, ClaimResponse, VerdictResponse, ClaimListResponse, SubClaimResponse
 from src.db.models import Claim, SubClaim, Verdict
 from src.db.session import get_session
 from src.utils.logging import log, get_logger

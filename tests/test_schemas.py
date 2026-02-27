@@ -1,7 +1,7 @@
 """Tests for Pydantic schemas."""
 
 import pytest
-from src.data.schemas import ClaimSubmit
+from src.schemas import ClaimSubmit
 
 
 def test_claim_submit_valid():

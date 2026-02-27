@@ -27,7 +27,15 @@ from temporalio import activity
 
 from src.db.session import async_session
 from src.db.models import Claim, SubClaim, Evidence, Verdict
-from src.llm import get_llm
+from src.llm import (
+    get_llm,
+    invoke_llm,
+    create_fallback,
+    LLMInvocationError,
+    validate_decompose,
+    validate_judge,
+    validate_synthesize,
+)
 from src.prompts.verification import (
     DECOMPOSE_SYSTEM,
     DECOMPOSE_USER,
@@ -35,6 +43,12 @@ from src.prompts.verification import (
     JUDGE_USER,
     SYNTHESIZE_SYSTEM,
     SYNTHESIZE_USER,
+)
+from src.schemas.llm_outputs import (
+    DecomposeOutput,
+    JudgeOutput,
+    SynthesizeOutput,
+    InterestedParties,
 )
 from src.tools.source_ratings import get_source_rating_sync, format_source_tag, detect_claim_subject_quotes
 from src.utils.logging import log
@@ -81,84 +95,59 @@ async def decompose_claim(claim_text: str) -> dict:
       - "facts": list of {"text": "..."} dicts, each an atomic fact
       - "thesis_info": {"thesis": "...", "structure": "...", "key_test": "..."}
 
-    Falls back to a single item with no thesis if JSON parsing fails.
+    Falls back to a single item with no thesis if invocation fails after retries.
     """
     log.info(activity.logger, "decompose", "start", "Decomposing claim",
              claim=claim_text)
-    llm = get_llm()
 
-    _t0 = time.monotonic()
-    response = await llm.ainvoke([
-        SystemMessage(content=DECOMPOSE_SYSTEM),
-        HumanMessage(content=DECOMPOSE_USER.format(claim_text=claim_text)),
-    ])
-    _latency = int((time.monotonic() - _t0) * 1000)
-
-    raw = response.content.strip()
-    log.info(activity.logger, "decompose", "llm_call", "Decompose LLM call complete",
-             model="thinking=off", latency_ms=_latency)
-    log.debug(activity.logger, "decompose", "llm_response", "LLM response received",
-              raw=raw)
-
-    # Parse the JSON response — now structured with entities/predicates/comparisons
     try:
-        parsed = json.loads(raw)
+        # Use unified invoker with schema validation and automatic retry
+        output = await invoke_llm(
+            system_prompt=DECOMPOSE_SYSTEM,
+            user_prompt=DECOMPOSE_USER.format(claim_text=claim_text),
+            schema=DecomposeOutput,
+            semantic_validator=validate_decompose,
+            max_retries=2,
+            activity_name="decompose",
+        )
+        
+        # Convert validated output to dict for expansion
+        parsed = output.model_dump()
+        
+        # Expand structured predicates into flat facts
+        facts = _expand_structured(parsed)
+        
+        # Build thesis_info from validated output
+        interested_parties_obj = _normalize_interested_parties(parsed.get("interested_parties", {}))
+        thesis_info = {
+            "thesis": output.thesis,
+            "structure": output.structure,
+            "key_test": output.key_test,
+            "entities": output.entities,
+            "interested_parties": interested_parties_obj,
+        }
+        
+        log.info(activity.logger, "decompose", "expanded",
+                 "Structured extraction expanded to facts",
+                 entities=output.entities,
+                 interested_parties=interested_parties_obj,
+                 predicate_count=len(output.predicates),
+                 comparison_count=len(output.comparisons),
+                 expanded_fact_count=len(facts))
 
-        # Handle new structured format
-        if isinstance(parsed, dict) and "predicates" in parsed:
-            facts = _expand_structured(parsed)
-            
-            # Parse interested_parties - can be list (legacy) or object (new)
-            raw_interested = parsed.get("interested_parties", [])
-            interested_parties_obj = _normalize_interested_parties(raw_interested)
-            
-            thesis_info = {
-                "thesis": parsed.get("thesis"),
-                "structure": parsed.get("structure", "simple"),
-                "key_test": parsed.get("key_test"),
-                "entities": parsed.get("entities", []),
-                "interested_parties": interested_parties_obj,
-            }
-            log.info(activity.logger, "decompose", "expanded",
-                     "Structured extraction expanded to facts",
-                     entities=parsed.get("entities", []),
-                     interested_parties=interested_parties_obj,
-                     predicate_count=len(parsed.get("predicates", [])),
-                     comparison_count=len(parsed.get("comparisons", [])),
-                     expanded_fact_count=len(facts))
-
-        # Handle legacy format (bare list or {facts: [...]})
-        elif isinstance(parsed, list):
-            facts = _normalize_flat(parsed)
-            thesis_info = {
-                "thesis": None,
-                "structure": "simple",
-                "key_test": None,
-                "entities": [],
-                "interested_parties": _normalize_interested_parties([]),
-            }
-        elif isinstance(parsed, dict) and "facts" in parsed:
-            facts = _normalize_flat(parsed["facts"])
-            raw_interested = parsed.get("interested_parties", [])
-            thesis_info = {
-                "thesis": parsed.get("thesis"),
-                "structure": parsed.get("structure", "simple"),
-                "key_test": parsed.get("key_test"),
-                "entities": parsed.get("entities", []),
-                "interested_parties": _normalize_interested_parties(raw_interested),
-            }
-        else:
-            raise ValueError(f"Unexpected format: {type(parsed)}")
-
-        if not facts:
-            raise ValueError("LLM returned empty facts/predicates")
-
-    except (json.JSONDecodeError, ValueError) as e:
-        log.warning(activity.logger, "decompose", "parse_failed",
-                    "Failed to parse LLM decomposition, using original claim",
-                    error=str(e), raw=raw)
+    except LLMInvocationError as e:
+        # All retries failed — use fallback
+        log.warning(activity.logger, "decompose", "invocation_failed",
+                    "LLM invocation failed after retries, using original claim as single fact",
+                    error=str(e), attempts=e.attempts)
         facts = [{"text": claim_text}]
-        thesis_info = {"thesis": None, "structure": "simple", "key_test": None, "entities": [], "interested_parties": _normalize_interested_parties([])}
+        thesis_info = {
+            "thesis": None,
+            "structure": "simple",
+            "key_test": None,
+            "entities": [],
+            "interested_parties": _normalize_interested_parties([]),
+        }
 
     log.info(activity.logger, "decompose", "done", "Claim decomposed",
              claim=claim_text, sub_count=len(facts),
@@ -192,7 +181,8 @@ def _expand_structured(parsed: dict) -> list[dict]:
         
         # SAFEGUARD: Count {entity} placeholders - if more than one, don't template-expand
         # This prevents garbled output like "Israel has intent to destroy Israel"
-        entity_count = claim_template.count("{entity}") + claim_template.count("{{entity}}")
+        # Use regex to count distinct placeholder positions (handles both {entity} and {{entity}})
+        entity_count = len(re.findall(r'\{+entity\}+', claim_template))
         
         if entity_count > 1:
             # Multiple entity placeholders = LLM mistake. Use template as-is (it likely has specific names)
@@ -607,85 +597,32 @@ async def judge_subclaim(
     # Use non-thinking mode for judge - the structured prompt already guides
     # reasoning, and thinking mode generates 5000-9500 tokens of internal
     # monologue that takes 3-4 minutes without improving verdict quality.
-    llm = get_llm()
-    _t0 = time.monotonic()
-    response = await llm.ainvoke([
-        SystemMessage(content=JUDGE_SYSTEM.format(current_date=date.today().isoformat())),
-        HumanMessage(content=JUDGE_USER.format(
-            claim_text=claim_text,
-            sub_claim=sub_claim,
-            evidence_text=evidence_text,
-        )),
-    ])
-    _latency = int((time.monotonic() - _t0) * 1000)
-    log.info(activity.logger, "judge", "llm_call", "Judge LLM call complete",
-             model="thinking=off", latency_ms=_latency,
-             sub_claim=sub_claim)
-
-    raw = response.content.strip()
-    original_raw = raw  # Keep original for fallback
-
-    # Strip <think>...</think> tags from the thinking model's output.
-    # The thinking model always produces chain-of-thought before its answer;
-    # we capture it for debug logging, then extract just the JSON.
-    think_match = re.search(r"<think>(.*?)</think>", raw, re.DOTALL)
-    if think_match:
-        log.debug(activity.logger, "judge", "thinking", "Model reasoning captured",
-                  thinking=think_match.group(1))
-        raw = raw[think_match.end():].strip()
-
-        # If nothing remains after stripping think tags, try to find JSON
-        # anywhere in the original response (some models embed it in thinking)
-        if not raw:
-            log.warning(activity.logger, "judge", "empty_after_think",
-                        "No content after </think>, searching for JSON in full response")
-            # Try parsing from each '{' in the original until one works
-            decoder = json.JSONDecoder()
-            for i, char in enumerate(original_raw):
-                if char == '{':
-                    try:
-                        # raw_decode handles trailing content after valid JSON
-                        parsed_candidate, end_idx = decoder.raw_decode(original_raw[i:])
-                        if isinstance(parsed_candidate, dict) and "verdict" in parsed_candidate:
-                            raw = original_raw[i:i + end_idx]
-                            log.debug(activity.logger, "judge", "json_recovered",
-                                      "Found JSON in original response")
-                            break
-                    except json.JSONDecodeError:
-                        continue
-
-    log.debug(activity.logger, "judge", "llm_response", "LLM response received",
-              raw=raw)
-
-    # Parse the JSON verdict from the LLM
     try:
-        result = json.loads(raw)
-        verdict = result.get("verdict", "unverifiable")
-        confidence = float(result.get("confidence", 0.0))
-        reasoning = result.get("reasoning", "")
-        nuance = result.get("nuance") or None
-
-        # Validate verdict is one of our expected values (full 6-level scale)
-        valid_verdicts = {
-            "true", "mostly_true", "mixed",
-            "mostly_false", "false", "unverifiable",
-        }
-        if verdict not in valid_verdicts:
-            log.warning(activity.logger, "judge", "invalid_verdict",
-                        "Invalid verdict from LLM, falling back to unverifiable",
-                        verdict=verdict)
-            verdict = "unverifiable"
-
-        # Clamp confidence to [0, 1]
-        confidence = max(0.0, min(1.0, confidence))
-
-    except (json.JSONDecodeError, ValueError, TypeError) as e:
-        log.warning(activity.logger, "judge", "parse_failed",
-                    "Failed to parse LLM judgment",
-                    error=str(e), raw=raw)
+        output = await invoke_llm(
+            system_prompt=JUDGE_SYSTEM.format(current_date=date.today().isoformat()),
+            user_prompt=JUDGE_USER.format(
+                claim_text=claim_text,
+                sub_claim=sub_claim,
+                evidence_text=evidence_text,
+            ),
+            schema=JudgeOutput,
+            semantic_validator=validate_judge,
+            max_retries=2,
+            activity_name="judge",
+        )
+        
+        verdict = output.verdict
+        confidence = output.confidence
+        reasoning = output.reasoning
+        nuance = output.nuance
+        
+    except LLMInvocationError as e:
+        log.warning(activity.logger, "judge", "invocation_failed",
+                    "LLM invocation failed after retries",
+                    error=str(e), attempts=e.attempts)
         verdict = "unverifiable"
         confidence = 0.0
-        reasoning = f"Failed to parse LLM judgment: {raw}"
+        reasoning = f"Failed to parse LLM judgment after {e.attempts} attempts"
         nuance = None
 
     # Clean up reasoning and nuance text using LanguageTool
@@ -770,54 +707,34 @@ async def synthesize_verdict(
             f"Original claim (for context): {claim_text}"
         )
 
-    llm = get_llm()
-    t0 = time.monotonic()
-    response = await llm.ainvoke([
-        SystemMessage(content=SYNTHESIZE_SYSTEM.format(
-            current_date=date.today().isoformat(),
-            synthesis_context=synthesis_context,
-        )),
-        HumanMessage(content=SYNTHESIZE_USER.format(
-            synthesis_framing=synthesis_framing,
-            sub_verdicts_text=sub_verdicts_text,
-        )),
-    ])
-    latency_ms = round((time.monotonic() - t0) * 1000)
-    log.info(activity.logger, "synthesize", "llm_call",
-             "Synthesize LLM call completed",
-             model="thinking=off", latency_ms=latency_ms, is_final=is_final)
-
-    raw = response.content.strip()
-    log.debug(activity.logger, "synthesize", "llm_response", "LLM response received",
-              raw=raw)
-
-    # Parse the JSON verdict
     try:
-        result = json.loads(raw)
-        verdict = result.get("verdict", "unverifiable")
-        confidence = float(result.get("confidence", 0.0))
-        reasoning = result.get("reasoning", "")
-        nuance = result.get("nuance") or None
-
-        # Validate verdict — full 6-level scale at every level
-        valid_verdicts = {
-            "true", "mostly_true", "mixed", "mostly_false", "false", "unverifiable"
-        }
-        if verdict not in valid_verdicts:
-            log.warning(activity.logger, "synthesize", "invalid_verdict",
-                        "Invalid verdict from LLM, falling back to unverifiable",
-                        verdict=verdict)
-            verdict = "unverifiable"
-
-        confidence = max(0.0, min(1.0, confidence))
-
-    except (json.JSONDecodeError, ValueError, TypeError) as e:
-        log.warning(activity.logger, "synthesize", "parse_failed",
-                    "Failed to parse LLM synthesis",
-                    error=str(e), raw=raw)
+        output = await invoke_llm(
+            system_prompt=SYNTHESIZE_SYSTEM.format(
+                current_date=date.today().isoformat(),
+                synthesis_context=synthesis_context,
+            ),
+            user_prompt=SYNTHESIZE_USER.format(
+                synthesis_framing=synthesis_framing,
+                sub_verdicts_text=sub_verdicts_text,
+            ),
+            schema=SynthesizeOutput,
+            semantic_validator=validate_synthesize,
+            max_retries=2,
+            activity_name="synthesize",
+        )
+        
+        verdict = output.verdict
+        confidence = output.confidence
+        reasoning = output.reasoning
+        nuance = output.nuance
+        
+    except LLMInvocationError as e:
+        log.warning(activity.logger, "synthesize", "invocation_failed",
+                    "LLM invocation failed after retries",
+                    error=str(e), attempts=e.attempts)
         verdict = "unverifiable"
         confidence = 0.0
-        reasoning = f"Failed to parse LLM synthesis: {raw}"
+        reasoning = f"Failed to synthesize verdict after {e.attempts} attempts"
         nuance = None
 
     # Clean up reasoning and nuance text using LanguageTool
