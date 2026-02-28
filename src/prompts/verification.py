@@ -283,7 +283,7 @@ counter-evidence to look for.
   - Weigh by importance, not count
   - Core assertion drives verdict
   - Use thesis as rubric
-  - Propagate nuance
+  - Include context in reasoning
 
 ### Added Handling
 
@@ -292,8 +292,8 @@ counter-evidence to look for.
   double-count. Three "true" from the same Wikipedia article are weaker
   than three "true" from multiple independent wire services and academic studies.
 
-  CONFLICTING NUANCES:
-  WHY: Sub-claim nuances may point different directions. Don't just
+  CONFLICTING CONTEXT:
+  WHY: Sub-claim reasoning may point different directions. Don't just
   concatenate them — synthesize into a coherent picture. "The number is
   exaggerated" + "the pattern is real" → "Specific figures overstated,
   but underlying trend is supported."
@@ -836,7 +836,7 @@ reform efforts, or subject to widespread ethical criticism?
 
 A claim like "X doesn't have to register as Y" may be legally accurate \
 while omitting that similar entities DO register, or that exemption is \
-contested. Your verdict addresses LEGAL ACCURACY. Use nuance to flag:
+contested. Your verdict addresses LEGAL ACCURACY. Include in your reasoning:
 - Inconsistent enforcement ("Others with similar activities register")
 - Active challenges ("This classification is under agency review")
 - Gap between legal and ethical ("Legally exempt, but critics argue...")
@@ -858,7 +858,7 @@ or a narrow class of similar entities."
 2. ENFORCEMENT ASYMMETRY: Is the law enforced against some but not others?
    - Same behavior, different treatment = selective enforcement
    - Note who gets prosecuted and who doesn't for similar conduct.
-   - If evidence shows uneven enforcement, flag it in nuance.
+   - If evidence shows uneven enforcement, note it in your reasoning.
 
 3. REGULATORY CAPTURE: Did the entity influence the rule that benefits them?
    - Lobbying history, revolving door appointments, drafting involvement
@@ -876,9 +876,9 @@ foreign influence has failed its purpose.
 wasn't, there's an inconsistency worth noting.
    - Historical enforcement patterns matter.
 
-Your verdict addresses LEGAL/FACTUAL ACCURACY. Your nuance should flag any \
+Your verdict addresses LEGAL/FACTUAL ACCURACY. Your reasoning should flag any \
 of the above anomalies. "Legally accurate, but benefits from what critics \
-call a loophole" is a valid and important nuance.
+call a loophole" is valid and important context to include.
 
 RHETORICAL TRAPS — patterns that mislead even when technically accurate:
 
@@ -919,7 +919,7 @@ decades-long history of repeated conflicts implies a recent origin when \
 this is actually part of a long-standing pattern. The "since [date]" framing hides context.
      CONNECT THE DOTS: If you find evidence of prior activity (e.g., "this \
 tactic was used previously") while evaluating a claim that uses "since [date]", \
-EXPLICITLY note that the timeframe hides this history in your nuance.
+EXPLICITLY note that the timeframe hides this history in your reasoning.
      Note: "The 'since [date]' framing omits significant prior history: \
 [list what evidence shows happened before the stated start date]."
    - STALE EVIDENCE: Old sources used for current claims.
@@ -950,8 +950,8 @@ current claims about platform behavior. Technology and policies change rapidly.
    - Weight by quality and quantity of evidence, not just existence of disagreement.
    - When evidence is lopsided, say so clearly.
 
-When you detect any of these patterns, note them in the nuance field. The \
-verdict should reflect accuracy; the nuance should reflect context.
+When you detect any of these patterns, note them in your reasoning. The \
+verdict should reflect accuracy; the reasoning should explain context.
 
 Verdict scale (use the FULL range — do not collapse to just true/false):
 - "true" — evidence clearly supports the claim as stated
@@ -965,20 +965,6 @@ Not just a minor detail off — genuinely conflicting on substance.
 elements are accurate. The spirit of the claim does NOT hold.
 - "false" — evidence clearly contradicts the central claim
 - "unverifiable" — not enough evidence to judge either way
-
-NUANCE:
-Some claims deserve context beyond a simple true/false verdict. Use the \
-"nuance" field to note important context that the verdict alone doesn't \
-capture. Examples:
-- Hyperbolic claims: "The specific number is hyperbolic. He is mentioned \
-in the files, but hundreds of times — not a million."
-- Technically true but misleading: "While technically accurate, this omits \
-the key context that..."
-- Wrong on specifics, right on substance: "The exact figure is wrong, but \
-the underlying claim that spending was massive is supported."
-
-Only include nuance when it adds genuine value. If the verdict speaks for \
-itself, set nuance to null.
 
 Confidence scoring (USE THE FULL RANGE — do NOT default to 0.9+):
 - 0.95-1.0 — Multiple high-quality sources explicitly confirm/deny. No \
@@ -1007,8 +993,7 @@ Return a JSON object:
 {{
   "verdict": "true|mostly_true|mixed|mostly_false|false|unverifiable",
   "confidence": 0.0 to 1.0,
-  "reasoning": "Brief explanation of how the evidence supports your verdict",
-  "nuance": "Optional context note — hyperbole, missing context, etc. Set to null if not needed."
+  "reasoning": "Explain how the evidence supports your verdict. Include any important context (hyperbole, misleading framing, technically-true-but-misleading, wrong on specifics but right on substance, etc.) in this explanation."
 }}
 
 Return ONLY the JSON object. No markdown, no explanation, no wrapping.\
@@ -1026,7 +1011,7 @@ Evidence:
 
 Interpret the sub-claim in the context of the original claim. Identify \
 the key evidence, weigh it briefly, and return a JSON object with \
-"verdict", "confidence", "reasoning", and "nuance".\
+"verdict", "confidence", and "reasoning".\
 """
 
 # Why "Do NOT use your own knowledge"?
@@ -1088,7 +1073,7 @@ Politician P and Billionaire B"
 - Supporting: Politician P promised → TRUE
 - Supporting: Billionaire B promised → FALSE (P said B would, not B himself)
 → Verdict: "mostly_true" — the substance is correct. The attribution error \
-is a minor inaccuracy that belongs in the nuance, not the verdict.
+is a minor inaccuracy that belongs in the reasoning, not the verdict.
 
 Another example: "NASA landed on Mars in 2019"
 - Core: NASA landed on Mars → FALSE ← this drives the verdict
@@ -1112,8 +1097,8 @@ same Wikipedia article are weaker than three "true" verdicts from multiple \
 AP, and an academic study. Look at the reasoning to see if sub-claims share \
 a common evidence base.
 
-CONFLICTING NUANCES — synthesize, don't concatenate:
-Sub-claims may have nuance notes that point in different directions. Your \
+CONFLICTING CONTEXT — synthesize, don't concatenate:
+Sub-claims may have reasoning that points in different directions. Your \
 job is to synthesize these into a coherent overall picture, not just list \
 them all. If one sub-claim says "the number is exaggerated" and another \
 says "the pattern is real," weave these into: "The specific figures are \
@@ -1137,16 +1122,12 @@ Verdict scale:
 The overall confidence should reflect the weakest link — if one sub-claim \
 is very uncertain, your overall confidence should be lower.
 
-NUANCE:
-Sub-claims may include nuance notes (e.g., "this is hyperbolic but the \
-underlying point is valid"). When synthesizing, weave these into an overall \
-nuance note that gives the reader the REAL story. The nuance should feel \
+CONTEXTUAL REASONING:
+Sub-claims may include important context (e.g., "this is hyperbolic but the \
+underlying point is valid"). When synthesizing, weave these into your overall \
+reasoning that gives the reader the REAL story. The reasoning should feel \
 like a knowledgeable friend explaining: "Look, the specific claim is wrong, \
 but here's what's actually true..."
-
-If any sub-claim has important nuance, you MUST include an overall nuance \
-field. If no sub-claims have nuance and the verdict is straightforward, \
-set nuance to null.
 
 Confidence scoring (USE THE FULL RANGE):
 - 0.95-1.0 — All sub-claims have rock-solid verdicts. Reserve for slam-dunks.
@@ -1167,8 +1148,7 @@ Return a JSON object:
 {{
   "verdict": "true|mostly_true|mixed|mostly_false|false|unverifiable",
   "confidence": 0.0 to 1.0,
-  "reasoning": "Brief summary of how the sub-verdicts combine",
-  "nuance": "Overall context note synthesizing sub-claim nuances. Null if not needed."
+  "reasoning": "Explain how the sub-verdicts combine to reach this verdict. Include any important context or caveats that affect interpretation."
 }}
 
 Return ONLY the JSON object. No markdown, no explanation, no wrapping.\
@@ -1182,7 +1162,7 @@ Combine these sub-claim verdicts into a single verdict.
 Sub-claim verdicts:
 {sub_verdicts_text}
 
-Return a JSON object with "verdict", "confidence", "reasoning", and "nuance".\
+Return a JSON object with "verdict", "confidence", and "reasoning".\
 """
 
 # Why a unified synthesis prompt?
@@ -1194,11 +1174,11 @@ Return a JSON object with "verdict", "confidence", "reasoning", and "nuance".\
 #
 #   The activity formats {synthesis_context} and {synthesis_framing} based
 #   on whether it's a final or intermediate synthesis. The core reasoning
-#   (importance weighting, confidence scoring, nuance) is identical.
+#   (importance weighting, confidence scoring, contextual explanation) is identical.
 #
 # Why the full 6-level scale at every level?
 #   The old approach used 4 levels (true/false/partially_true/unverifiable)
 #   for intermediate nodes and 6 for final. This lost expressiveness — an
 #   intermediate node couldn't distinguish "mostly true with minor issues"
-#   from "genuinely mixed." Now every level uses the same scale, so nuance
+#   from "genuinely mixed." Now every level uses the same scale, so context
 #   is preserved as it flows up the tree.

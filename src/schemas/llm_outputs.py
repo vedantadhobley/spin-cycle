@@ -141,11 +141,7 @@ class JudgeOutput(BaseModel):
     )
     reasoning: str = Field(
         ...,
-        description="Explanation of how the evidence supports the verdict"
-    )
-    nuance: Optional[str] = Field(
-        default=None,
-        description="Optional context note (hyperbole, missing context, etc.)"
+        description="Explanation of how the evidence supports the verdict, including any important context"
     )
 
     @field_validator("confidence")
@@ -195,11 +191,7 @@ class SynthesizeOutput(BaseModel):
     )
     reasoning: str = Field(
         ...,
-        description="Summary of how the sub-verdicts combine"
-    )
-    nuance: Optional[str] = Field(
-        default=None,
-        description="Overall context note synthesizing sub-claim nuances"
+        description="Explanation of how the sub-verdicts combine, including any important context"
     )
 
     @field_validator("confidence")

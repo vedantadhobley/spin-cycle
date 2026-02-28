@@ -66,7 +66,6 @@ def _build_sub_claim_tree(sub_claims) -> list[SubClaimResponse]:
             verdict=sc.verdict,
             confidence=sc.confidence,
             reasoning=sc.reasoning,
-            nuance=sc.nuance,
             evidence_count=len(sc.evidence) if sc.evidence else 0,
             children=[],
         )
@@ -181,7 +180,6 @@ async def get_claim(
         verdict=claim.verdict.verdict if claim.verdict else None,
         confidence=claim.verdict.confidence if claim.verdict else None,
         reasoning=claim.verdict.reasoning if claim.verdict else None,
-        nuance=claim.verdict.nuance if claim.verdict else None,
         sub_claims=sub_claim_responses,
         created_at=claim.created_at,
         updated_at=claim.updated_at,
@@ -225,7 +223,6 @@ async def list_claims(
                 verdict=c.verdict.verdict if c.verdict else None,
                 confidence=c.verdict.confidence if c.verdict else None,
                 reasoning=c.verdict.reasoning if c.verdict else None,
-                nuance=c.verdict.nuance if c.verdict else None,
                 sub_claims=_build_sub_claim_tree(c.sub_claims),
                 created_at=c.created_at,
                 updated_at=c.updated_at,

@@ -508,7 +508,6 @@ async def judge_subclaim(
         verdict = output.verdict
         confidence = output.confidence
         reasoning = output.reasoning
-        nuance = output.nuance
         
     except LLMInvocationError as e:
         log.warning(activity.logger, "judge", "invocation_failed",
@@ -517,23 +516,19 @@ async def judge_subclaim(
         verdict = "unverifiable"
         confidence = 0.0
         reasoning = f"Failed to parse LLM judgment after {e.attempts} attempts"
-        nuance = None
 
-    # Clean up reasoning and nuance text using LanguageTool
+    # Clean up reasoning text using LanguageTool
     # This catches grammar oddities from quantized model outputs
     reasoning = cleanup_text(reasoning)
-    nuance = cleanup_text(nuance)
 
     log.info(activity.logger, "judge", "done", "Sub-claim judged",
-             sub_claim=sub_claim, verdict=verdict, confidence=confidence,
-             nuance=nuance if nuance else None)
+             sub_claim=sub_claim, verdict=verdict, confidence=confidence)
 
     return {
         "sub_claim": sub_claim,
         "verdict": verdict,
         "confidence": confidence,
         "reasoning": reasoning,
-        "nuance": nuance,
         "evidence": evidence,
     }
 
@@ -568,8 +563,6 @@ async def synthesize_verdict(
             f"    Confidence: {sub['confidence']}\n"
             f"    Reasoning: {sub['reasoning']}"
         )
-        if sub.get("nuance"):
-            part += f"\n    Nuance: {sub['nuance']}"
         sub_verdict_parts.append(part)
     sub_verdicts_text = "\n\n".join(sub_verdict_parts)
 
@@ -620,7 +613,6 @@ async def synthesize_verdict(
         verdict = output.verdict
         confidence = output.confidence
         reasoning = output.reasoning
-        nuance = output.nuance
         
     except LLMInvocationError as e:
         log.warning(activity.logger, "synthesize", "invocation_failed",
@@ -629,12 +621,10 @@ async def synthesize_verdict(
         verdict = "unverifiable"
         confidence = 0.0
         reasoning = f"Failed to synthesize verdict after {e.attempts} attempts"
-        nuance = None
 
-    # Clean up reasoning and nuance text using LanguageTool
+    # Clean up reasoning text using LanguageTool
     # This catches grammar oddities from quantized model outputs
     reasoning = cleanup_text(reasoning)
-    nuance = cleanup_text(nuance)
 
     log.info(activity.logger, "synthesize", "done", "Verdict synthesized",
              node=node_text, is_final=is_final, verdict=verdict,
@@ -645,7 +635,6 @@ async def synthesize_verdict(
         "verdict": verdict,
         "confidence": confidence,
         "reasoning": reasoning,
-        "nuance": nuance,
         "evidence": [],
         "child_results": child_results,
         "reasoning_chain": (
@@ -696,7 +685,6 @@ async def store_result(claim_id: str, result: dict) -> None:
                     verdict=sub.get("verdict"),
                     confidence=sub.get("confidence"),
                     reasoning=sub.get("reasoning"),
-                    nuance=sub.get("nuance"),
                 )
                 session.add(sub_claim)
                 await session.flush()  # get sub_claim.id
@@ -737,7 +725,6 @@ async def store_result(claim_id: str, result: dict) -> None:
                 confidence=result.get("confidence", 0.0),
                 reasoning=result.get("reasoning"),
                 reasoning_chain=result.get("reasoning_chain"),
-                nuance=result.get("nuance"),
             )
             session.add(verdict_row)
 

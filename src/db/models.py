@@ -47,7 +47,6 @@ class SubClaim(Base):
     )
     confidence = Column(Float, nullable=True)
     reasoning = Column(Text, nullable=True)
-    nuance = Column(Text, nullable=True)
 
     claim = relationship("Claim", back_populates="sub_claims")
     parent = relationship("SubClaim", remote_side="SubClaim.id", backref="children")
@@ -83,7 +82,6 @@ class Verdict(Base):
     confidence = Column(Float, nullable=False)
     reasoning = Column(Text, nullable=True)
     reasoning_chain = Column(JSONB, nullable=True)
-    nuance = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     claim = relationship("Claim", back_populates="verdict")
