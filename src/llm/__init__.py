@@ -59,21 +59,6 @@ from src.llm.validators import (
     synthesize_validator,
 )
 
-# Placeholder handling
-from src.llm.placeholders import (
-    ENTITY_PLACEHOLDER,
-    VALUE_PLACEHOLDER,
-    NON_COMPLIANT_PATTERNS,
-    count_entity_placeholders,
-    has_entity_placeholder,
-    find_non_compliant,
-    has_non_compliant,
-    normalize_non_compliant,
-    cleanup_leftover_braces,
-    expand_template,
-    expand_predicate,
-)
-
 __all__ = [
     # Client
     "get_llm",
@@ -95,16 +80,4 @@ __all__ = [
     "decompose_validator",
     "judge_validator",
     "synthesize_validator",
-    # Placeholders
-    "ENTITY_PLACEHOLDER",
-    "VALUE_PLACEHOLDER",
-    "NON_COMPLIANT_PATTERNS",
-    "count_entity_placeholders",
-    "has_entity_placeholder",
-    "find_non_compliant",
-    "has_non_compliant",
-    "normalize_non_compliant",
-    "cleanup_leftover_braces",
-    "expand_template",
-    "expand_predicate",
 ]

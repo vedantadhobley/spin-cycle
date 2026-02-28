@@ -5,19 +5,13 @@ Schema validation ensures the JSON has the right shape.
 Semantic validation ensures the content makes sense.
 
 Examples:
-- Decompose: At least one predicate or comparison must exist
-- Decompose: No predicate should have multiple {entity} placeholders
+- Decompose: At least one fact must exist
 - Judge: Verdict must be one of the valid values
 - Judge: Confidence and verdict should be consistent
 """
 
 from typing import Callable, Tuple
 
-from src.llm.placeholders import (
-    count_entity_placeholders,
-    has_entity_placeholder,
-    find_non_compliant,
-)
 from src.schemas.llm_outputs import (
     DecomposeOutput,
     JudgeOutput,
@@ -36,9 +30,8 @@ def validate_decompose(output: DecomposeOutput) -> tuple[bool, str]:
     """Validate decompose output semantically.
     
     Checks:
-    1. Has at least one predicate or comparison (not empty)
-    2. No predicate uses {entity} more than once
-    3. All predicates have at least one entity in applies_to
+    1. Has at least one fact (not empty)
+    2. Facts are non-trivial (not just whitespace)
     
     Args:
         output: The decompose output to validate
@@ -47,31 +40,13 @@ def validate_decompose(output: DecomposeOutput) -> tuple[bool, str]:
         (is_valid, error_message) tuple
     """
     # Check 1: Not empty
-    if not output.predicates and not output.comparisons:
-        return False, "Decomposition produced no predicates or comparisons"
+    if not output.facts:
+        return False, "Decomposition produced no facts"
     
-    # Check 2: No double {entity} in predicates (uses centralized placeholder logic)
-    for i, pred in enumerate(output.predicates):
-        entity_count = count_entity_placeholders(pred.claim)
-        if entity_count > 1:
-            log.warning(logger, MODULE, "double_entity",
-                       f"Predicate {i} has multiple {{entity}} placeholders",
-                       predicate=pred.claim)
-            # Don't fail — the code-level safeguard handles this
-        
-        # Check for non-compliant placeholders (target_entity, etc.)
-        non_compliant = find_non_compliant(pred.claim)
-        if non_compliant:
-            log.warning(logger, MODULE, "non_compliant_placeholder",
-                       f"Predicate {i} uses non-compliant placeholder '{non_compliant}'",
-                       predicate=pred.claim)
-            # Don't fail — the expansion code handles this
-    
-    # Check 3: Predicates have applies_to
-    for i, pred in enumerate(output.predicates):
-        if has_entity_placeholder(pred.claim):
-            if not pred.applies_to:
-                return False, f"Predicate {i} uses {{entity}} but has empty applies_to"
+    # Check 2: Facts are non-trivial
+    non_empty_facts = [f for f in output.facts if f and f.strip()]
+    if not non_empty_facts:
+        return False, "All facts are empty or whitespace"
     
     return True, ""
 

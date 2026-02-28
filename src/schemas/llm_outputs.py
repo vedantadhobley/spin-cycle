@@ -11,12 +11,7 @@ Benefits:
 """
 
 from typing import Literal, Optional, Union
-import re
 from pydantic import BaseModel, Field, field_validator, model_validator
-
-# Can't import from src.llm.placeholders due to circular import
-# Inline the simple regex pattern here
-_ENTITY_PATTERN = re.compile(r'\{+entity\}+', re.IGNORECASE)
 
 
 # =============================================================================
@@ -83,56 +78,11 @@ class InterestedParties(BaseModel):
         return cls()
 
 
-class PredicateApplyTo(BaseModel):
-    """Detailed form of an entity in applies_to, with optional value."""
-    entity: str
-    value: str = ""
-
-
-class Predicate(BaseModel):
-    """A predicate template that applies to one or more entities.
-    
-    The claim template uses {entity} as a placeholder that gets replaced
-    with each entry in applies_to during expansion.
-    """
-    claim: str = Field(
-        ...,
-        description="Claim template with {entity} placeholder (use at most ONCE)"
-    )
-    applies_to: list[Union[str, PredicateApplyTo]] = Field(
-        default_factory=list,
-        description="Entities this predicate applies to"
-    )
-    type: Optional[str] = Field(
-        default=None,
-        description="Special type: causal, negation, superlative, etc."
-    )
-
-    @field_validator("claim")
-    @classmethod
-    def warn_multiple_entity_placeholders(cls, v: str) -> str:
-        """Check for multiple {entity} placeholders (common LLM mistake)."""
-        count = len(_ENTITY_PATTERN.findall(v))
-        if count > 1:
-            # Don't reject — the code-level safeguard handles this
-            # But we could log a warning here in the future
-            pass
-        return v
-
-
-class Comparison(BaseModel):
-    """A comparison between entities (kept as single fact, not split)."""
-    claim: str = Field(
-        ...,
-        description="Direct comparison statement (e.g., 'A spends more than B')"
-    )
-
-
 class DecomposeOutput(BaseModel):
     """Output from the decompose_claim activity.
     
-    Contains structured representation of a claim that will be expanded
-    into atomic verifiable facts.
+    Contains a flat list of atomic verifiable facts plus metadata for synthesis.
+    This simplified format matches standard fact-checking approaches (SAFE, FActScore).
     """
     thesis: Optional[str] = Field(
         default=None,
@@ -146,21 +96,13 @@ class DecomposeOutput(BaseModel):
         default="simple",
         description="Claim structure type"
     )
-    entities: list[str] = Field(
-        default_factory=list,
-        description="All distinct subjects mentioned in the claim"
-    )
     interested_parties: InterestedParties = Field(
         default_factory=InterestedParties,
         description="Entities with potential conflicts of interest"
     )
-    predicates: list[Predicate] = Field(
+    facts: list[str] = Field(
         default_factory=list,
-        description="Predicate templates to expand with entities"
-    )
-    comparisons: list[Comparison] = Field(
-        default_factory=list,
-        description="Direct comparisons (kept as single facts)"
+        description="Flat list of atomic verifiable facts"
     )
 
     @model_validator(mode="before")
@@ -175,7 +117,7 @@ class DecomposeOutput(BaseModel):
 
     def has_content(self) -> bool:
         """Check if decomposition produced any verifiable content."""
-        return bool(self.predicates or self.comparisons)
+        return bool(self.facts)
 
 
 # =============================================================================

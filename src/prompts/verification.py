@@ -313,320 +313,40 @@ counter-evidence to look for.
 # =============================================================================
 
 DECOMPOSE_SYSTEM = """\
-You are a fact-checker's assistant. Your job is to extract a STRUCTURED \
-representation of all verifiable claims, ensuring NOTHING is missed.
+You are a fact-checker's assistant. Your job is to extract ALL verifiable \
+atomic facts from a claim, ensuring NOTHING is missed.
 
-Instead of listing facts directly, you will extract:
-1. ENTITIES — the subjects being discussed (people, countries, orgs)
-2. PREDICATES — what is being claimed about those entities
-3. For each predicate, WHICH entities it applies to
+OUTPUT FORMAT:
+You will return a flat list of atomic facts (strings), plus metadata for synthesis.
 
-This structured approach ensures completeness: when a claim says "both X \
-and Y do Z", you explicitly mark Z as applying to BOTH X and Y. The system \
-will then programmatically expand to verify each combination.
+WHAT IS AN ATOMIC FACT?
+An atomic fact is a single, specific, independently verifiable statement.
+- ONE subject, ONE predicate, ONE object/value
+- No conjunctions (split "X and Y" into two facts)
+- No conditionals in the fact itself (but note if the claim was conditional)
 
-STRUCTURE RULES:
+EXTRACTION RULES:
 
-1. ENTITIES: List all distinct subjects mentioned in the claim.
-   - Countries, people, organizations, etc.
-   - If "both" or "all" is used, list each entity separately.
+1. EXPAND ALL PARALLEL STRUCTURES:
+   "Both X and Y do Z" → ["X does Z", "Y does Z"]
+   "X is doing A, B, and C" → ["X is doing A", "X is doing B", "X is doing C"]
 
-2. PREDICATES: Each distinct checkable assertion.
-   - Use a template with {{entity}} placeholder where the subject goes
-   - CRITICAL: Use EXACTLY {{entity}} as the placeholder — nothing else!
-     Do NOT use: target_entity, other_entity, entity1, entity2, {{subject}}, etc.
-     ONLY use: {{entity}}
-   - CRITICAL: Use {{entity}} at MOST ONCE per predicate template!
-     If a predicate describes a relationship between TWO different entities, \
-write it with the specific entities, NOT as a template.
-     WRONG: "{{entity}} has intent to destroy {{entity}}" → expands to nonsense
-     WRONG: "{{entity}} funds target_entity" → target_entity won't expand
-     RIGHT: "Entity A has intent to destroy Entity B" → specific fact
-     RIGHT: "{{entity}} funds Israeli healthcare" → entity is replaced, Israel stays
-   - For entity-specific values (amounts, dates), use the detailed format
-   - Keep comparisons as separate predicate type
+2. PRESERVE EXACT QUANTITIES AND VALUES:
+   Don't paraphrase "$800 billion" as "large amount"
+   Keep exact dates, numbers, and names
 
-3. APPLIES_TO: Which entities this predicate applies to.
-   - Simple form: ["Country A", "Country B"] — predicate applies identically to both
-   - Detailed form: [{{"entity": "Country A", "value": "over $X"}}] — for entity-specific values
+3. EXTRACT HIDDEN PRESUPPOSITIONS:
+   See the linguistic patterns below for triggers like "stopped", "again", "started"
+   "He stopped lying" → ["He was lying before", "He is no longer lying"]
 
-4. COMPARISONS: Claims that compare entities (keep as single facts, don't split)
-   - "Country A spends more than Country B" → one comparison, not two separate facts
+4. INCLUDE FALSIFYING CONDITIONS:
+   What would disprove the claim? Add that as a fact to check.
+   "X is the only Y" → also check "No other entity qualifies as Y"
 
 LINGUISTIC PATTERNS:
 The full linguistic pattern taxonomy (presuppositions, quantifiers, modality, \
 causation, negation, etc.) is appended below. Use those patterns to detect \
 and properly decompose complex claim structures.
-
-CRITICAL — key_test VALIDATION:
-The key_test field describes what must be true for the thesis to hold. \
-After expansion, EVERY element mentioned in key_test MUST have a corresponding \
-fact. If your key_test says "both must do X", make sure "X" appears in \
-predicates with applies_to including BOTH entities.
-
-FALSIFYING CONDITIONS — Think adversarially:
-Also consider: what would DISPROVE this thesis? If the speaker claims \
-"both countries are cutting aid" and one is INCREASING aid, the thesis \
-fails. Include a "falsifies_if" note in key_test when useful.
-
-EXAMPLES:
-
-Simple claim (one entity, one predicate):
-"NASA landed on the moon 6 times"
-→ {{
-  "thesis": "NASA successfully completed multiple moon landings",
-  "key_test": "NASA must have landed on the moon 6 times",
-  "structure": "simple",
-  "entities": ["NASA"],
-  "predicates": [
-    {{"claim": "{{entity}} landed on the moon 6 times", "applies_to": ["NASA"]}}
-  ],
-  "comparisons": []
-}}
-
-Comparison claim:
-"Country A spends more on military than Country B"
-→ {{
-  "thesis": "Country A's military spending exceeds Country B's",
-  "key_test": "Country A's military spending must be greater than Country B's",
-  "structure": "ranking",
-  "entities": ["Country A", "Country B"],
-  "predicates": [],
-  "comparisons": [
-    {{"claim": "Country A's military spending is greater than Country B's military spending"}}
-  ]
-}}
-
-Parallel claim (multiple entities, shared predicates):
-"Country A and Country B are both increasing military spending while cutting \
-foreign aid"
-→ {{
-  "thesis": "Both major powers prioritize military over foreign aid",
-  "key_test": "Both Country A and Country B must be increasing military spending AND \
-both must be cutting foreign aid",
-  "structure": "parallel_comparison",
-  "entities": ["Country A", "Country B"],
-  "predicates": [
-    {{"claim": "{{entity}} is increasing its military spending", "applies_to": ["Country A", "Country B"]}},
-    {{"claim": "{{entity}} is cutting its foreign aid budget", "applies_to": ["Country A", "Country B"]}}
-  ],
-  "comparisons": []
-}}
-
-Entity-specific values:
-"Country A spends over $800B on military, Country B spends about $200B"
-→ {{
-  "thesis": "Country A vastly outspends Country B on military",
-  "key_test": "Country A must spend ~$800B and Country B ~$200B on military",
-  "structure": "parallel_comparison",
-  "entities": ["Country A", "Country B"],
-  "predicates": [
-    {{
-      "claim": "{{entity}} spends {{value}} on its military",
-      "applies_to": [
-        {{"entity": "Country A", "value": "over $800 billion"}},
-        {{"entity": "Country B", "value": "about $200 billion"}}
-      ]
-    }}
-  ],
-  "comparisons": [
-    {{"claim": "Country A's military spending is greater than Country B's military spending"}}
-  ]
-}}
-
-Attributed claim:
-"A politician claimed gas prices are below $2.30 in most states"
-→ {{
-  "thesis": "Gas prices have fallen to low levels across the country",
-  "key_test": "Gas prices must actually be below $2.30 in most states",
-  "structure": "simple",
-  "entities": ["Politician P", "the country"],
-  "predicates": [
-    {{"claim": "{{entity}} claimed gas prices are below $2.30 in most states", "applies_to": ["Politician P"]}},
-    {{"claim": "Gas prices are below $2.30 per gallon in most {{entity}} states", "applies_to": ["the country"]}}
-  ],
-  "comparisons": []
-}}
-Note: The SUBSTANCE claim (gas prices ARE X) is the real test. Attribution \
-is secondary.
-
-Complex claim combining all patterns:
-"Country A spends over $800B on its military, more than Country B which spends \
-about $200B. Both countries are increasing their military spending \
-while cutting their foreign aid budgets."
-→ {{
-  "thesis": "Country A and Country B both prioritize military expansion over foreign aid, \
-with Country A spending far more",
-  "key_test": "Country A ~$800B and Country B ~$200B military spending, A > B, \
-AND both must be increasing military AND both must be cutting foreign aid. \
-Falsifies if: either country is increasing aid, or spending figures are >50% off.",
-  "structure": "parallel_comparison",
-  "entities": ["Country A", "Country B"],
-  "predicates": [
-    {{
-      "claim": "{{entity}} spends {{value}} on its military",
-      "applies_to": [
-        {{"entity": "Country A", "value": "over $800 billion"}},
-        {{"entity": "Country B", "value": "about $200 billion"}}
-      ]
-    }},
-    {{"claim": "{{entity}} is increasing its military spending", "applies_to": ["Country A", "Country B"]}},
-    {{"claim": "{{entity}} is cutting its foreign aid budget", "applies_to": ["Country A", "Country B"]}}
-  ],
-  "comparisons": [
-    {{"claim": "Country A's military spending is greater than Country B's military spending"}}
-  ]
-}}
-
-Temporal claim:
-"Official X fired Agency Director Y after the investigation began"
-→ {{
-  "thesis": "The firing occurred in response to an ongoing investigation",
-  "key_test": "The director was fired AND the investigation had already \
-started before the firing date. Falsifies if: firing preceded investigation.",
-  "structure": "temporal_sequence",
-  "entities": ["Official X", "Agency Director Y"],
-  "predicates": [
-    {{"claim": "{{entity}} fired Agency Director Y", "applies_to": ["Official X"]}},
-    {{"claim": "An investigation was ongoing at the time of the firing", "applies_to": ["Agency Director Y"]}},
-    {{"claim": "The firing occurred AFTER the investigation began", "type": "temporal"}}
-  ],
-  "comparisons": []
-}}
-
-Causal claim:
-"The tax cuts caused record job growth"
-→ {{
-  "thesis": "Tax policy directly produced employment gains",
-  "key_test": "Tax cuts happened AND job growth occurred AND there is \
-evidence of causal link (not just correlation). Falsifies if: job growth \
-preceded tax cuts, or other factors better explain growth.",
-  "structure": "causal",
-  "entities": ["tax cuts", "job growth"],
-  "predicates": [
-    {{"claim": "Tax cuts were implemented", "applies_to": ["tax cuts"]}},
-    {{"claim": "Record job growth occurred", "applies_to": ["job growth"]}},
-    {{"claim": "The tax cuts caused the job growth", "type": "causal"}}
-  ],
-  "comparisons": []
-}}
-Note: CAUSAL claims require evidence of mechanism, not just temporal coincidence.
-
-Superlative claim:
-"Country X is the only democracy in the region"
-→ {{
-  "thesis": "Country X uniquely holds democratic status in its region",
-  "key_test": "Country X must be a democracy AND no other country in the \
-region qualifies as a democracy. Falsifies if: any other regional country \
-is also a democracy (by reasonable definition).",
-  "structure": "superlative",
-  "entities": ["Country X", "the region"],
-  "predicates": [
-    {{"claim": "{{entity}} is a democracy", "applies_to": ["Country X"]}},
-    {{"claim": "No other country in the region is a democracy", "type": "superlative"}}
-  ],
-  "comparisons": []
-}}
-Note: SUPERLATIVE claims require exhaustive verification. One counterexample = false.
-
-Negation claim:
-"The facility has never been independently audited"
-→ {{
-  "thesis": "No external audit of the facility has ever occurred",
-  "key_test": "There must be no record of any independent audit ever \
-occurring. Falsifies if: even ONE independent audit is documented.",
-  "structure": "negation",
-  "entities": ["the facility"],
-  "predicates": [
-    {{"claim": "{{entity}} has never had an independent audit", "type": "negation", "applies_to": ["the facility"]}}
-  ],
-  "comparisons": []
-}}
-Note: NEGATION claims are hard to verify — must prove absence. One counterexample disproves.
-
-Mixed normative/factual claim:
-"The unjust embargo has lasted over 60 years"
-→ {{
-  "thesis": "A long-standing embargo exists (with speaker's value judgment attached)",
-  "key_test": "An embargo must exist AND it must have lasted 60+ years. \
-NOTE: 'unjust' is a normative judgment — we verify facts, not opinions.",
-  "structure": "simple",
-  "entities": ["the embargo"],
-  "predicates": [
-    {{"claim": "{{entity}} has lasted over 60 years", "applies_to": ["the embargo"]}},
-    {{"claim": "The embargo is unjust", "type": "normative", "applies_to": ["the embargo"], \
-"note": "OPINION — cannot be fact-checked"}}
-  ],
-  "comparisons": []
-}}
-Note: Normative claims (should/ought/right/wrong) are flagged but not verified.
-
-TEMPORAL FRAMING claim (CRITICAL — "since [date]" pattern):
-"Military operations in region R since [year] have been defensive"
-→ {{
-  "thesis": "Recent military operations are defensive in nature",
-  "key_test": "Operations since [year] must exist AND must be defensive. \
-CRITICAL: The 'since [year]' framing MUST also be tested — if major operations \
-occurred BEFORE [year], the framing is misleading and hides context.",
-  "structure": "temporal_sequence",
-  "entities": ["military operations", "region R"],
-  "predicates": [
-    {{"claim": "Military operations have occurred in region R since [year]", "applies_to": ["military operations"]}},
-    {{"claim": "The military operations since [year] have been defensive", "applies_to": ["military operations"]}},
-    {{"claim": "Military operations in region R have significant precedent BEFORE [year]", \
-"type": "temporal_context", "applies_to": ["region R"], \
-"note": "MANDATORY — tests if 'since [year]' hides prior history"}}
-  ],
-  "comparisons": []
-}}
-Note: ANY claim with "since [date]" MUST include a predicate checking for prior history. \
-If evidence shows major prior events, the judge flags the timeframe as misleading.
-
-Accusation/misconduct claim:
-"The Agency Director lied under oath about the investigation findings"
-→ {{
-  "thesis": "A government official committed perjury regarding investigation results",
-  "key_test": "The Director must have testified under oath AND the testimony \
-must be demonstrably false. Falsifies if: testimony was accurate, or \
-not under oath.",
-  "structure": "complex_attribution",
-  "entities": ["Agency Director", "the investigation"],
-  "interested_parties": {{
-    "direct": ["Agency A", "Parent Department"],
-    "institutional": ["Executive Branch", "Current Administration"],
-    "affiliated_media": [],
-    "reasoning": "Agency Director is an agency employee; Agency A reports to \
-Parent Department; both are Executive Branch. All have institutional interest \
-in defending official conduct."
-  }},
-  "predicates": [
-    {{"claim": "{{entity}} testified under oath", "applies_to": ["Agency Director"]}},
-    {{"claim": "{{entity}} made specific claims about investigation findings", "applies_to": ["Agency Director"]}},
-    {{"claim": "The testimony was false", "type": "requires_independent_verification"}}
-  ],
-  "comparisons": []
-}}
-
-Corporate misconduct claim:
-"Company X's warehouse conditions violate worker safety laws"
-→ interested_parties: {{
-  "direct": ["Company X", "Company X CEO"],
-  "institutional": ["Company X subsidiaries", "Company X shareholders"],
-  "affiliated_media": ["Newspaper N"],
-  "reasoning": "Company X is direct subject. The CEO owns both Company X and \
-Newspaper N — that outlet's coverage is NOT independent. Shareholders \
-have financial stake in claim being false."
-}}
-
-Police misconduct claim:
-"Officers used excessive force during the arrest"
-→ interested_parties: {{
-  "direct": ["the officers", "their police department"],
-  "institutional": ["city government", "police union"],
-  "affiliated_media": [],
-  "reasoning": "Police are government employees. Their department, union, and \
-city government all have institutional interest in defending conduct."
-}}
 
 INTERESTED_PARTIES — COMPREHENSIVE ANALYSIS:
 
@@ -637,121 +357,115 @@ themselves. Think through ALL levels:
 1. DIRECT: The immediate subject of the claim
    - Named person → their organization
    - Organization → that organization
-   - "Agency Director Jane Doe" → Agency A, Jane Doe personally
 
 2. INSTITUTIONAL: Parent/governing organizations
    - Agency A → Parent Department → Executive Branch
    - Police dept → City government → State government
    - Subsidiary Corp → Parent Corp → Holding Company
-   - University → State education system (if public)
 
 3. AFFILIATED MEDIA: News outlets with ownership/financial ties
    - Company X → Newspaper N (if same owner)
-   - Media Conglomerate M → all its subsidiary outlets
    - If a billionaire owns both the subject company AND a media outlet, \
 that outlet cannot independently verify claims about the company
-   - Major advertisers can also create conflicts (if Company X is 30% of \
-a publication's ad revenue, that publication has financial interest)
 
 4. REASONING: Explain WHY each party has stake
    - This forces explicit thinking about relationships
    - Helps the judge understand the conflict
 
-The system will FLAG evidence from interested parties and their affiliated \
-media. If a news outlet is owned by the same person who owns the company \
-being discussed, that coverage is NOT independent verification. A government \
-agency's statement that it did nothing wrong is NOT evidence of innocence.
+EXAMPLES:
 
-Return a JSON object with these fields:
-{{
-  "thesis": "One sentence: what is the speaker fundamentally arguing?",
-  "key_test": "What must ALL be true for the thesis to hold? Include falsifying conditions.",
-  "structure": "simple | parallel_comparison | causal | ranking | temporal_sequence | superlative | negation | complex_attribution",
-  "entities": ["entity1", "entity2", ...],
-  "interested_parties": {{
-    "direct": ["org1", "org2"],
-    "institutional": ["parent_org1", "gov_body"],
-    "affiliated_media": ["outlet1", "outlet2"],
-    "reasoning": "Explanation of relationships"
-  }},
-  "predicates": [
-    {{"claim": "template with {{entity}}", "applies_to": ["entity1", "entity2"]}}
-  ],
-  "comparisons": [
-    {{"claim": "direct comparison statement"}}
+Simple claim:
+"NASA landed on the moon 6 times"
+→ {{
+  "thesis": "NASA successfully completed multiple moon landings",
+  "key_test": "NASA must have landed on the moon 6 times",
+  "structure": "simple",
+  "interested_parties": {{"direct": ["NASA"], "institutional": ["US Government"], "affiliated_media": [], "reasoning": "NASA is the subject; US Government is parent organization"}},
+  "facts": [
+    "NASA landed on the moon 6 times"
   ]
 }}
 
-IMPORTANT: Think through ownership chains and institutional hierarchies. \
-If a billionaire is the subject, their companies and media holdings are affiliated. \
-If a major corporation is the subject, check if its owners control any media outlets. \
-If a politician is the subject, their party and donors are interested parties.
+Parallel claim:
+"Country A and Country B are both increasing military spending while cutting foreign aid"
+→ {{
+  "thesis": "Both major powers prioritize military over foreign aid",
+  "key_test": "Both countries must be increasing military spending AND cutting foreign aid",
+  "structure": "parallel_comparison",
+  "interested_parties": {{"direct": ["Country A", "Country B"], "institutional": [], "affiliated_media": [], "reasoning": "Both countries are subjects of the claim"}},
+  "facts": [
+    "Country A is increasing its military spending",
+    "Country B is increasing its military spending",
+    "Country A is cutting its foreign aid budget",
+    "Country B is cutting its foreign aid budget"
+  ]
+}}
+
+Temporal/origin claim (CRITICAL — presupposition extraction):
+"Israel started operations in Gaza due to the October 7th attack"
+→ {{
+  "thesis": "Israel initiated military operations in Gaza specifically in response to October 7th, implying no significant prior operations",
+  "key_test": "Must verify post-October 7th operations AND check for significant prior operations",
+  "structure": "temporal_sequence",
+  "interested_parties": {{"direct": ["Israeli military", "IDF"], "institutional": ["Israeli Government", "Israeli Ministry of Defense"], "affiliated_media": ["Israel Hayom", "Jerusalem Post"], "reasoning": "Israeli military and government are subjects; these outlets have close government ties"}},
+  "facts": [
+    "Israel launched military operations in Gaza after the October 7th attack",
+    "The October 7th attack caused Israel to launch operations in Gaza",
+    "Israel had significant military operations in Gaza before the October 7th attack"
+  ]
+}}
+Note: The third fact tests the PRESUPPOSITION. "Started" implies nothing before.
+
+Causal claim:
+"The tax cuts caused record job growth"
+→ {{
+  "thesis": "Tax policy directly produced employment gains",
+  "key_test": "Tax cuts happened AND job growth occurred AND causal link exists",
+  "structure": "causal",
+  "interested_parties": {{"direct": [], "institutional": [], "affiliated_media": [], "reasoning": "No specific interested parties identified"}},
+  "facts": [
+    "Tax cuts were implemented",
+    "Record job growth occurred",
+    "The tax cuts caused the job growth"
+  ]
+}}
+Note: The causal fact requires evidence of mechanism, not just correlation.
+
+Return a JSON object:
+{{
+  "thesis": "One sentence: what is the speaker fundamentally arguing?",
+  "key_test": "What must ALL be true for the thesis to hold?",
+  "structure": "simple | parallel_comparison | causal | ranking | temporal_sequence | superlative | negation",
+  "interested_parties": {{
+    "direct": ["org1", "person1"],
+    "institutional": ["parent_org", "gov_body"],
+    "affiliated_media": ["outlet1"],
+    "reasoning": "Explanation of relationships"
+  }},
+  "facts": [
+    "Atomic fact 1",
+    "Atomic fact 2",
+    "..."
+  ]
+}}
 
 Return ONLY the JSON object. No markdown, no explanation, no wrapping.\
 """
 
 DECOMPOSE_USER = """\
-Extract a STRUCTURED representation of all verifiable claims.
+Extract ALL verifiable atomic facts from this claim.
 
 Claim: {claim_text}
 
 Remember:
-- List ALL entities (subjects) mentioned
-- For EACH predicate, explicitly list which entities it applies to
-- If "both X and Y do Z", mark Z as applying to BOTH X and Y
-- Keep comparisons separate (don't split "A > B" into "A" and "B")
-- For attributed claims ("X said Y"), extract BOTH the attribution AND \
-the substance as separate predicates
-- For TEMPORAL claims ("X after Y"), extract the sequence relationship
-- For CAUSAL claims ("X caused Y"), mark as type: causal — requires mechanism evidence
-- For NEGATION claims ("X never Y"), mark as type: negation — hard to prove absence
-- For SUPERLATIVE claims ("first", "only", "largest"), mark as type: superlative
-- For NORMATIVE claims ("should", "ought", "unjust"), flag as opinions, not facts
-- Include falsifying conditions in key_test: what would DISPROVE the thesis?
+- Expand parallel structures ("both X and Y" → separate facts for X and Y)
+- Extract hidden presuppositions (see linguistic patterns)
+- Include falsifying conditions: what would DISPROVE the thesis?
+- For attributed claims ("X said Y"), extract BOTH the attribution AND the substance
+- Identify interested parties who benefit if this claim is false
 
-CRITICAL — INTERESTED PARTIES (comprehensive analysis):
-Return interested_parties as an OBJECT with:
-  - direct: Organizations immediately involved (Agency A for Agency Director claim)
-  - institutional: Parent/governing bodies (Parent Dept for Agency A, city for police dept)
-  - affiliated_media: News outlets with ownership ties (Newspaper N for Company X if same owner)
-  - reasoning: Brief explanation of relationships
-
-Think through: WHO BENEFITS if this claim is false? Their statements are self-serving.
-- Person named? → Include their organization AND parent organizations
-- Government entity? → Include the broader government structure
-- Corporation? → Include subsidiaries, parent company, AND media they own
-- Billionaire? → Include their companies AND media outlets they own
-
-Return JSON with: thesis, key_test, structure, entities, interested_parties (as object), predicates, comparisons\
+Return JSON with: thesis, key_test, structure, interested_parties, facts\
 """
-
-# Why structured extraction (entities + predicates) instead of direct fact listing?
-#
-#   The direct-listing approach asked the LLM to enumerate facts. Problems:
-#     1. Dropped facts: "Both A and B cutting aid" got 6 facts max,
-#        missing "B cutting aid" even with explicit "BOTH/ALL" rules
-#     2. LLM discretion: the model decided what to include, causing gaps
-#     3. Inconsistency: same claim decomposed differently across runs
-#
-#   The structured approach separates WHAT to verify from HOW MANY:
-#     1. LLM extracts entities and predicate templates
-#     2. For each predicate, LLM marks which entities it applies to
-#     3. Code expands entity × predicate combinations (guaranteed complete)
-#
-# Example:
-#   "Country A and Country B increasing military spending while cutting aid"
-#   LLM extracts:
-#     entities: ["Country A", "Country B"]
-#     predicates: [
-#       {claim: "{entity} is increasing military spending", applies_to: ["Country A", "Country B"]},
-#       {claim: "{entity} is cutting foreign aid", applies_to: ["Country A", "Country B"]}
-#     ]
-#   Code expands to 4 facts:
-#     ["Country A is increasing military spending",
-#      "Country B is increasing military spending",
-#      "Country A is cutting foreign aid",
-#      "Country B is cutting foreign aid"]
-#   — guaranteed complete, no LLM discretion on what to include.
 
 
 # =============================================================================

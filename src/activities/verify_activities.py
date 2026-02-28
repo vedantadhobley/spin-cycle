@@ -45,7 +45,6 @@ from src.prompts.verification import (
     SYNTHESIZE_USER,
 )
 from src.prompts.linguistic_patterns import get_linguistic_patterns
-from src.llm.placeholders import expand_predicate, cleanup_leftover_braces
 from src.schemas.llm_outputs import (
     DecomposeOutput,
     JudgeOutput,
@@ -116,29 +115,22 @@ async def decompose_claim(claim_text: str) -> dict:
             activity_name="decompose",
         )
         
-        # Convert validated output to dict for expansion
-        parsed = output.model_dump()
-        
-        # Expand structured predicates into flat facts
-        facts = _expand_structured(parsed)
+        # Convert facts to dict format
+        facts = [{"text": f.strip()} for f in output.facts if f and f.strip()]
         
         # Build thesis_info from validated output
-        interested_parties_obj = _normalize_interested_parties(parsed.get("interested_parties", {}))
+        interested_parties_obj = _normalize_interested_parties(output.interested_parties)
         thesis_info = {
             "thesis": output.thesis,
             "structure": output.structure,
             "key_test": output.key_test,
-            "entities": output.entities,
             "interested_parties": interested_parties_obj,
         }
         
-        log.info(activity.logger, "decompose", "expanded",
-                 "Structured extraction expanded to facts",
-                 entities=output.entities,
+        log.info(activity.logger, "decompose", "facts_extracted",
+                 "Decomposition complete",
                  interested_parties=interested_parties_obj,
-                 predicate_count=len(output.predicates),
-                 comparison_count=len(output.comparisons),
-                 expanded_fact_count=len(facts))
+                 fact_count=len(facts))
 
     except LLMInvocationError as e:
         # All retries failed — use fallback
@@ -150,7 +142,6 @@ async def decompose_claim(claim_text: str) -> dict:
             "thesis": None,
             "structure": "simple",
             "key_test": None,
-            "entities": [],
             "interested_parties": _normalize_interested_parties([]),
         }
 
@@ -161,79 +152,7 @@ async def decompose_claim(claim_text: str) -> dict:
     return {"facts": facts, "thesis_info": thesis_info}
 
 
-def _expand_structured(parsed: dict) -> list[dict]:
-    """Expand structured extraction (entities × predicates) into flat facts.
-
-    This is the key to ensuring completeness. Instead of relying on the LLM
-    to list every fact, we:
-    1. Get the entities and predicate templates
-    2. Programmatically expand each predicate for each applicable entity
-    3. Add comparisons directly (they're already complete facts)
-
-    Example:
-      entities: ["US", "China"]
-      predicates: [{"claim": "{entity} is cutting aid", "applies_to": ["US", "China"]}]
-    Expands to:
-      ["US is cutting aid", "China is cutting aid"]
-    """
-    facts = []
-    seen = set()  # Deduplicate
-
-    # Expand predicates using centralized placeholder handling
-    for pred in parsed.get("predicates", []):
-        claim_template = pred.get("claim", "")
-        applies_to = pred.get("applies_to", [])
-        
-        # expand_predicate handles:
-        # 1. Non-compliant placeholders (target_entity, other_entity, etc.)
-        # 2. Multiple {entity} placeholders (LLM mistake)
-        # 3. Normal single {entity} expansion
-        # 4. Value substitution for detailed applies_to entries
-        expanded_facts = expand_predicate(claim_template, applies_to)
-        
-        for fact_text in expanded_facts:
-            if fact_text and fact_text not in seen:
-                seen.add(fact_text)
-                facts.append({"text": fact_text})
-
-    # Add comparisons directly (they're already complete facts)
-    for comp in parsed.get("comparisons", []):
-        comp_text = comp.get("claim", "").strip()
-        # Clean up any braces here too
-        comp_text = cleanup_leftover_braces(comp_text)
-        if comp_text and comp_text not in seen:
-            seen.add(comp_text)
-            facts.append({"text": comp_text})
-
-    return facts
-
-
-def _normalize_flat(items: list) -> list[dict]:
-    """Normalize LLM decompose output to a flat list of {"text": "..."} dicts.
-
-    Handles:
-    - Bare strings: "sub-claim" → {"text": "sub-claim"}
-    - Dicts with text: {"text": "sub-claim"} → kept as-is
-    - Groups (legacy): {"label": "...", "children": [...]} → flattened to children
-    """
-    result = []
-    for item in items:
-        if isinstance(item, str):
-            text = item.strip()
-            if text:
-                result.append({"text": text})
-        elif isinstance(item, dict):
-            if "text" in item:
-                text = item["text"].strip() if isinstance(item["text"], str) else ""
-                if text:
-                    result.append({"text": text})
-            elif "label" in item and "children" in item:
-                # Legacy group output — flatten children
-                result.extend(_normalize_flat(item["children"]))
-    return result
-
-
-def _normalize_interested_parties(raw: list | dict) -> dict:
+def _normalize_interested_parties(raw) -> dict:
     """Normalize interested_parties to a consistent structure.
     
     The decomposition now returns interested_parties as an object with:
@@ -242,12 +161,16 @@ def _normalize_interested_parties(raw: list | dict) -> dict:
     - affiliated_media: News outlets with ownership ties
     - reasoning: Brief explanation of relationships
     
-    For backward compatibility, also handles legacy list format.
+    For backward compatibility, also handles legacy list format and InterestedParties objects.
     
     Returns:
         Dict with keys: all_parties (flat list), direct, institutional,
         affiliated_media, reasoning
     """
+    # Handle InterestedParties pydantic model
+    if hasattr(raw, 'model_dump'):
+        raw = raw.model_dump()
+    
     if isinstance(raw, list):
         # Legacy format: just a flat list of party names
         return {

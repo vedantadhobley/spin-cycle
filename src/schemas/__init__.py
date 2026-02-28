@@ -12,8 +12,6 @@ malformed outputs early.
 from src.schemas.llm_outputs import (
     # Decompose
     InterestedParties,
-    Predicate,
-    Comparison,
     DecomposeOutput,
     # Judge
     Verdict,
@@ -33,8 +31,6 @@ from src.schemas.api import (
 __all__ = [
     # LLM outputs
     "InterestedParties",
-    "Predicate",
-    "Comparison", 
     "DecomposeOutput",
     "Verdict",
     "JudgeOutput",
