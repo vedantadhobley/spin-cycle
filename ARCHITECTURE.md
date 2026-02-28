@@ -124,73 +124,92 @@ Thinking mode is toggled per-request via `chat_template_kwargs`, but currently *
 **Why thinking is disabled everywhere:**
 llama.cpp's `--reasoning-budget` flag only supports `-1` (unlimited) or `0` (disabled) — no intermediate values for token limits. The model generates excessive internal monologue before responding. Until llama.cpp adds proper `max_thinking_tokens` support (or we migrate to vLLM which supports it), thinking mode is impractical.
 
-### Step 1: decompose_claim (structured entity-predicate extraction + thesis)
+### Step 1: decompose_claim (flat facts + linguistic patterns + thesis)
 
 **File:** `src/activities/verify_activities.py`
 **Prompt:** `src/prompts/verification.py` → `DECOMPOSE_SYSTEM` / `DECOMPOSE_USER`
+**Patterns:** `src/prompts/linguistic_patterns.py` → 15 canonical linguistic categories
 
-The LLM extracts a **structured representation** of the claim — entities, predicates, and comparisons — which is then **programmatically expanded** into atomic facts. This ensures completeness: when a claim says "both X and Y do Z", we're guaranteed to verify Z for both X and Y.
+The LLM extracts a **flat list of atomic facts** plus **thesis information** that captures the speaker's intent. This approach matches Google SAFE and FActScore — simple, direct fact extraction without template expansion.
 
 ```
 Input:  "The US spends over $800B on military, more than China at $200B. 
          Both countries are increasing military spending while cutting foreign aid."
          
-LLM extracts structured representation:
-{
+Output: {
   "thesis": "US and China both prioritize military over aid, with US spending more",
   "key_test": "US ~$800B, China ~$200B, US > China, AND both must be increasing 
                military AND both must be cutting foreign aid",
   "structure": "parallel_comparison",
-  "entities": ["US", "China"],
-  "predicates": [
-    {"claim": "{entity} spends {value} on its military", 
-     "applies_to": [{"entity": "US", "value": "over $800 billion"}, 
-                    {"entity": "China", "value": "just over $200 billion"}]},
-    {"claim": "{entity} is increasing its military spending", 
-     "applies_to": ["US", "China"]},
-    {"claim": "{entity} is cutting its foreign aid budget", 
-     "applies_to": ["US", "China"]}
+  "facts": [
+    "The US spends over $800 billion on its military",
+    "China spends about $200 billion on its military",
+    "US military spending is greater than China's military spending",
+    "The US is increasing its military spending",
+    "China is increasing its military spending",
+    "The US is cutting its foreign aid budget",
+    "China is cutting its foreign aid budget"
   ],
-  "comparisons": [
-    {"claim": "US military spending is greater than China's military spending"}
-  ]
+  "interested_parties": {
+    "direct": ["US Government", "Chinese Government"],
+    "institutional": ["US Department of Defense", "Chinese Ministry of Defense"],
+    "affiliated_media": [],
+    "reasoning": "Both governments are subjects of the claim"
+  }
 }
-
-Code expands entity × predicate to guarantee completeness:
-[
-  "US spends over $800 billion on its military",
-  "China spends just over $200 billion on its military",
-  "US is increasing its military spending",
-  "China is increasing its military spending",
-  "US is cutting its foreign aid budget",
-  "China is cutting its foreign aid budget",      ← guaranteed to be included!
-  "US military spending is greater than China's"
-]
 ```
 
-**Why structured extraction instead of direct fact listing?**
+**Why flat facts instead of structured templates?**
 
-The old approach asked the LLM to list facts directly. It would drop facts — e.g., extracting 6 facts and missing "China cutting aid" even with explicit "BOTH/ALL" rules. The LLM's discretion was the problem.
+The previous approach used `entities + predicates + applies_to` with `{entity}` placeholder templates that code would expand. This was over-engineered:
+- Added complexity (template parsing, expansion logic)
+- LLM often used wrong placeholder names
+- The standard approach (Google SAFE, FActScore) just outputs a flat list
 
-The new approach:
-1. LLM extracts structure: entities, predicate templates, which entities each applies to
-2. Code expands `entity × predicate` combinations — no LLM discretion
-3. key_test validation ensures completeness
+The current approach:
+1. LLM outputs facts directly as strings — no templates, no expansion
+2. Linguistic patterns module guides decomposition (presuppositions, quantifiers, causation, etc.)
+3. Thesis extraction captures speaker intent for synthesis
 
-The **thesis extraction** captures the speaker's rhetorical intent:
+**Linguistic patterns for decomposition:**
+
+The decompose prompt is augmented with a comprehensive **linguistic pattern taxonomy** (`src/prompts/linguistic_patterns.py`) covering 15 canonical categories from formal semantics:
+
+| Category | What it catches |
+|----------|----------------|
+| **Presupposition Triggers** | "stopped", "started", "again", "still" — hidden assumptions |
+| **Quantifier Scope** | "all" vs "most" vs "some" — different truth conditions |
+| **Modality** | "may", "must", "should" — different claim strengths |
+| **Evidentiality Markers** | "reportedly", "sources say" — hedging and attribution |
+| **Temporal/Aspectual** | "since", "before", "after" — time boundaries |
+| **Causation Types** | "caused", "contributed to" — causal vs correlational |
+| **Comparison/Degree** | "first", "only", "largest" — superlatives need exhaustive verification |
+| **Negation Scope** | "never", "nobody" — proving absence |
+| **Speech Acts** | Assertions vs predictions vs opinions |
+| **Vagueness/Hedging** | "significant", "many", "experts" — undefined terms |
+| **Attribution** | "X said" — verify both attribution AND substance |
+| **Conditionals** | "if X then Y" — may be unverifiable |
+| **Definition/Category** | "X is a Y" — contested definitions |
+| **Generics** | "Politicians lie" — generalizations |
+| **Implicature** | Hidden meaning beyond literal text |
+
+These patterns are appended to `DECOMPOSE_SYSTEM` at runtime, replacing the previous ad-hoc rules.
+
+**The thesis extraction** captures the speaker's rhetorical intent:
 - `thesis` — the argument the speaker is making
 - `structure` — `simple`, `parallel_comparison`, `causal`, or `ranking`
 - `key_test` — what must ALL be true for the thesis to hold
 
 This is passed to the synthesizer so it evaluates whether the speaker's **argument** survives the evidence. Without this, a claim comparing two countries could be rated `mostly_true` if 5 of 6 facts check out — even if the one false fact (e.g., China NOT cutting aid) completely invalidates the speaker's parallel comparison.
 
-**Expansion implementation** (`_expand_structured()` in verify_activities.py):
-- Simple form: `["US", "China"]` → substitute directly into `{entity}` placeholder
-- Detailed form: `[{"entity": "US", "value": "$800B"}]` → substitute both `{entity}` and `{value}`
-- Comparisons pass through directly (already complete facts)
-- Deduplication prevents redundant facts
+**Interested parties extraction:**
 
-The output is normalized via `_expand_structured()` for the new format (entities/predicates/comparisons) or `_normalize_flat()` for legacy formats.
+The decompose step also identifies parties with potential conflicts of interest:
+- `direct`: Entities directly mentioned in the claim
+- `institutional`: Parent organizations, governing bodies
+- `affiliated_media`: Media outlets with ties to interested parties
+
+This information is passed to the judge so evidence from interested parties can be weighted appropriately.
 
 All prompts include `Today's date: {current_date}` (formatted at call time) so the LLM knows the current date when evaluating temporal claims.
 
@@ -280,8 +299,7 @@ Input:  claim_text = "The US and China are both increasing military..."
         }
         is_final = True
 Output: {"verdict": "mostly_false", "confidence": 0.85,
-         "reasoning": "The thesis requires both countries to be cutting foreign aid. China is actually increasing it, which undermines the core argument.",
-         "nuance": "The US part holds — increased military spending and reduced foreign aid. But the parallel comparison fails because China contradicts the thesis."}
+         "reasoning": "The thesis requires both countries to be cutting foreign aid. China is actually increasing it, which undermines the core argument. The US part holds — increased military spending and reduced foreign aid, but the parallel comparison fails because China contradicts the thesis."}
 ```
 
 The thesis is injected as a `SPEAKER'S THESIS` block in the synthesis prompt. The synthesizer is instructed to use the thesis as its **primary rubric** — evaluating whether THAT ARGUMENT survives the sub-verdicts, not whether a numerical majority of facts are true.
@@ -295,7 +313,7 @@ Why use LLM instead of averaging? Because "X happened in 2019 and cost $50M" whe
 Takes the result dict and writes it to Postgres:
 - One `SubClaim` row per atomic fact (all `is_leaf=True` in the flat pipeline)
 - One `Evidence` row per evidence item (source_type, content, URL) — linked to leaf sub-claims
-- One `Verdict` row (overall verdict, confidence, reasoning, nuance)
+- One `Verdict` row (overall verdict, confidence, reasoning)
 - Updates `Claim.status` to "verified"
 
 Evidence records with `source_type` not in the DB enum (`web`, `wikipedia`, `news_api`) are filtered out — the agent_summary doesn't get stored.
@@ -322,10 +340,10 @@ VerifyClaimWorkflow
 ```
 
 Key properties:
-- **Flat, not recursive** — no tree, no recursion, no MAX_DEPTH. One decompose call produces structured extraction + thesis.
-- **Structured expansion** — LLM extracts entities + predicates, code expands `entity × predicate` combinations. Guarantees completeness for "both/all" claims.
+- **Flat, not recursive** — no tree, no recursion, no MAX_DEPTH. One decompose call produces flat facts + thesis.
+- **Direct fact extraction** — LLM outputs facts directly as strings, guided by linguistic patterns taxonomy. No template expansion.
 - **Thesis-aware** — the decompose step extracts the speaker's intent (thesis, structure, key_test) and passes it to synthesis. The synthesizer evaluates whether the argument survives the evidence, not just whether a majority of facts are true.
-- **No hard fact limit** — fact count is driven by extracted entities × predicates, not an arbitrary cap. Complex claims get full coverage.
+- **No hard fact limit** — fact count is driven by claim complexity, not an arbitrary cap. Complex claims get full coverage.
 - **MAX_CONCURRENT = 2** — limits parallel research+judge pipelines to match GPU bandwidth. Two research agents run simultaneously.
 - **Single synthesis** — `synthesize_verdict` combines all fact-level judgments into one final verdict. Single-fact claims skip synthesis entirely.
 - **Temporal retries per activity** — if one research call fails, only that activity retries (max 3 attempts).
@@ -646,10 +664,12 @@ All prompts live in `src/prompts/verification.py` with extensive inline document
 - Design constraints (e.g., "Do NOT use your own knowledge")
 
 Four prompt pairs (system + user):
-1. `DECOMPOSE_SYSTEM` / `DECOMPOSE_USER` — structured entity-predicate extraction, code expands combinations
+1. `DECOMPOSE_SYSTEM` / `DECOMPOSE_USER` — flat fact extraction with linguistic patterns taxonomy
 2. `RESEARCH_SYSTEM` / `RESEARCH_USER` — guide the research agent (includes source quality rules)
 3. `JUDGE_SYSTEM` / `JUDGE_USER` — evaluate evidence for a sub-claim
 4. `SYNTHESIZE_SYSTEM` / `SYNTHESIZE_USER` — combine child verdicts (importance-weighted, adapts via `is_final` parameter)
+
+Plus the linguistic patterns module (`src/prompts/linguistic_patterns.py`) which is appended to `DECOMPOSE_SYSTEM` at runtime.
 
 ---
 
@@ -885,7 +905,7 @@ Config: `~/workspace/monitor/promtail/promtail.yml`
 | FastAPI API | **Done** | POST/GET claims, health check, lifespan management |
 | Temporal workflow | **Done** | VerifyClaimWorkflow with 5 activities, flat pipeline, thesis-aware synthesis, retry policies |
 | Temporal worker | **Done** | Registers workflow + 6 activities, structured logging configured |
-| `decompose_claim` | **Done** | LLM decomposes text into atomic facts + thesis (structure, key_test) in one flat pass |
+| `decompose_claim` | **Done** | LLM decomposes text into flat facts (guided by linguistic patterns) + thesis (structure, key_test) in one pass |
 | `research_subclaim` | **Done** | LangGraph ReAct agent with SearXNG + DuckDuckGo + Serper + Brave + Wikipedia + page_fetcher |
 | `judge_subclaim` | **Done** | LLM evaluates evidence, returns structured verdict |
 | `synthesize_verdict` | **Done** | Thesis-aware synthesis — evaluates whether speaker's argument survives sub-verdicts (importance-weighted, not count-based) |
@@ -1051,7 +1071,8 @@ spin-cycle/
 │   │   └── page_fetcher.py         # URL → text extraction (respects blocklist)
 │   │
 │   ├── prompts/                    # All LLM prompts with documentation
-│   │   └── verification.py         # Decompose, Research, Judge, Synthesize
+│   │   ├── verification.py         # Decompose, Research, Judge, Synthesize
+│   │   └── linguistic_patterns.py  # 15-category linguistic pattern taxonomy
 │   │
 │   ├── workflows/                  # Temporal workflow definitions
 │   │   └── verify.py               # VerifyClaimWorkflow

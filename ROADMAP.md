@@ -4,15 +4,16 @@ Where spin-cycle is, where it needs to go, and what each improvement actually do
 
 ---
 
-## What We Have (v0.5)
+## What We Have (v0.6)
 
-A working end-to-end claim verification pipeline with **structured extraction + thesis-aware synthesis**:
+A working end-to-end claim verification pipeline with **flat fact extraction + thesis-aware synthesis**:
 - Manual claim submission via API
-- LLM extracts **structured representation** (entities, predicates, comparisons) + thesis — code expands `entity × predicate` combinations to guarantee completeness
+- LLM extracts **flat atomic facts** (matching Google SAFE/FActScore approach) + thesis — guided by 15-category linguistic patterns taxonomy
 - **Thesis extraction** captures the speaker's intent (thesis, structure, key_test) for synthesis
 - Atomic sub-claims researched + judged **in parallel batches** (MAX_CONCURRENT=2) via `asyncio.gather`
 - **Thesis-aware synthesis** — evaluates whether the speaker's argument survives the evidence, not just whether a majority of facts are true
 - **Unified 6-level verdict scale**: `true | mostly_true | mixed | mostly_false | false | unverifiable` with spirit-vs-substance guidance
+- **Single `reasoning` field** — consolidated from separate reasoning/nuance fields for clearer output
 - **Single synthesis activity** uses the thesis as primary rubric when available
 - LangGraph ReAct research agent gathers evidence with dynamically loaded tools (22 max steps, ~10 tool calls per fact)
 - **Source quality filtering** — domain blocklist (~70 domains) silently drops Reddit, Quora, social media, content farms from all search results
@@ -22,7 +23,6 @@ A working end-to-end claim verification pipeline with **structured extraction + 
 - **Importance-weighted synthesis** — verdicts weighed by significance, not count
 - **Date-aware prompts** — all prompts include `Today's date: {current_date}` so the LLM references current data
 - Results stored in Postgres with sub-claims, evidence, and reasoning chains
-- Top-level synthesis reasoning + nuance exposed in API responses
 - Temporal orchestrates everything with retries and durability (5 activities, 1 workflow)
 - Production-grade structured JSON logging (for Grafana Loki, pretty format for dev) — INFO for pipeline milestones, DEBUG for per-query tool noise
 - LLM max_tokens configured to prevent truncated output (2048 for all steps)
@@ -108,15 +108,15 @@ Government websites (whitehouse.gov, state.gov, etc.) are explicitly classified 
 
 Improvements to the core fact-checking methodology. These refine how claims are broken down, researched, and reassembled into verdicts.
 
-### 1.5.0 — Complete Linguistic Pattern Taxonomy (IN PROGRESS)
+### 1.5.0 — Complete Linguistic Pattern Taxonomy (DONE)
 
-**Why:** Our current decomposition has 17+ ad-hoc rules for detecting claim patterns (temporal, causal, negation, etc.). These were added reactively when failures occurred. Linguistics has established taxonomies that cover ALL the patterns we need — we should use them instead of reinventing the wheel.
+**Status:** ✅ Implemented in `src/prompts/linguistic_patterns.py`
 
-**Status:** IN PROGRESS — Creating `src/prompts/linguistic_patterns.py` with the canonical taxonomy.
+**Why:** Our decomposition now uses a comprehensive linguistic pattern taxonomy from formal semantics, replacing the previous ad-hoc rules.
 
-**What:**
+**What was implemented:**
 
-The complete taxonomy from formal semantics, pragmatics, and rhetoric:
+The complete taxonomy covering 15 canonical categories:
 
 | Category | Sub-patterns | What it catches |
 |----------|--------------|-----------------|
@@ -136,12 +136,14 @@ The complete taxonomy from formal semantics, pragmatics, and rhetoric:
 | **14. Generics** | "Dogs bark", "Politicians lie", "Tech companies surveil" | Generalizations without quantifiers — technically false if ANY counterexample exists, but pragmatically used loosely. |
 | **15. Implicature** | Conversational inference, scalar implicature, relevance | "Some students passed" implies (but doesn't state) "not all passed". Hidden meaning beyond literal text. |
 
-**For each pattern, the decomposition must:**
-1. DETECT: Identify which patterns are present in the claim
-2. EXTRACT: Create explicit sub-claims testing each pattern
-3. TAG: Mark sub-claims with pattern type so judge knows what standard to apply
+**For each pattern, the decomposition prompt now:**
+1. DETECTS which patterns are present in the claim
+2. EXTRACTS explicit sub-claims testing each pattern
+3. Uses pattern awareness to ensure comprehensive decomposition
 
-**Effort:** Medium. New pattern reference file + decompose prompt refactor.
+The patterns are dynamically appended to `DECOMPOSE_SYSTEM` at runtime via `get_linguistic_patterns()`.
+
+**Completed in:** Commit `ac614f8` (flat facts) and subsequent integration.
 
 ### 1.5.0b — Checkability Filter
 

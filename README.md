@@ -76,8 +76,8 @@ The claim triggers `VerifyClaimWorkflow` — a flat pipeline of 5 activities:
 ```
 create_claim          Creates DB record (skipped if called via API)
     ↓
-decompose_claim       LLM extracts entities + predicates + thesis
-                      Code expands entity × predicate to atomic facts
+decompose_claim       LLM extracts flat atomic facts + thesis
+                      Guided by 15-category linguistic pattern taxonomy
     ↓
 For each batch of 2 facts (parallel):
     research_subclaim   LangGraph ReAct agent searches
@@ -92,7 +92,7 @@ synthesize_verdict    LLM combines sub-verdicts using the speaker's thesis
 store_result          Writes results to Postgres
 ```
 
-The **structured extraction** approach ensures completeness: when a claim says "both X and Y do Z", the LLM extracts entities `[X, Y]` and predicate `"do Z"`, then code expands to verify Z for both X and Y. No facts are dropped.
+The **flat facts** approach (matching Google SAFE and FActScore) means the LLM outputs facts directly as strings, guided by a comprehensive **linguistic patterns taxonomy** that catches presuppositions, quantifier scope, temporal boundaries, causation types, and more.
 
 The thesis extraction ensures the synthesizer understands the **intent** of the claim, not just the individual facts. For example, a claim saying "both US and China are cutting foreign aid" is rated `mostly_false` even though 5/6 sub-facts are true — because China is actually *increasing* foreign aid, which breaks the parallel comparison.
 
@@ -311,7 +311,8 @@ spin-cycle/
 │   │   └── page_fetcher.py         # URL → text extraction
 │   │
 │   ├── prompts/                    # LLM prompts (heavily documented)
-│   │   └── verification.py         # Decompose, Research, Judge, Synthesize
+│   │   ├── verification.py         # Decompose, Research, Judge, Synthesize
+│   │   └── linguistic_patterns.py  # 15-category linguistic pattern taxonomy
 │   │
 │   ├── workflows/
 │   │   └── verify.py               # VerifyClaimWorkflow
