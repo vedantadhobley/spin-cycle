@@ -44,6 +44,8 @@ from src.prompts.verification import (
     SYNTHESIZE_SYSTEM,
     SYNTHESIZE_USER,
 )
+from src.prompts.linguistic_patterns import get_linguistic_patterns
+from src.llm.placeholders import expand_predicate, cleanup_leftover_braces
 from src.schemas.llm_outputs import (
     DecomposeOutput,
     JudgeOutput,
@@ -100,10 +102,13 @@ async def decompose_claim(claim_text: str) -> dict:
     log.info(activity.logger, "decompose", "start", "Decomposing claim",
              claim=claim_text)
 
+    # Build decompose system prompt with linguistic patterns
+    decompose_system_with_patterns = DECOMPOSE_SYSTEM + "\n\n" + get_linguistic_patterns()
+
     try:
         # Use unified invoker with schema validation and automatic retry
         output = await invoke_llm(
-            system_prompt=DECOMPOSE_SYSTEM,
+            system_prompt=decompose_system_with_patterns,
             user_prompt=DECOMPOSE_USER.format(claim_text=claim_text),
             schema=DecomposeOutput,
             semantic_validator=validate_decompose,
@@ -174,52 +179,19 @@ def _expand_structured(parsed: dict) -> list[dict]:
     facts = []
     seen = set()  # Deduplicate
 
-    # Expand predicates
+    # Expand predicates using centralized placeholder handling
     for pred in parsed.get("predicates", []):
         claim_template = pred.get("claim", "")
         applies_to = pred.get("applies_to", [])
         
-        # SAFEGUARD: Count {entity} placeholders - if more than one, don't template-expand
-        # This prevents garbled output like "Israel has intent to destroy Israel"
-        # Use regex to count distinct placeholder positions (handles both {entity} and {{entity}})
-        entity_count = len(re.findall(r'\{+entity\}+', claim_template))
+        # expand_predicate handles:
+        # 1. Non-compliant placeholders (target_entity, other_entity, etc.)
+        # 2. Multiple {entity} placeholders (LLM mistake)
+        # 3. Normal single {entity} expansion
+        # 4. Value substitution for detailed applies_to entries
+        expanded_facts = expand_predicate(claim_template, applies_to)
         
-        if entity_count > 1:
-            # Multiple entity placeholders = LLM mistake. Use template as-is (it likely has specific names)
-            # Clean up the braces and add directly
-            fact_text = claim_template
-            while '{' in fact_text and '}' in fact_text:
-                fact_text = re.sub(r'\{+([^{}]+)\}+', r'\1', fact_text)
-            fact_text = fact_text.strip()
-            if fact_text and fact_text not in seen:
-                seen.add(fact_text)
-                facts.append({"text": fact_text})
-            continue  # Skip normal expansion for this predicate
-
-        for item in applies_to:
-            if isinstance(item, str):
-                # Simple form: entity name directly
-                entity = item.strip()
-                fact_text = claim_template.replace("{entity}", entity)
-                fact_text = fact_text.replace("{{entity}}", entity)
-            elif isinstance(item, dict):
-                # Detailed form: {"entity": "US", "value": "over $800B"}
-                entity = item.get("entity", "").strip()
-                value = item.get("value", "").strip()
-                fact_text = claim_template.replace("{entity}", entity)
-                fact_text = fact_text.replace("{{entity}}", entity)
-                fact_text = fact_text.replace("{value}", value)
-                fact_text = fact_text.replace("{{value}}", value)
-            else:
-                continue
-
-            # Clean up any remaining braces the LLM might have added
-            # e.g., "{US}" → "US", "{{value2}}" → "value2"
-            # Run until no braces remain (handles double braces)
-            while '{' in fact_text and '}' in fact_text:
-                fact_text = re.sub(r'\{+([^{}]+)\}+', r'\1', fact_text)
-            fact_text = fact_text.strip()
-            
+        for fact_text in expanded_facts:
             if fact_text and fact_text not in seen:
                 seen.add(fact_text)
                 facts.append({"text": fact_text})
@@ -228,8 +200,7 @@ def _expand_structured(parsed: dict) -> list[dict]:
     for comp in parsed.get("comparisons", []):
         comp_text = comp.get("claim", "").strip()
         # Clean up any braces here too
-        while '{' in comp_text and '}' in comp_text:
-            comp_text = re.sub(r'\{+([^{}]+)\}+', r'\1', comp_text)
+        comp_text = cleanup_leftover_braces(comp_text)
         if comp_text and comp_text not in seen:
             seen.add(comp_text)
             facts.append({"text": comp_text})

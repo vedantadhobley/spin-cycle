@@ -13,6 +13,11 @@ Examples:
 
 from typing import Callable, Tuple
 
+from src.llm.placeholders import (
+    count_entity_placeholders,
+    has_entity_placeholder,
+    find_non_compliant,
+)
 from src.schemas.llm_outputs import (
     DecomposeOutput,
     JudgeOutput,
@@ -41,26 +46,30 @@ def validate_decompose(output: DecomposeOutput) -> tuple[bool, str]:
     Returns:
         (is_valid, error_message) tuple
     """
-    import re
-    
     # Check 1: Not empty
     if not output.predicates and not output.comparisons:
         return False, "Decomposition produced no predicates or comparisons"
     
-    # Check 2: No double {entity} in predicates
-    # Use regex to count distinct placeholder positions (handles both {entity} and {{entity}})
+    # Check 2: No double {entity} in predicates (uses centralized placeholder logic)
     for i, pred in enumerate(output.predicates):
-        entity_count = len(re.findall(r'\{+entity\}+', pred.claim))
+        entity_count = count_entity_placeholders(pred.claim)
         if entity_count > 1:
             log.warning(logger, MODULE, "double_entity",
                        f"Predicate {i} has multiple {{entity}} placeholders",
                        predicate=pred.claim)
             # Don't fail — the code-level safeguard handles this
-            # But we could make this a hard failure if we want stricter enforcement
+        
+        # Check for non-compliant placeholders (target_entity, etc.)
+        non_compliant = find_non_compliant(pred.claim)
+        if non_compliant:
+            log.warning(logger, MODULE, "non_compliant_placeholder",
+                       f"Predicate {i} uses non-compliant placeholder '{non_compliant}'",
+                       predicate=pred.claim)
+            # Don't fail — the expansion code handles this
     
     # Check 3: Predicates have applies_to
     for i, pred in enumerate(output.predicates):
-        if re.search(r'\{+entity\}+', pred.claim):
+        if has_entity_placeholder(pred.claim):
             if not pred.applies_to:
                 return False, f"Predicate {i} uses {{entity}} but has empty applies_to"
     

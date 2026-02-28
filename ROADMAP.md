@@ -106,7 +106,109 @@ Government websites (whitehouse.gov, state.gov, etc.) are explicitly classified 
 
 ## Phase 1.5: Verification Methodology
 
-Improvements to the core recursive decomposition and synthesis pipeline. These refine how claims are broken down, researched, and reassembled into verdicts.
+Improvements to the core fact-checking methodology. These refine how claims are broken down, researched, and reassembled into verdicts.
+
+### 1.5.0 — Complete Linguistic Pattern Taxonomy (IN PROGRESS)
+
+**Why:** Our current decomposition has 17+ ad-hoc rules for detecting claim patterns (temporal, causal, negation, etc.). These were added reactively when failures occurred. Linguistics has established taxonomies that cover ALL the patterns we need — we should use them instead of reinventing the wheel.
+
+**Status:** IN PROGRESS — Creating `src/prompts/linguistic_patterns.py` with the canonical taxonomy.
+
+**What:**
+
+The complete taxonomy from formal semantics, pragmatics, and rhetoric:
+
+| Category | Sub-patterns | What it catches |
+|----------|--------------|-----------------|
+| **1. Presupposition Triggers** | "stopped", "again", "still", "only", "even", "started", "before", "regret", "know" | Hidden assumptions baked into word choice. "He stopped beating his wife" presupposes he was beating her. |
+| **2. Quantifier Scope** | all/every/each, most/majority, some/several, few/minority, none/no | "All scientists agree" vs "most agree" vs "some agree" have vastly different truth conditions. |
+| **3. Modality** | Epistemic: may/might/could/possibly; Deontic: must/should/ought; Evidential: allegedly/reportedly | "He may have stolen" vs "he stole" — different claim types entirely. |
+| **4. Evidentiality Markers** | "according to", "sources say", "reportedly", "critics claim", "experts believe" | Hedging that distances speaker from claim. Often weasel words hiding lack of evidence. |
+| **5. Temporal/Aspectual** | Past/present/future; complete/ongoing; "since", "until", "while", "after", "before" | Time boundaries often hide context. "Crime up since 2020" cherry-picks baseline. |
+| **6. Causation Types** | Direct cause, contributing factor, correlation, necessary condition, sufficient condition | "X caused Y" is stronger than "X contributed to Y" — must preserve the exact causal claim. |
+| **7. Comparison/Degree** | Comparative: more/less/better/worse; Superlative: most/least/best/only/first; Equality: same/equal | "First" and "only" require exhaustive verification. |
+| **8. Negation Scope** | Sentence negation, constituent negation, "never", "nobody", "nothing", negative polarity | "Nobody saw it" is harder to verify than "somebody saw it" — proving absence. |
+| **9. Speech Acts** | Assertion, prediction, opinion, question, command, commitment | We can only verify assertions about past/present. Predictions and opinions are uncheckable. |
+| **10. Vagueness/Hedging** | "significant", "many", "substantial", "some", "around", "roughly", "experts" | Undefined terms resist verification. "Many people died" — how many is "many"? |
+| **11. Attribution/Reported Speech** | Direct quote, indirect quote, "X said/claimed/stated/argued" | Must verify BOTH that X said it AND that the substance is true. |
+| **12. Conditional/Hypothetical** | "If X then Y", counterfactual "would have", hypothetical "could" | Conditionals may be unverifiable (condition hasn't occurred) or tautological. |
+| **13. Definition/Category** | "X is a Y", "counts as", "qualifies as", "meets the definition of" | Often contested — "Is X a genocide?" depends on definition used. |
+| **14. Generics** | "Dogs bark", "Politicians lie", "Tech companies surveil" | Generalizations without quantifiers — technically false if ANY counterexample exists, but pragmatically used loosely. |
+| **15. Implicature** | Conversational inference, scalar implicature, relevance | "Some students passed" implies (but doesn't state) "not all passed". Hidden meaning beyond literal text. |
+
+**For each pattern, the decomposition must:**
+1. DETECT: Identify which patterns are present in the claim
+2. EXTRACT: Create explicit sub-claims testing each pattern
+3. TAG: Mark sub-claims with pattern type so judge knows what standard to apply
+
+**Effort:** Medium. New pattern reference file + decompose prompt refactor.
+
+### 1.5.0b — Checkability Filter
+
+**Why:** Some claims are fundamentally uncheckable: opinions, predictions, private thoughts, counterfactuals. We currently try to verify everything and waste LLM calls returning "unverifiable."
+
+**What:**
+- Add pre-decomposition checkability assessment
+- Auto-reject claims that are: pure opinion ("X is bad"), predictions ("X will happen"), private knowledge ("X secretly believes"), counterfactual ("If X had...")
+- Return verdict type "not_checkable" with explanation instead of "unverifiable"
+
+**Effort:** Small. One LLM call before decomposition.
+
+### 1.5.0c — Claim Normalization
+
+**Why:** Ambiguous claims lead to unfocused research. "The President" — which one? "Recently" — when? Normalizing claims before decomposition clarifies what we're actually checking.
+
+**What:**
+- Resolve references: "The President" → "Joe Biden (as of 2026-02-28)"
+- Expand time references: "recently" → "in the past 6 months (Sep 2025 - Feb 2026)"
+- Disambiguate entities: "Washington" → "Washington D.C." or "George Washington" or "Washington State"
+- Pass normalized claim to decomposition
+
+**Effort:** Small-Medium. Pre-processing step with LLM.
+
+### 1.5.0d — Domain-Specific Research Strategies
+
+**Why:** Medical claims need medical sources (PubMed, WHO). Legal claims need legal sources (court records, legislation). We currently use the same search tools for everything.
+
+**What:**
+- Detect claim domain at decomposition (medical, legal, scientific, political, economic)
+- Configure research agent with domain-appropriate tools and search strategies
+- Add domain-specific source quality rankings
+
+| Domain | Priority Sources |
+|--------|-----------------|
+| Medical | PubMed, Cochrane, WHO, CDC, peer-reviewed journals |
+| Legal | Court records, legislation databases, legal scholarship |
+| Scientific | arXiv, peer-reviewed journals, scientific consensus databases |
+| Economic | Official statistics (BLS, Fed, World Bank), economics journals |
+| Political | Primary documents, official statements, independent journalism |
+
+**Effort:** Medium-Large. New classification step + tool configuration per domain.
+
+### 1.5.0e — Citation Chasing
+
+**Why:** "According to a study" → we should find THE ACTUAL STUDY. Secondary reporting may mischaracterize primary sources.
+
+**What:**
+- When evidence mentions a source ("a study found", "the report states"), extract the citation
+- Add a research tool to pursue citations: find the original document
+- Compare what secondary source says vs what primary source actually says
+- Flag discrepancies
+
+**Effort:** Medium. New citation extraction logic + additional research steps.
+
+### 1.5.0f — Interested Party Evidence Weighting
+
+**Why:** We extract `interested_parties` during decomposition but don't actually USE this data to weight evidence. An Israeli government statement about Israel should count less than independent Reuters reporting.
+
+**What:**
+- Pass `interested_parties` to judge activity (DONE)
+- In judge prompt, explicitly instruct: "Evidence from organizations in the `direct` or `institutional` interested parties list should be treated as CLAIMS, not FACTS. They may be true but require corroboration from independent sources."
+- Consider scoring: Tier 1 (independent) > Tier 2 (institutional but not direct party) > Tier 3 (direct interested party)
+
+**Status:** Partially implemented — we extract and pass the data, but judge prompt needs strengthening.
+
+**Effort:** Small. Prompt update.
 
 ### 1.5.1 — Confidence-Weighted Synthesis
 
@@ -390,21 +492,27 @@ What to build next, in order of impact:
 
 | Priority | Item | Why |
 |----------|------|-----|
-| **1** | Alembic migrations | Unblocks all future schema changes |
-| **2** | Confidence-weighted synthesis (1.5.1) | Low effort, immediately improves verdict quality |
-| **3** | Source credibility scoring (1.3) | Tiered weighting (basic filtering already done) |
-| **4** | Adaptive research depth (1.5.2) | Cuts pipeline time in half for simple claims |
-| **5** | Calibration test suite (3.1) | Can't improve without measuring |
-| **6** | Evidence quality signals for judges (1.5.6) | Makes source tiers actionable in verdicts |
-| **7** | RSS feed monitoring (2.1) | First step toward automated intake |
-| **8** | Claim extraction from articles (2.2) | Enables fully automated pipeline |
-| **9** | Sub-claim dedup & caching (1.5.4) | Reduces redundant work at scale |
-| **10** | LangFuse observability (4.3) | Visibility into LLM performance |
-| **11** | Speaker profiles (5.3) | Product differentiation |
-| **12** | Article highlighting UI (5.1) | Core product experience |
-| **13** | Human review loop (3.4) | Trust + quality assurance |
-| **14** | Public API (5.2) | Distribution |
-| **15** | Speech transcripts (2.3) | Expand beyond articles |
+| **1** | **Linguistic pattern taxonomy (1.5.0)** | Foundational — all verification depends on correct decomposition |
+| **2** | Alembic migrations | Unblocks all future schema changes |
+| **3** | Checkability filter (1.5.0b) | Stop wasting cycles on uncheckable claims |
+| **4** | Confidence-weighted synthesis (1.5.1) | Low effort, immediately improves verdict quality |
+| **5** | Interested party weighting (1.5.0f) | We have the data, just need to use it |
+| **6** | Source credibility scoring (1.3) | Tiered weighting (basic filtering already done) |
+| **7** | Claim normalization (1.5.0c) | Clearer claims = better research |
+| **8** | Adaptive research depth (1.5.2) | Cuts pipeline time in half for simple claims |
+| **9** | Calibration test suite (3.1) | Can't improve without measuring |
+| **10** | Domain-specific research (1.5.0d) | Right sources for right claims |
+| **11** | Citation chasing (1.5.0e) | Get primary sources, not secondary |
+| **12** | Evidence quality signals for judges (1.5.6) | Makes source tiers actionable in verdicts |
+| **13** | RSS feed monitoring (2.1) | First step toward automated intake |
+| **14** | Claim extraction from articles (2.2) | Enables fully automated pipeline |
+| **15** | Sub-claim dedup & caching (1.5.4) | Reduces redundant work at scale |
+| **16** | LangFuse observability (4.3) | Visibility into LLM performance |
+| **17** | Speaker profiles (5.3) | Product differentiation |
+| **18** | Article highlighting UI (5.1) | Core product experience |
+| **19** | Human review loop (3.4) | Trust + quality assurance |
+| **20** | Public API (5.2) | Distribution |
+| **21** | Speech transcripts (2.3) | Expand beyond articles |
 
 ---
 

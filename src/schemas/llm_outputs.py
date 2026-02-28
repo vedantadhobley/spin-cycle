@@ -11,7 +11,12 @@ Benefits:
 """
 
 from typing import Literal, Optional, Union
+import re
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+# Can't import from src.llm.placeholders due to circular import
+# Inline the simple regex pattern here
+_ENTITY_PATTERN = re.compile(r'\{+entity\}+', re.IGNORECASE)
 
 
 # =============================================================================
@@ -107,7 +112,7 @@ class Predicate(BaseModel):
     @classmethod
     def warn_multiple_entity_placeholders(cls, v: str) -> str:
         """Check for multiple {entity} placeholders (common LLM mistake)."""
-        count = v.count("{entity}") + v.count("{{entity}}")
+        count = len(_ENTITY_PATTERN.findall(v))
         if count > 1:
             # Don't reject — the code-level safeguard handles this
             # But we could log a warning here in the future

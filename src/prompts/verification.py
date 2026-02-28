@@ -333,11 +333,16 @@ STRUCTURE RULES:
 
 2. PREDICATES: Each distinct checkable assertion.
    - Use a template with {{entity}} placeholder where the subject goes
+   - CRITICAL: Use EXACTLY {{entity}} as the placeholder — nothing else!
+     Do NOT use: target_entity, other_entity, entity1, entity2, {{subject}}, etc.
+     ONLY use: {{entity}}
    - CRITICAL: Use {{entity}} at MOST ONCE per predicate template!
      If a predicate describes a relationship between TWO different entities, \
 write it with the specific entities, NOT as a template.
      WRONG: "{{entity}} has intent to destroy {{entity}}" → expands to nonsense
+     WRONG: "{{entity}} funds target_entity" → target_entity won't expand
      RIGHT: "Entity A has intent to destroy Entity B" → specific fact
+     RIGHT: "{{entity}} funds Israeli healthcare" → entity is replaced, Israel stays
    - For entity-specific values (amounts, dates), use the detailed format
    - Keep comparisons as separate predicate type
 
@@ -348,94 +353,10 @@ write it with the specific entities, NOT as a template.
 4. COMPARISONS: Claims that compare entities (keep as single facts, don't split)
    - "Country A spends more than Country B" → one comparison, not two separate facts
 
-5. ATTRIBUTIONS: When someone SAYS/CLAIMS something, extract BOTH:
-   - The attribution predicate: "{{entity}} claimed X"
-   - The substance predicate: the actual claim being made (WITHOUT attribution)
-   The substance is usually MORE IMPORTANT than who said it.
-
-6. TEMPORAL: When sequence or timing matters ("X before Y", "X after Z"):
-   - Extract the temporal relationship as its own predicate
-   - "Official X fired investigator Y after the investigation started" needs BOTH:
-     a) "Official X fired investigator Y"
-     b) "The firing occurred after the investigation started"
-   - Timeline verification requires knowing WHEN each event occurred.
-
-7. CAUSAL: When causation is claimed ("X caused Y", "X leads to Y"):
-   - Mark these explicitly — causation requires MORE than correlation
-   - "Tax cuts caused job growth" needs evidence of CAUSAL MECHANISM, \
-not just "tax cuts happened" and "jobs grew"
-   - Extract as: {{"claim": "{{cause}} caused {{effect}}", "type": "causal"}}
-
-8. NEGATION: When ABSENCE is claimed ("X never did Y", "X has not Z"):
-   - These are HARDER to verify — you must prove something DIDN'T happen
-   - Flag negations explicitly so research knows to look comprehensively
-   - One counterexample disproves a "never" claim
-
-9. SUPERLATIVE: When EXTREMES are claimed ("first", "only", "largest", "most"):
-   - These require EXHAUSTIVE verification — one counterexample = false
-   - "X is the only democracy in the region" needs evidence that NO OTHER \
-country qualifies, not just that X qualifies
-   - "X was the first to Y" needs evidence no one did it earlier
-
-10. QUANTIFIED: When SCOPE matters ("all", "most", "some", "few", "many"):
-   - The quantifier dramatically changes the truth threshold
-   - "All scientists agree" vs "most scientists agree" vs "some scientists"
-   - Extract the EXACT quantifier — don't paraphrase "most" as "many"
-
-11. CONDITIONAL: When IF-THEN logic is claimed ("If X then Y"):
-   - Both the condition AND the consequence need verification
-   - The relationship between them also needs verification
-   - May be unverifiable if the condition hasn't occurred
-
-12. TREND: When DIRECTION is claimed ("increasing", "growing", "declining"):
-   - Requires time-series data, not a snapshot
-   - Must specify or infer the timeframe (this year? decade? ever?)
-   - A single data point cannot prove a trend
-
-13. DEFINITION: When CATEGORY MEMBERSHIP is claimed ("X qualifies as Y"):
-   - The criteria for category Y may be contested
-   - "X is a democracy" depends on whose definition of democracy
-   - Extract both the classification AND note if the category is contested
-
-14. CONSENSUS: When AGREEMENT is claimed ("scientists agree", "experts say"):
-   - Requires evidence of actual expert survey or meta-analysis
-   - One expert saying something ≠ consensus
-   - Extract as a claim that needs systematic evidence, not cherry-picked quotes
-
-15. NORMATIVE vs FACTUAL — CRITICAL DISTINCTION:
-   - NORMATIVE: "X should do Y", "X ought to", "X is wrong/right to"
-   - FACTUAL: "X did Y", "X is Y", "X has Y"
-   - We can only verify FACTUAL claims. Normative claims are opinions.
-   - If a claim mixes both, extract the factual parts and FLAG the normative.
-   - Example: "The government should stop the unjust war" →
-     - Factual (verifiable): "There is a war"
-     - Normative (opinion): "The war is unjust", "should stop"
-
-16. TEMPORAL FRAMING — CRITICAL: Watch for misleading date boundaries:
-   - "Since [date]" or "starting in [year]" often hides prior history
-   - "X has been happening since [recent date]" is technically verifiable, \
-but if X has been happening for DECADES, the framing is MISLEADING
-   - MANDATORY: When a claim specifies a START DATE, you MUST extract TWO predicates:
-     a) "X has occurred since [date]" (the literal claim)
-     b) "X has significant historical precedent before [date]"
-   - This MUST happen for claims involving conflicts, tensions, disputes, \
-operations, or any ongoing situation with potential prior history.
-   - Example: "Military operations in region R since [year]" →
-     - "Military operations have occurred in region R since [year]"
-     - "Military operations in region R have significant precedent before [year]"
-   - Example: "Border disputes since [year]" →
-     - "Border disputes have occurred since [year]"
-     - "Border disputes in this area have historical precedent before [year]"
-   - WHY: If evidence shows major operations/conflicts BEFORE the stated date, \
-the judge MUST flag the timeframe as a rhetorical manipulation that hides context.
-
-17. SELECTIVE TIMEFRAME — Statistics with convenient windows:
-   - "Lowest since [recent year]" during post-crisis recovery ≠ "lowest in decades"
-   - "Highest in 5 years" may be cherry-picking the comparison window
-   - When numbers cite a specific comparison period, extract predicates to:
-     a) Verify the specific claim within that window
-     b) Check if a different window tells a different story
-   - Note in key_test: "Uses [timeframe] as baseline — verify this isn't cherry-picked"
+LINGUISTIC PATTERNS:
+The full linguistic pattern taxonomy (presuppositions, quantifiers, modality, \
+causation, negation, etc.) is appended below. Use those patterns to detect \
+and properly decompose complex claim structures.
 
 CRITICAL — key_test VALIDATION:
 The key_test field describes what must be true for the thesis to hold. \
