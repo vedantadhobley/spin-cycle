@@ -118,3 +118,17 @@ class SourceRating(Base):
     scraped_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
+
+class WikidataCache(Base):
+    """Cached Wikidata entity relationships for conflict-of-interest detection.
+    
+    Stores ownership chains, media holdings, political affiliations, etc.
+    TTL: 7 days (entities change less frequently than news bias ratings).
+    """
+    __tablename__ = "wikidata_cache"
+
+    entity_name = Column(String(256), primary_key=True)  # Search term, e.g., "Jeff Bezos"
+    qid = Column(String(32), nullable=True)  # Wikidata QID, e.g., "Q312", None if not found
+    relationships = Column(JSONB, nullable=True)  # Full get_ownership_chain() result
+    scraped_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+

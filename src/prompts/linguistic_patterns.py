@@ -415,6 +415,37 @@ Before finalizing sub-claims, verify you have addressed ALL applicable patterns:
 
 ☐ **IMPLICATURE**: What does the claim IMPLY beyond what it states?
 
+---
+
+## FINAL QUALITY CHECK (CRITICAL)
+
+After applying the checklist above, review your facts for REDUNDANCY and TRIVIALITY.
+
+**NEVER INCLUDE these types of "facts":**
+- Trivially entailed existence claims: "X exists", "X has a Y", "Y is a thing"
+- Redundant boundary splitting: "approximately X" → "not more than X+ε" AND "not less than X-ε"  
+- Vague presuppositions not triggered by specific words
+- Falsifying conditions for non-superlative claims
+
+**EACH FACT MUST BE:**
+1. **Independently verifiable** — could be checked on its own
+2. **Non-redundant** — not entailed by another fact you've already listed
+3. **Substantive** — failing this fact would meaningfully affect the verdict
+
+**Examples of WRONG extraction:**
+- "Earth is 4.5 billion years old" → ❌ "The Earth has an age" (trivially entailed)
+- "approximately 4.5 billion" → ❌ upper AND lower bounds (redundant splitting)
+- "X won the election" → ❌ "X participated in the election" (entailed by winning)
+
+**Examples of CORRECT extraction:**
+- Simple factual claim → 1-2 facts (the claim + any hidden presupposition IF triggered)
+- Multi-part political claim → as many facts as there are distinct verifiable assertions
+- Causal claim → separate facts for: event A happened, event B happened, A caused B
+
+**Political claims are often complex.** A claim like "The tax cuts created jobs while reducing 
+the deficit" has multiple distinct assertions that each need verification. Extract them all.
+But don't pad the list with trivial entailments.
+
 """
 
 

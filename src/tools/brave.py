@@ -14,7 +14,7 @@ import os
 import httpx
 from langchain_core.tools import tool
 
-from src.tools.source_filter import filter_results
+from src.tools.source_filter import filter_results, populate_mbfc_cache
 from src.utils.logging import log, get_logger
 
 MODULE = "tools"
@@ -70,6 +70,7 @@ async def search_brave(query: str, max_results: int = 5) -> list[dict]:
                     "url": item.get("url", ""),
                 })
 
+            await populate_mbfc_cache(results)
             results = filter_results(results)[:max_results]
 
             log.debug(logger, MODULE, "brave_done", "Brave search complete",

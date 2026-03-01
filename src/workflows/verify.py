@@ -120,10 +120,13 @@ class VerifyClaimWorkflow:
                  structure=thesis_info.get("structure"),
                  interested_parties=interested_parties)
 
+        # Wikidata context for research agent prompt injection
+        wikidata_context = interested_parties.get("wikidata_context", "")
+
         # Step 2: Research all facts first (thinking=off, fast)
         # Then judge all facts (thinking=on, slow)
         # This prevents slow judge calls from starving faster research agents.
-        
+
         async def _research(fact_text: str) -> tuple[str, list]:
             """Research a single fact, return (fact_text, evidence)."""
             log.info(workflow.logger, MODULE, "research_start",
@@ -131,7 +134,7 @@ class VerifyClaimWorkflow:
                      claim_id=claim_id, fact=fact_text)
             evidence = await workflow.execute_activity(
                 research_subclaim,
-                args=[fact_text],
+                args=[fact_text, wikidata_context],
                 start_to_close_timeout=timedelta(seconds=180),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )

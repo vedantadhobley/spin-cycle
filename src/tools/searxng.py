@@ -15,7 +15,7 @@ import os
 import httpx
 from langchain_core.tools import tool
 
-from src.tools.source_filter import filter_results
+from src.tools.source_filter import filter_results, populate_mbfc_cache
 from src.utils.logging import log, get_logger
 
 MODULE = "tools"
@@ -76,6 +76,8 @@ async def search_searxng(
                     "engines": item.get("engines", []),
                 })
 
+            # Pre-populate MBFC cache so filter_results has data for unknown domains
+            await populate_mbfc_cache(results)
             results = filter_results(results)[:max_results]
 
             log.debug(logger, MODULE, "searxng_done", "SearXNG search complete",

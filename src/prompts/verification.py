@@ -313,8 +313,15 @@ counter-evidence to look for.
 # =============================================================================
 
 DECOMPOSE_SYSTEM = """\
-You are a fact-checker's assistant. Your job is to extract ALL verifiable \
-atomic facts from a claim, ensuring NOTHING is missed.
+You are a fact-checker's assistant. Your job is to extract verifiable \
+atomic facts from a claim.
+
+CRITICAL: PREFER FEWER, BETTER FACTS OVER EXHAUSTIVE EXTRACTION.
+- A simple claim should produce 1-2 facts, not 5
+- Don't add redundant variations of the same fact
+- Don't add trivially true preconditions ("X exists", "X has an age")
+- Don't split "approximately X" into "not more than X" AND "not less than X"
+- Only add falsifying conditions for SUPERLATIVES ("only", "first", "never")
 
 OUTPUT FORMAT:
 You will return a flat list of atomic facts (strings), plus metadata for synthesis.
@@ -327,7 +334,7 @@ An atomic fact is a single, specific, independently verifiable statement.
 
 EXTRACTION RULES:
 
-1. EXPAND ALL PARALLEL STRUCTURES:
+1. EXPAND PARALLEL STRUCTURES (only when explicitly stated):
    "Both X and Y do Z" → ["X does Z", "Y does Z"]
    "X is doing A, B, and C" → ["X is doing A", "X is doing B", "X is doing C"]
 
@@ -335,13 +342,23 @@ EXTRACTION RULES:
    Don't paraphrase "$800 billion" as "large amount"
    Keep exact dates, numbers, and names
 
-3. EXTRACT HIDDEN PRESUPPOSITIONS:
-   See the linguistic patterns below for triggers like "stopped", "again", "started"
+3. EXTRACT HIDDEN PRESUPPOSITIONS (only for trigger words):
+   Only extract presuppositions when clear trigger words are present:
+   "stopped", "again", "started", "resumed", "returned to"
    "He stopped lying" → ["He was lying before", "He is no longer lying"]
+   Do NOT invent presuppositions for normal claims.
 
-4. INCLUDE FALSIFYING CONDITIONS:
-   What would disprove the claim? Add that as a fact to check.
+4. FALSIFYING CONDITIONS — ONLY FOR SUPERLATIVES:
+   Only add falsifying conditions for words like: "only", "first", "never", "always", "no one"
    "X is the only Y" → also check "No other entity qualifies as Y"
+   Do NOT add falsifying conditions for normal quantified claims.
+
+SIMPLICITY GUIDANCE:
+- "The Earth is 4.5 billion years old" → 1 fact: "The Earth is 4.5 billion years old"
+- "Bitcoin was created in 2009" → 1 fact: "Bitcoin was created in 2009"
+- "France won the 2018 World Cup" → 1 fact: "France won the 2018 World Cup"
+- Complex claims with multiple entities/actions get multiple facts
+- Simple factual claims stay as single facts
 
 LINGUISTIC PATTERNS:
 The full linguistic pattern taxonomy (presuppositions, quantifiers, modality, \
@@ -374,7 +391,20 @@ that outlet cannot independently verify claims about the company
 
 EXAMPLES:
 
-Simple claim:
+Simple claim (KEEP IT SIMPLE):
+"The Earth is approximately 4.5 billion years old"
+→ {{
+  "thesis": "The Earth is approximately 4.5 billion years old",
+  "key_test": "Earth's age is approximately 4.5 billion years",
+  "structure": "simple",
+  "interested_parties": {{"direct": [], "institutional": [], "affiliated_media": [], "reasoning": "No interested parties — this is established scientific consensus"}},
+  "facts": [
+    "The Earth is approximately 4.5 billion years old"
+  ]
+}}
+Note: DO NOT add "The Earth has an age" or "not older than X" or "not younger than X" — these are redundant.
+
+Another simple claim:
 "NASA landed on the moon 6 times"
 → {{
   "thesis": "NASA successfully completed multiple moon landings",
@@ -453,16 +483,18 @@ Return ONLY the JSON object. No markdown, no explanation, no wrapping.\
 """
 
 DECOMPOSE_USER = """\
-Extract ALL verifiable atomic facts from this claim.
+Decompose this claim into verifiable atomic facts.
 
 Claim: {claim_text}
 
-Remember:
-- Expand parallel structures ("both X and Y" → separate facts for X and Y)
-- Extract hidden presuppositions (see linguistic patterns)
-- Include falsifying conditions: what would DISPROVE the thesis?
-- For attributed claims ("X said Y"), extract BOTH the attribution AND the substance
-- Identify interested parties who benefit if this claim is false
+Extract ALL distinct verifiable assertions, including:
+- Multiple parallel claims ("X and Y both did Z")
+- Hidden presuppositions (triggered by "started", "stopped", "again", etc.)
+- Causal claims (A caused B → verify A, verify B, verify causation)
+- Attributions ("X said Y" → verify X said it AND verify Y)
+
+But DO NOT pad with trivial entailments like "X exists" or "X has a Y".
+Each fact should be independently verifiable and substantively different.
 
 Return JSON with: thesis, key_test, structure, interested_parties, facts\
 """
@@ -558,34 +590,17 @@ the ORIGINAL. "According to a government report" → search for the actual repor
 "A study found..." → find the study itself. Secondary reporting may \
 mischaracterize or cherry-pick from primary sources.
 
-OWNERSHIP & CONFLICT OF INTEREST DETECTION — USE WIKIDATA:
-For claims about organizations, corporations, or wealthy individuals, use \
-the wikidata_lookup tool to discover ownership chains and potential conflicts:
+OWNERSHIP & CONFLICT OF INTEREST:
+If the system prompt includes an "INTERESTED PARTY CONNECTIONS" section, it \
+lists the entities involved in this claim and their connections (discovered \
+via Wikidata). Use this to prioritize INDEPENDENT sources — avoid relying on \
+evidence from entities listed there or their affiliated media outlets.
 
-- CORPORATIONS: Query the founder/CEO to find what MEDIA they own
-  Example: Query "[CEO name]" → discover they own Company X AND Newspaper N
-  Result: Newspaper N coverage of Company X is NOT independent
-
-- POLITICIANS: Query to find party affiliation, positions held, donors
-  Example: Query "[politician name]" → employment history, political appointments
-
-- MEDIA OUTLETS: Query the owner to see what else they own
-  Example: Query "[media owner]" → subsidiaries, other holdings
-
-- GOVERNMENT AGENCIES: Query the current director/head
-  Example: Query "[agency name]" → current director, parent organization
-
-WHY THIS MATTERS:
-If a claim is about Company X and you find evidence from Newspaper N, check \
-whether they share an owner — if so, it's NOT independent verification. \
-If a claim accuses Agency A of wrongdoing, Agency A's statements about its \
-own conduct are self-serving, not evidence. Wikidata helps you identify these \
-relationships so you can prioritize truly INDEPENDENT sources.
-
-WHEN TO QUERY WIKIDATA:
-1. EARLY: Near the start of research, query key entities to understand relationships
-2. FOR SOURCES: When evaluating a news source, check if it has ownership ties
-3. FOR PEOPLE: When a claim involves executives/politicians, check their affiliations
+SOURCE CREDIBILITY:
+Low-quality and unreliable sources are automatically filtered from search \
+results before you see them. Sources that pass through are at least \
+"mostly factual" according to Media Bias/Fact Check ratings. You do NOT \
+need to check source credibility manually — focus on finding evidence.
 
 CLAIM TYPES THAT MAY BE UNVERIFIABLE — recognize and flag these:
 - FUTURE predictions: "X will happen" — cannot verify until it happens
@@ -611,17 +626,18 @@ and look for the same information from a reputable publication instead.
 Do NOT rely on third-party fact-check sites (Snopes, PolitiFact, etc.). \
 We are building independent verification — find the PRIMARY sources yourself.
 
-IMPORTANT — you have a STRICT budget of 6-8 tool calls total. Be efficient:
+IMPORTANT — you have a budget of 8-12 tool calls total. Be efficient:
 1. First search: target the SPECIFIC claim detail (entity + number/date/event)
 2. Second search: try a different angle or source (Wikipedia, official data)
-3. If you found promising URLs, use fetch_page_content on the 1-2 BEST ones
+3. If you found promising URLs, use fetch_page_content on the 2-3 BEST ones
 4. Counter-search: search for evidence AGAINST your initial findings
-5. Stop and summarize. Do NOT keep searching after 4-5 searches.
+5. If evidence is thin, try one more search with different terms
+6. Stop and summarize. Do NOT keep searching after 6-7 searches.
 
 You are done when:
 - You have evidence from BOTH directions (supporting + contradicting), OR
-- You have done 4 searches and evidence only points one way, OR
-- You have done 3 searches and found nothing (claim may be unverifiable)
+- You have done 5 searches and evidence only points one way, OR
+- You have done 4 searches and found nothing (claim may be unverifiable)
 
 Do NOT make up evidence. Only report what the tools actually return.
 Do NOT evaluate whether the claim is true or false — just gather evidence.
@@ -640,11 +656,7 @@ search for the specific event, action, number, or object mentioned.
 
 Use multiple search tools when available for source diversity. When you \
 find a promising URL, use fetch_page_content to read the full article \
-rather than relying only on search snippets.
-
-If this claim involves a CORPORATION, POLITICIAN, or WEALTHY INDIVIDUAL, \
-use wikidata_lookup early to find ownership chains and media holdings. This \
-helps identify which sources may have conflicts of interest.\
+rather than relying only on search snippets.\
 """
 
 # Why separate RESEARCH from JUDGE?

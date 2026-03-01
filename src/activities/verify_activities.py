@@ -51,7 +51,8 @@ from src.schemas.llm_outputs import (
     SynthesizeOutput,
     InterestedParties,
 )
-from src.tools.source_ratings import get_source_rating_sync, format_source_tag, detect_claim_subject_quotes
+from src.tools.source_ratings import get_source_rating_sync, format_source_tag, detect_claim_subject_quotes, extract_quoted_entities
+from src.agent.decompose import expand_interested_parties
 from src.utils.logging import log
 from src.utils.text_cleanup import cleanup_text
 
@@ -85,18 +86,23 @@ async def create_claim(claim_text: str) -> str:
 
 @activity.defn
 async def decompose_claim(claim_text: str) -> dict:
-    """Extract atomic verifiable facts and thesis from a claim in one pass.
+    """Extract atomic verifiable facts and thesis from a claim.
 
-    Uses STRUCTURED extraction (entities + predicates + comparisons) and then
-    programmatically expands entity × predicate combinations. This ensures
-    completeness — when a claim says "both X and Y do Z", we're guaranteed
-    to verify Z for both X and Y.
+    Pipeline:
+    1. LLM extracts facts, thesis, and interested parties (direct invocation)
+    2. Code expands interested parties via Wikidata (programmatic, cached)
+       - Corporate: CEO, founder, chairperson, parent/subsidiary
+       - Family: spouse, parents, children, siblings + 2-hop in-laws
+       - Media: ownership ties to news outlets
+
+    The Wikidata expansion is critical: when a claim is about "Jared Kushner",
+    we need to know that "Donald Trump" (father-in-law via Ivanka) is also
+    an interested party whose statements are self-serving.
 
     Returns a dict with:
       - "facts": list of {"text": "..."} dicts, each an atomic fact
-      - "thesis_info": {"thesis": "...", "structure": "...", "key_test": "..."}
-
-    Falls back to a single item with no thesis if invocation fails after retries.
+      - "thesis_info": {"thesis", "structure", "key_test", "interested_parties"}
+      - interested_parties includes "wikidata_context" for research prompt injection
     """
     log.info(activity.logger, "decompose", "start", "Decomposing claim",
              claim=claim_text)
@@ -105,7 +111,6 @@ async def decompose_claim(claim_text: str) -> dict:
     decompose_system_with_patterns = DECOMPOSE_SYSTEM + "\n\n" + get_linguistic_patterns()
 
     try:
-        # Use unified invoker with schema validation and automatic retry
         output = await invoke_llm(
             system_prompt=decompose_system_with_patterns,
             user_prompt=DECOMPOSE_USER.format(claim_text=claim_text),
@@ -114,26 +119,28 @@ async def decompose_claim(claim_text: str) -> dict:
             max_retries=2,
             activity_name="decompose",
         )
-        
-        # Convert facts to dict format
+
         facts = [{"text": f.strip()} for f in output.facts if f and f.strip()]
-        
-        # Build thesis_info from validated output
-        interested_parties_obj = _normalize_interested_parties(output.interested_parties)
+
+        # Normalize interested parties from LLM output
+        raw_parties = _normalize_interested_parties(output.interested_parties)
+
+        # Expand via Wikidata (programmatic — adds executives, family, media)
+        expanded_parties = await expand_interested_parties(raw_parties)
+
         thesis_info = {
             "thesis": output.thesis,
             "structure": output.structure,
             "key_test": output.key_test,
-            "interested_parties": interested_parties_obj,
+            "interested_parties": expanded_parties,
         }
-        
+
         log.info(activity.logger, "decompose", "facts_extracted",
                  "Decomposition complete",
-                 interested_parties=interested_parties_obj,
+                 interested_parties=expanded_parties.get("all_parties"),
                  fact_count=len(facts))
 
     except LLMInvocationError as e:
-        # All retries failed — use fallback
         log.warning(activity.logger, "decompose", "invocation_failed",
                     "LLM invocation failed after retries, using original claim as single fact",
                     error=str(e), attempts=e.attempts)
@@ -266,8 +273,37 @@ def _url_matches_media(url_lower: str, media_outlet: str) -> bool:
     return False
 
 
+def _check_publisher_ownership(url: str, all_parties: list[str]) -> str | None:
+    """Check if a source URL's publisher is owned by an interested party.
+
+    Uses the MBFC 'ownership' field (already cached from populate_mbfc_cache)
+    to cross-reference against all_parties. Catches cases like:
+    - Fox News (owned by Rupert Murdoch) when Murdoch is in all_parties
+    - Washington Post (owned by Jeff Bezos) when Bezos is in all_parties
+
+    Returns the matching party name if found, None otherwise.
+    """
+    if not url or url == "N/A" or not all_parties:
+        return None
+
+    rating = get_source_rating_sync(url)
+    if not rating or not rating.get("ownership"):
+        return None
+
+    ownership_lower = rating["ownership"].lower()
+
+    for party in all_parties:
+        party_lower = party.lower()
+        if len(party_lower) < 4:
+            continue  # Skip very short names to avoid false matches
+        if party_lower in ownership_lower:
+            return party
+
+    return None
+
+
 @activity.defn
-async def research_subclaim(sub_claim: str) -> list[dict]:
+async def research_subclaim(sub_claim: str, interested_parties_context: str = "") -> list[dict]:
     """Research evidence for a sub-claim using the LangGraph ReAct agent.
 
     This is where the "agentic AI" happens. Instead of a single LLM call,
@@ -278,10 +314,10 @@ async def research_subclaim(sub_claim: str) -> list[dict]:
       4. Decides if it needs to search more
       5. Loops until it has enough evidence or gives up
 
-    The agent runs inside this Temporal activity, which provides:
-      - 120s timeout (set in the workflow)
-      - 3 retry attempts
-      - Crash recovery (if the worker dies, Temporal reruns this)
+    The agent's system prompt includes interested_parties_context — a
+    pre-formatted summary of who the players are and how they're connected
+    (from Wikidata expansion at decompose time). This lets the agent make
+    informed source choices without burning tool calls on lookups.
 
     Returns a list of evidence dicts for the judge step.
     """
@@ -289,7 +325,7 @@ async def research_subclaim(sub_claim: str) -> list[dict]:
              sub_claim=sub_claim)
 
     from src.agent.research import research_claim
-    evidence = await research_claim(sub_claim)
+    evidence = await research_claim(sub_claim, interested_parties_context)
 
     log.info(activity.logger, "research", "done", "Research complete",
              sub_claim=sub_claim, evidence_count=len(evidence))
@@ -339,9 +375,10 @@ async def judge_subclaim(
     elif isinstance(interested_parties, list):
         interested_parties = _normalize_interested_parties(interested_parties)
     
+    # Parties arrive pre-expanded from decompose (Wikidata already ran)
     all_parties = interested_parties.get("all_parties", [])
     affiliated_media = interested_parties.get("affiliated_media", [])
-    
+
     log.info(activity.logger, "judge", "start", "Judging sub-claim",
              sub_claim=sub_claim, evidence_count=len(evidence),
              interested_parties=interested_parties)
@@ -392,6 +429,58 @@ async def judge_subclaim(
               source_types=source_types,
               urls=evidence_urls)
 
+    # --- Pre-judge entity enrichment ---
+    # Extract entities quoted in evidence that aren't in all_parties yet,
+    # Wikidata-expand them, and check for connections to interested parties.
+    # This catches conflicts from entities discovered DURING research.
+    all_content = " ".join(ev.get("content", "") for ev in source_evidence)
+    quoted_entities = extract_quoted_entities(all_content)
+
+    # Filter to entities not already known
+    all_parties_lower = {p.lower() for p in all_parties}
+    new_entities = [
+        e for e in quoted_entities
+        if e.lower() not in all_parties_lower
+    ]
+
+    if new_entities:
+        from src.tools.wikidata import get_ownership_chain, collect_all_connected_parties
+
+        log.debug(activity.logger, "judge", "enrichment_start",
+                  "Enriching interested parties with entities from evidence",
+                  new_entities=new_entities[:10])
+
+        for entity in new_entities[:5]:  # Cap to avoid too many lookups
+            try:
+                result = await get_ownership_chain(entity)
+                if result.get("error"):
+                    continue
+
+                connected = collect_all_connected_parties(result)
+                # Check if this entity connects to any known interested party
+                all_connected = set(connected["people"]) | set(connected["orgs"]) | set(connected["media"])
+                overlap = all_connected & set(all_parties)
+
+                if overlap:
+                    # This quoted entity has connections to interested parties
+                    all_parties.append(entity)
+                    # Also add their connected entities
+                    for person in connected["people"]:
+                        if person not in all_parties:
+                            all_parties.append(person)
+                    for media in connected["media"]:
+                        if media not in affiliated_media:
+                            affiliated_media.append(media)
+
+                    log.info(activity.logger, "judge", "enrichment_found",
+                             "Evidence entity connects to interested party",
+                             entity=entity, overlap=list(overlap)[:5])
+            except Exception as e:
+                log.debug(activity.logger, "judge", "enrichment_error",
+                          "Entity enrichment failed",
+                          entity=entity, error=str(e))
+                continue
+
     # Format evidence for the LLM prompt with source bias/credibility ratings
     evidence_parts = []
     bias_distribution = {"left": 0, "center": 0, "right": 0, "unrated": 0}
@@ -437,7 +526,20 @@ async def judge_subclaim(
                 log.debug(activity.logger, "judge", "interested_party_quoted",
                           "Evidence quotes interested party",
                           entities=quoted_entities, url=url)
-        
+
+        # Check 3: Is the source publisher owned by an interested party?
+        # e.g., Fox News owned by Murdoch when Murdoch is in all_parties
+        if not interest_warnings and all_parties and url != "N/A":
+            owner_match = _check_publisher_ownership(url, all_parties)
+            if owner_match:
+                interested_party_count += 1
+                interest_warnings.append(
+                    f"⚠️ PUBLISHER OWNED BY INTERESTED PARTY: Source publisher is owned by {owner_match}."
+                )
+                log.debug(activity.logger, "judge", "publisher_ownership_detected",
+                          "Source publisher owned by interested party",
+                          owner=owner_match, url=url)
+
         # Track bias distribution for judge context
         if rating and rating.get("bias"):
             bias = rating["bias"]

@@ -78,7 +78,6 @@ from src.tools.page_fetcher import get_page_fetcher_tool
 from src.tools.serper import get_serper_tool, is_available as serper_available
 from src.tools.brave import get_brave_tool, is_available as brave_available
 from src.tools.searxng import get_searxng_tool, is_available as searxng_available
-from src.tools.wikidata import get_wikidata_tool
 from src.utils.logging import log, get_logger
 
 MODULE = "research"
@@ -122,9 +121,10 @@ def _build_tool_list() -> list:
     # Page fetcher — always available, lets agent read full articles
     tools.append(get_page_fetcher_tool())
 
-    # Wikidata — always available, for discovering ownership/affiliation relationships
-    # Critical for identifying conflicts of interest (e.g., Bezos owns Amazon AND WaPo)
-    tools.append(get_wikidata_tool())
+    # NOTE: Wikidata and MBFC are NOT agent tools. They run programmatically:
+    # - Wikidata: runs at decompose time, results passed as prompt context
+    # - MBFC: runs in search tools (pre-filters) and judge (annotations)
+    # This frees up the agent's tool budget for actual evidence gathering.
 
     tool_names = [t.name for t in tools]
     log.debug(logger, MODULE, "tools_loaded", "Research agent tools configured",
@@ -133,15 +133,18 @@ def _build_tool_list() -> list:
     return tools
 
 
-def build_research_agent():
+def build_research_agent(interested_parties_context: str = ""):
     """Build a ReAct agent for evidence gathering.
 
     Tools are dynamically loaded based on configured API keys.
     See _build_tool_list() for the full list and priority order.
 
-    The `prompt` parameter injects a SystemMessage that tells the agent
-    how to research (search strategies, when to stop, what to report).
-    See RESEARCH_SYSTEM in src/prompts/verification.py for the full prompt.
+    Args:
+        interested_parties_context: Pre-formatted text describing the
+            interested parties and their connections (from Wikidata
+            expansion at decompose time). Injected into the system
+            prompt so the agent knows who the players are without
+            burning tool calls on lookups.
     """
     # thinking=off — the ReAct loop is pure tool-routing: pick a search
     # query, call the tool, repeat.  Thinking mode wastes ~25-45s per
@@ -158,6 +161,10 @@ def build_research_agent():
 
     from datetime import date
     prompt = RESEARCH_SYSTEM.format(current_date=date.today().isoformat())
+
+    # Inject interested parties context into the prompt
+    if interested_parties_context:
+        prompt += "\n\n" + interested_parties_context
 
     return create_react_agent(
         llm,
@@ -325,25 +332,28 @@ def extract_evidence(messages: list) -> list[dict]:
     return evidence
 
 
-async def research_claim(sub_claim: str, max_steps: int = 22, timeout_secs: int = 120) -> list[dict]:
+async def research_claim(
+    sub_claim: str,
+    interested_parties_context: str = "",
+    max_steps: int = 28,
+    timeout_secs: int = 120,
+) -> list[dict]:
     """Run the research agent to gather evidence for a sub-claim.
 
     This is the main entry point called by the research_subclaim activity.
 
     Args:
         sub_claim: The specific sub-claim to find evidence for.
+        interested_parties_context: Pre-formatted text about interested
+            parties and their Wikidata connections, injected into the
+            agent's system prompt as context.
         max_steps: Maximum number of graph steps (prevents infinite loops).
                    Each tool call costs ~2 steps (agent node + tool node).
-                   22 steps allows ~10 tool calls — sufficient budget for
-                   the instruct model which processes each step in ~3s.
-                   The prompt's 5-6 tool call budget and the timeout_secs
-                   are the real limiters, not max_steps.
+                   28 steps allows ~12 tool calls — now that wikidata/MBFC
+                   are programmatic, all tool calls are evidence gathering.
         timeout_secs: Soft timeout in seconds. If the agent exceeds this,
                       we cancel it and return whatever evidence was gathered
-                      so far via the fallback. Default 120s (2 min) — the
-                      instruct model completes 6 iterations in ~40-60s;
-                      120s gives ample margin for slow web requests.
-                      60s buffer before the 180s Temporal activity timeout.
+                      so far via the fallback. Default 120s (2 min).
 
     Returns:
         List of evidence dicts (deduplicated by URL), each with:
@@ -359,7 +369,7 @@ async def research_claim(sub_claim: str, max_steps: int = 22, timeout_secs: int 
              sub_claim=sub_claim)
 
     try:
-        agent = build_research_agent()
+        agent = build_research_agent(interested_parties_context)
 
         result = await asyncio.wait_for(
             agent.ainvoke(

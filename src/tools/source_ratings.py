@@ -652,6 +652,88 @@ def detect_claim_subject_quotes(content: str, interested_parties: list[str]) -> 
     return quoted_parties
 
 
+def extract_quoted_entities(content: str) -> list[str]:
+    """Extract all entities that are quoted/attributed in evidence text.
+
+    Unlike detect_claim_subject_quotes() which checks known parties against
+    content, this function discovers NEW entities by extracting proper nouns
+    adjacent to attribution patterns. These can then be Wikidata-expanded
+    to find connections to known interested parties.
+
+    Patterns:
+    - "according to [the] {ENTITY}" → extract ENTITY
+    - "{ENTITY} said/stated/confirmed/..." → extract ENTITY
+    - "{ENTITY}'s statement/report/..." → extract ENTITY
+
+    Returns deduplicated list of extracted entity names (proper nouns).
+    """
+    import re
+
+    if not content:
+        return []
+
+    # Proper noun pattern: 1-4 capitalized words (handles "FBI", "John Smith",
+    # "Federal Bureau of Investigation", "The Heritage Foundation")
+    # Allows "of", "the", "and", "for" as connecting words within names
+    _PROPER_NOUN = r"(?:(?:The |the )?(?:[A-Z][a-zA-Z]+(?:[ -](?:of|the|and|for|on|in|de|van|von|al|el|bin|ibn)?[ -]?)?){1,5})"
+
+    attribution_words = (
+        "said|says|stated|states|reported|reports|announced|announces|"
+        "confirmed|confirms|denied|denies|claimed|claims|concluded|concludes|"
+        "found|finds|determined|issued|released|testified|told|argued|argues|"
+        "warned|warns|declared|declares|insisted|insists|suggested|suggests|"
+        "acknowledged|acknowledges|revealed|reveals|disclosed|discloses"
+    )
+
+    entities = set()
+
+    # Pattern 1: "according to [the] {ENTITY}[,.]"
+    for m in re.finditer(
+        rf"according to (?:the )?({_PROPER_NOUN})",
+        content
+    ):
+        entities.add(m.group(1).strip().rstrip(".,;:"))
+
+    # Pattern 2: "{ENTITY} said/stated/confirmed/..."
+    for m in re.finditer(
+        rf"({_PROPER_NOUN})\s+(?:{attribution_words})\b",
+        content
+    ):
+        entities.add(m.group(1).strip().rstrip(".,;:"))
+
+    # Pattern 3: "{ENTITY}'s statement/report/investigation/..."
+    possessive_nouns = (
+        "statement|report|investigation|conclusion|finding|analysis|"
+        "determination|assessment|review|inquiry|study|position|response|"
+        "announcement|decision|ruling|opinion|testimony|briefing|press"
+    )
+    for m in re.finditer(
+        rf"({_PROPER_NOUN})'s\s+(?:{possessive_nouns})\b",
+        content
+    ):
+        entities.add(m.group(1).strip().rstrip(".,;:"))
+
+    # Clean up: remove common false positives
+    _FALSE_POSITIVES = {
+        "The", "This", "That", "These", "Those", "Here", "There",
+        "When", "Where", "While", "What", "Which", "Who", "How",
+        "But", "And", "Also", "However", "Meanwhile", "Furthermore",
+        "According", "According to", "In", "On", "At", "For", "By",
+    }
+
+    cleaned = []
+    for entity in entities:
+        # Skip very short or common false positives
+        if len(entity) < 3 or entity in _FALSE_POSITIVES:
+            continue
+        # Skip if starts with lowercase (not a proper noun)
+        if entity[0].islower():
+            continue
+        cleaned.append(entity)
+
+    return list(set(cleaned))
+
+
 def format_source_tag(rating: Optional[dict]) -> str:
     """Format a rating as a readable tag for evidence annotation.
     
@@ -825,3 +907,78 @@ def annotate_evidence_with_ratings(evidence_text: str, source_url: Optional[str]
     tag = format_source_tag(rating)
     
     return f"{tag} {evidence_text}"
+
+
+def get_mbfc_tool():
+    """Get a LangChain tool that wraps MBFC source lookup.
+    
+    Returns a @tool-decorated async function for the research agent to
+    proactively check source credibility before trusting/fetching content.
+    """
+    from langchain_core.tools import tool
+    
+    @tool
+    async def mbfc_lookup(domain: str) -> str:
+        """Check source credibility and political bias BEFORE trusting content.
+        
+        Use this tool to:
+        - Verify a source is reliable BEFORE fetching full page content
+        - Identify political bias that might affect coverage of a topic
+        - Decide whether to skip unreliable sources (low/very-low factual)
+        - Find alternative sources with different bias for balance
+        
+        WHEN TO USE THIS:
+        - Found a search result from an unfamiliar domain
+        - Evaluating whether to fetch and trust a news source
+        - Building a diverse evidence base (need center/right after finding left sources)
+        - Checking if a source might have ideological bias on a partisan topic
+        
+        SKIP sources that return "Low factual" or "Very Low factual" — they're
+        unreliable for fact-checking. Exception: document that a false claim
+        appeared in unreliable media (but don't trust it as evidence).
+        
+        Args:
+            domain: Website domain (e.g., "reuters.com", "breitbart.com", "bbc.com")
+        """
+        logger.debug(f"MBFC lookup: {domain}")
+        try:
+            # Clean domain input
+            clean_domain = extract_domain(domain)
+            
+            # Get rating (cache-first, scrapes if needed)
+            rating = await get_source_rating(clean_domain)
+            
+            if not rating:
+                return f"No MBFC data for {clean_domain}. Unknown source — verify claims independently."
+            
+            # Format for agent consumption
+            tag = format_source_tag(rating)
+            
+            # Add actionable guidance
+            factual = rating.get("factual_reporting", "")
+            bias = rating.get("bias", "")
+            
+            lines = [f"**{clean_domain}**: {tag}"]
+            
+            if factual in ("low", "very-low"):
+                lines.append("⚠️ UNRELIABLE — skip this source unless documenting misinformation spread")
+            elif factual == "mixed":
+                lines.append("⚠️ MIXED reliability — corroborate with higher-factual sources")
+            elif factual in ("high", "very-high"):
+                lines.append("✓ Reliable source — suitable for fact-checking evidence")
+            
+            if bias in ("extreme-left", "extreme-right"):
+                lines.append(f"⚠️ EXTREME bias — interpret with caution, seek centrist sources")
+            elif bias in ("left", "right"):
+                lines.append(f"Note: {bias.title()} political lean — consider for perspective balance")
+            
+            if rating.get("is_government"):
+                lines.append("⚠️ GOVERNMENT SOURCE — treat as interested party statement, not independent evidence")
+            
+            return "\n".join(lines)
+            
+        except Exception as e:
+            logger.warning(f"MBFC lookup failed for '{domain}': {e}")
+            return f"MBFC lookup failed for '{domain}': {e}"
+    
+    return mbfc_lookup
