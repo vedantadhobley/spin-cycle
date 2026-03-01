@@ -15,7 +15,7 @@ A working end-to-end claim verification pipeline with **flat fact extraction + t
 - **Unified 6-level verdict scale**: `true | mostly_true | mixed | mostly_false | false | unverifiable` with spirit-vs-substance guidance
 - **Single `reasoning` field** — consolidated from separate reasoning/nuance fields for clearer output
 - **Single synthesis activity** uses the thesis as primary rubric when available
-- LangGraph ReAct research agent gathers evidence with dynamically loaded tools (28 max steps, ~14 tool calls per fact)
+- LangGraph ReAct research agent gathers evidence with dynamically loaded tools (38 max steps, ~12 tool calls per fact)
 - **Progress-aware research agent** — pre-model hook injects real-time progress (tool call count, unique URLs, queries used, engines tried, strategic suggestions) before each LLM call, so the agent knows what it's already searched and which engines it hasn't tried
 - **Streaming evidence collection** — agent uses `astream()` instead of `ainvoke()`. If the agent hits its step limit or times out, we keep ALL evidence gathered so far instead of losing everything
 - **LegiScan legislative evidence** — after the research agent finishes, subclaims are programmatically searched against US legislation (bill details, roll call votes with individual member positions, bill text for poison pill detection). Env-var gated via `LEGISCAN_API_KEY`
@@ -216,7 +216,7 @@ The patterns are dynamically appended to `DECOMPOSE_SYSTEM` at runtime via `get_
 **Why:** Ambiguous claims lead to unfocused research. "The President" — which one? "Recently" — when? Normalizing claims before decomposition clarifies what we're actually checking.
 
 **What:**
-- Resolve references: "The President" → "Joe Biden (as of 2026-02-28)"
+- Resolve references: "The President" → "[current president] (as of [date])"
 - Expand time references: "recently" → "in the past 6 months (Sep 2025 - Feb 2026)"
 - Disambiguate entities: "Washington" → "Washington D.C." or "George Washington" or "Washington State"
 - Pass normalized claim to decomposition
@@ -256,7 +256,7 @@ The patterns are dynamically appended to `DECOMPOSE_SYSTEM` at runtime via `get_
 
 ### 1.5.0f — Interested Party Evidence Weighting
 
-**Why:** We extract `interested_parties` during decomposition but don't actually USE this data to weight evidence. An Israeli government statement about Israel should count less than independent Reuters reporting.
+**Why:** We extract `interested_parties` during decomposition but don't actually USE this data to weight evidence. A government's statement about its own actions should count less than independent wire service reporting.
 
 **What:**
 - Pass `interested_parties` to judge activity (DONE)

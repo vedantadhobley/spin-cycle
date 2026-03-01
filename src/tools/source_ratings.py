@@ -835,7 +835,7 @@ def find_rating_by_name(name: str) -> Optional[dict]:
     """Find a source rating by outlet name (reverse lookup).
 
     Searches the source_ratings table for domains matching the outlet name.
-    "Fox News" → finds "foxnews.com", "Wall Street Journal" → finds "wsj.com".
+    "Outlet Name" → finds "outletname.com" via normalized substring matching.
 
     Uses simple normalization: strips spaces, lowercases, searches with LIKE.
     Returns the first match or None.
@@ -843,7 +843,7 @@ def find_rating_by_name(name: str) -> Optional[dict]:
     if not name or len(name) < 3:
         return None
 
-    # Normalize: "Fox News" → "foxnews", "The Daily Wire" → "dailywire"
+    # Normalize: strip "the", remove spaces, lowercase
     normalized = name.lower().replace("the ", "").replace(" ", "")
 
     try:

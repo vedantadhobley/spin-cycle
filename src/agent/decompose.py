@@ -8,9 +8,9 @@ this module expands those parties via Wikidata to discover:
   - Affiliated media holdings
 
 This expansion is CRITICAL for self-serving source detection downstream.
-When a claim is about "Jared Kushner", we need to know that statements from
-"Donald Trump" (father-in-law, via Ivanka) are also self-serving. Wikidata
-provides this mapping with 2-hop family expansion.
+When a claim is about a person, we need to know that statements from their
+in-laws and relatives are also self-serving. Wikidata provides this mapping
+with 2-hop family expansion (e.g., Person A → Spouse → Father-in-law).
 
 ## Why programmatic, not agentic
 
@@ -55,7 +55,7 @@ def _should_expand(name: str) -> bool:
             return True
 
     # People's names: 2+ words, starts with uppercase
-    # (e.g., "Jared Kushner", "Sam Altman", "Donald Trump")
+    # (e.g., "Jane Smith", "John Doe")
     words = name.split()
     if len(words) >= 2 and words[0][0:1].isupper():
         return True

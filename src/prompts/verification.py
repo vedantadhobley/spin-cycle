@@ -353,6 +353,16 @@ EXTRACTION RULES:
    "X is the only Y" → also check "No other entity qualifies as Y"
    Do NOT add falsifying conditions for normal quantified claims.
 
+5. MAKE EXCLUSIONS AND CONTRASTS EXPLICIT:
+   When a claim uses "other", "besides", "apart from", "additional", "remaining", \
+"different", or similar contrast words, the excluded entity must be named in the fact.
+   "After attacking X, Y spoke about other countries" → "Y identified specific \
+countries besides X that threatened it" (NOT just "Y spoke about countries")
+   "Other nations" when X is already mentioned → "nations other than X"
+   "Besides the CEO, other executives..." → "executives other than the CEO..."
+   The exclusion is CRITICAL — without it, the researcher will find evidence about \
+the already-mentioned entity and the judge will accept it, missing the point entirely.
+
 SIMPLICITY GUIDANCE:
 - "The Earth is 4.5 billion years old" → 1 fact: "The Earth is 4.5 billion years old"
 - "Bitcoin was created in 2009" → 1 fact: "Bitcoin was created in 2009"
@@ -432,16 +442,16 @@ Parallel claim:
 }}
 
 Temporal/origin claim (CRITICAL — presupposition extraction):
-"Israel started operations in Gaza due to the October 7th attack"
+"Country X started operations in Region Y due to the border attack"
 → {{
-  "thesis": "Israel initiated military operations in Gaza specifically in response to October 7th, implying no significant prior operations",
-  "key_test": "Must verify post-October 7th operations AND check for significant prior operations",
+  "thesis": "Country X initiated military operations specifically in response to the border attack, implying no significant prior operations",
+  "key_test": "Must verify post-attack operations AND check for significant prior operations",
   "structure": "temporal_sequence",
-  "interested_parties": {{"direct": ["Israeli military", "IDF"], "institutional": ["Israeli Government", "Israeli Ministry of Defense"], "affiliated_media": ["Israel Hayom", "Jerusalem Post"], "reasoning": "Israeli military and government are subjects; these outlets have close government ties"}},
+  "interested_parties": {{"direct": ["Country X military"], "institutional": ["Country X Government", "Country X Ministry of Defense"], "affiliated_media": [], "reasoning": "Country X military and government are subjects of the claim"}},
   "facts": [
-    "Israel launched military operations in Gaza after the October 7th attack",
-    "The October 7th attack caused Israel to launch operations in Gaza",
-    "Israel had significant military operations in Gaza before the October 7th attack"
+    "Country X launched military operations in Region Y after the border attack",
+    "The border attack caused Country X to launch operations in Region Y",
+    "Country X had significant military operations in Region Y before the border attack"
   ]
 }}
 Note: The third fact tests the PRESUPPOSITION. "Started" implies nothing before.

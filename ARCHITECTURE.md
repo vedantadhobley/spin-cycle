@@ -137,26 +137,26 @@ llama.cpp's `--reasoning-budget` flag only supports `-1` (unlimited) or `0` (dis
 The LLM extracts a **flat list of atomic facts** plus **thesis information** that captures the speaker's intent. This approach matches Google SAFE and FActScore — simple, direct fact extraction without template expansion.
 
 ```
-Input:  "The US spends over $800B on military, more than China at $200B. 
+Input:  "Country A spends over $800B on military, more than Country B at $200B.
          Both countries are increasing military spending while cutting foreign aid."
-         
+
 Output: {
-  "thesis": "US and China both prioritize military over aid, with US spending more",
-  "key_test": "US ~$800B, China ~$200B, US > China, AND both must be increasing 
+  "thesis": "Country A and Country B both prioritize military over aid, with A spending more",
+  "key_test": "A ~$800B, B ~$200B, A > B, AND both must be increasing
                military AND both must be cutting foreign aid",
   "structure": "parallel_comparison",
   "facts": [
-    "The US spends over $800 billion on its military",
-    "China spends about $200 billion on its military",
-    "US military spending is greater than China's military spending",
-    "The US is increasing its military spending",
-    "China is increasing its military spending",
-    "The US is cutting its foreign aid budget",
-    "China is cutting its foreign aid budget"
+    "Country A spends over $800 billion on its military",
+    "Country B spends about $200 billion on its military",
+    "Country A's military spending is greater than Country B's",
+    "Country A is increasing its military spending",
+    "Country B is increasing its military spending",
+    "Country A is cutting its foreign aid budget",
+    "Country B is cutting its foreign aid budget"
   ],
   "interested_parties": {
-    "direct": ["US Government", "Chinese Government"],
-    "institutional": ["US Department of Defense", "Chinese Ministry of Defense"],
+    "direct": ["Country A Government", "Country B Government"],
+    "institutional": ["Country A Ministry of Defense", "Country B Ministry of Defense"],
     "affiliated_media": [],
     "reasoning": "Both governments are subjects of the claim"
   }
@@ -204,7 +204,7 @@ These patterns are appended to `DECOMPOSE_SYSTEM` at runtime, replacing the prev
 - `structure` — `simple`, `parallel_comparison`, `causal`, or `ranking`
 - `key_test` — what must ALL be true for the thesis to hold
 
-This is passed to the synthesizer so it evaluates whether the speaker's **argument** survives the evidence. Without this, a claim comparing two countries could be rated `mostly_true` if 5 of 6 facts check out — even if the one false fact (e.g., China NOT cutting aid) completely invalidates the speaker's parallel comparison.
+This is passed to the synthesizer so it evaluates whether the speaker's **argument** survives the evidence. Without this, a claim comparing two countries could be rated `mostly_true` if 5 of 6 facts check out — even if the one false fact (e.g., Country B NOT cutting aid) completely invalidates the speaker's parallel comparison.
 
 **Interested parties extraction and expansion:**
 
@@ -216,7 +216,7 @@ The decompose step identifies parties with potential conflicts of interest throu
    - Corporate ownership chains (subsidiaries, parent companies)
    - Media holdings (critical for source independence)
    - Political affiliations
-   - Family relationships (2-hop: e.g., Kushner → Ivanka → Trump)
+   - Family relationships (2-hop: e.g., Person A → Spouse → Father-in-law)
    - Family members' corporate roles (founder, CEO, chairperson)
 
 The expanded parties object includes:
@@ -246,7 +246,7 @@ This is where the LangGraph ReAct agent runs. For each **atomic fact**:
 4. Tool executes the search → returns results as text
 5. Loop back to pre_model → agent. Progress note updates each iteration
 6. LLM reads results + progress → decides if it needs more → calls another tool or stops
-7. Typically: 8-14 tool calls per sub-claim, ~28 agent steps
+7. Typically: 8-12 tool calls per sub-claim, ~38 max agent steps
 8. Agent timeout: 120s (soft), 180s (Temporal hard limit)
 9. Max steps: 28 (allows ~14 tool calls before hard stop)
 
@@ -269,7 +269,7 @@ All search tools pass results through `source_filter.py` before returning — lo
 
 **MBFC cache population** runs as fire-and-forget background tasks during research. When search results come back, `populate_mbfc_cache()` launches async MBFC scrapes for uncached domains without blocking the agent. A `_mbfc_pending` dedup set prevents the same domain from being scraped multiple times across concurrent searches. By the time the judge runs, the cache is warm.
 
-**Page fetcher entity extraction:** When the agent fetches a full article, SpaCy NER extracts PERSON/ORG entities from the content and includes them in the tool output (e.g., "Entities mentioned: Dario Amodei, Sam Altman, OpenAI"). This gives the agent visibility into who is quoted/mentioned without an additional LLM call.
+**Page fetcher entity extraction:** When the agent fetches a full article, SpaCy NER extracts PERSON/ORG entities from the content and includes them in the tool output (e.g., "Entities mentioned: Person A, Person B, Organization X"). This gives the agent visibility into who is quoted/mentioned without an additional LLM call.
 
 The RESEARCH_SYSTEM prompt explicitly instructs the agent to prefer authoritative sources: government databases, wire services, established news outlets, academic institutions, official statistics agencies.
 
@@ -293,16 +293,16 @@ The critical constraint: **"Do NOT use your own knowledge."** The LLM must reaso
 
 1. **Entity enrichment (SpaCy NER → Wikidata):** All evidence content is concatenated, SpaCy extracts PERSON/ORG entities, new entities not already in `all_parties` are Wikidata-expanded (capped at 8). If a newly discovered entity connects to an existing interested party, it's added to `all_parties` and its media holdings are added to `affiliated_media`.
 
-2. **Publisher enrichment (domain → Wikidata):** Unique source domains are extracted from evidence URLs and Wikidata-expanded to discover ownership chains. This catches cases like "evidence from washingtonpost.com → owned by Bezos → Bezos is an interested party."
+2. **Publisher enrichment (domain → Wikidata):** Unique source domains are extracted from evidence URLs and Wikidata-expanded to discover ownership chains. This catches cases where a news outlet is owned by an interested party.
 
 **4 conflict-of-interest checks** run per evidence item during formatting:
 
 | Check | What it detects | Example |
 |-------|----------------|---------|
-| **Affiliated media** | Source URL matches media owned by interested party | Fox News when Murdoch is in `all_parties` |
+| **Affiliated media** | Source URL matches media owned by interested party | Outlet X when its owner is in `all_parties` |
 | **Quoted interested party** | Evidence content quotes statements from claim subjects | "FBI stated that..." when claim is about FBI conduct |
-| **Publisher ownership** | Source publisher owned by interested party (via MBFC ownership field) | WaPo when Bezos-linked entity is in `all_parties` |
-| **Sub-source MBFC** | Evidence references another publication with poor factual rating or extreme bias | "according to a Daily Wire report" → Daily Wire has Mixed factual |
+| **Publisher ownership** | Source publisher owned by interested party (via MBFC ownership field) | Outlet X when its owner is in `all_parties` |
+| **Sub-source MBFC** | Evidence references another publication with poor factual rating or extreme bias | "according to [outlet]" → outlet has Mixed factual rating |
 
 Each check adds a `⚠️` warning to the evidence header that the LLM sees. The judge prompt has extensive instructions on how to handle self-serving statements, circular evidence, and interested party quotes — including specific patterns to reject and when to verdict "unverifiable."
 
@@ -338,21 +338,21 @@ If there's no evidence, we short-circuit to "unverifiable" without calling the L
 A single synthesis activity that combines sub-claim verdicts into an overall verdict. When thesis info is available (from the decompose step), the synthesizer evaluates whether the **speaker's argument** survives the sub-verdicts — not just whether a majority of facts are true.
 
 ```
-Input:  claim_text = "The US and China are both increasing military..."
+Input:  claim_text = "Country A and Country B are both increasing military..."
         child_results = [
-            {"sub_claim": "US increasing military spending", "verdict": "mostly_true", ...},
-            {"sub_claim": "China increasing military spending", "verdict": "true", ...},
-            {"sub_claim": "US cutting foreign aid", "verdict": "mostly_true", ...},
-            {"sub_claim": "China cutting foreign aid", "verdict": "false", ...}
+            {"sub_claim": "Country A increasing military spending", "verdict": "mostly_true", ...},
+            {"sub_claim": "Country B increasing military spending", "verdict": "true", ...},
+            {"sub_claim": "Country A cutting foreign aid", "verdict": "mostly_true", ...},
+            {"sub_claim": "Country B cutting foreign aid", "verdict": "false", ...}
         ]
         thesis_info = {
-            "thesis": "The US and China are prioritizing military spending over foreign aid.",
+            "thesis": "Country A and Country B are prioritizing military spending over foreign aid.",
             "structure": "parallel_comparison",
             "key_test": "Both countries must show increased military spending AND decreased foreign aid."
         }
         is_final = True
 Output: {"verdict": "mostly_false", "confidence": 0.85,
-         "reasoning": "The thesis requires both countries to be cutting foreign aid. China is actually increasing it, which undermines the core argument. The US part holds — increased military spending and reduced foreign aid, but the parallel comparison fails because China contradicts the thesis."}
+         "reasoning": "The thesis requires both countries to be cutting foreign aid. Country B is actually increasing it, which undermines the core argument. Country A's part holds — increased military spending and reduced foreign aid, but the parallel comparison fails because Country B contradicts the thesis."}
 ```
 
 The thesis is injected as a `SPEAKER'S THESIS` block in the synthesis prompt. The synthesizer is instructed to use the thesis as its **primary rubric** — evaluating whether THAT ARGUMENT survives the sub-verdicts, not whether a numerical majority of facts are true.
@@ -1000,7 +1000,7 @@ See [ROADMAP.md](ROADMAP.md) for the full prioritised improvement plan. Key next
 # Submit a claim
 curl -s -X POST http://localhost:4500/claims \
   -H "Content-Type: application/json" \
-  -d '{"text": "The Great Wall of China is visible from space"}' | python3 -m json.tool
+  -d '{"text": "Bitcoin was created by Satoshi Nakamoto in 2009"}' | python3 -m json.tool
 
 # The response includes the claim ID
 # { "id": "abc123...", "text": "...", "status": "pending" }
@@ -1038,11 +1038,11 @@ docker logs -f spin-cycle-dev-worker
 # With LOG_FORMAT=pretty (default in dev), output looks like:
 # I [WORKER    ] starting: Connecting to Temporal | temporal_host=spin-cycle-dev-temporal:7233 task_queue=spin-cycle-verify
 # I [WORKER    ] ready: Worker listening | task_queue=spin-cycle-verify activity_count=6 workflow_count=1
-# I [CREATE    ] start: Creating claim record | claim=The Great Wall of China is visible from ...
-# I [DECOMPOSE ] start: Decomposing claim | claim=The Great Wall of China is visible from ...
+# I [CREATE    ] start: Creating claim record | claim=Bitcoin was created by Satoshi Nakamoto in ...
+# I [DECOMPOSE ] start: Decomposing claim | claim=Bitcoin was created by Satoshi Nakamoto in ...
 # I [DECOMPOSE ] done: Claim decomposed | sub_count=1
-# I [WORKFLOW  ] leaf_start: Processing leaf sub-claim | sub_claim=The Great Wall of China is visible from space depth=1
-# I [RESEARCH  ] start: Starting research agent | sub_claim=The Great Wall of China is visible from space
+# I [WORKFLOW  ] leaf_start: Processing leaf sub-claim | sub_claim=Bitcoin was created by Satoshi Nakamoto in 2009 depth=1
+# I [RESEARCH  ] start: Starting research agent | sub_claim=Bitcoin was created by Satoshi Nakamoto in 2009
 # I [RESEARCH  ] done: Research complete | evidence_count=6
 # I [JUDGE     ] done: Sub-claim judged | verdict=false confidence=0.95
 # I [SYNTHESIZE] done: Verdict synthesized | verdict=false confidence=0.95

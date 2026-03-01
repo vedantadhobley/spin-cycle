@@ -92,9 +92,9 @@ async def decompose_claim(claim_text: str) -> dict:
        - Family: spouse, parents, children, siblings + 2-hop in-laws
        - Media: ownership ties to news outlets
 
-    The Wikidata expansion is critical: when a claim is about "Jared Kushner",
-    we need to know that "Donald Trump" (father-in-law via Ivanka) is also
-    an interested party whose statements are self-serving.
+    The Wikidata expansion is critical: when a claim is about a person,
+    we need to know that their in-laws (via 2-hop family expansion) are also
+    interested parties whose statements are self-serving.
 
     Returns a dict with:
       - "facts": list of {"text": "..."} dicts, each an atomic fact
@@ -253,14 +253,12 @@ _MEDIA_DOMAIN_ALIASES = {
 def _url_matches_media(url_lower: str, media_outlet: str) -> bool:
     """Check if a URL matches a media outlet name, handling common variations.
     
-    This handles cases like:
-    - "Washington Post" matching washingtonpost.com
-    - "New York Times" matching nytimes.com
-    - "Fox News" matching foxnews.com
-    
+    This handles cases like multi-word outlet names matching their
+    concatenated domain (e.g., "Some Outlet" matching someoutlet.com).
+
     Args:
         url_lower: Lowercase URL to check
-        media_outlet: Name of media outlet (e.g., "Washington Post")
+        media_outlet: Name of media outlet
     
     Returns:
         True if URL appears to be from this media outlet
@@ -274,8 +272,7 @@ def _url_matches_media(url_lower: str, media_outlet: str) -> bool:
                 if alias in url_lower:
                     return True
     
-    # Fall back to generic normalization
-    # "Washington Post" -> "washingtonpost"
+    # Fall back to generic normalization: strip spaces, remove "the"
     normalized = media_lower.replace(" ", "").replace("the", "")
     if normalized and len(normalized) > 3 and normalized in url_lower:
         return True
@@ -293,8 +290,7 @@ def _check_publisher_ownership(url: str, all_parties: list[str]) -> str | None:
 
     Uses the MBFC 'ownership' field (already cached from populate_mbfc_cache)
     to cross-reference against all_parties. Catches cases like:
-    - Fox News (owned by Rupert Murdoch) when Murdoch is in all_parties
-    - Washington Post (owned by Jeff Bezos) when Bezos is in all_parties
+    - A news outlet owned by Person X when Person X is in all_parties
 
     Returns the matching party name if found, None otherwise.
     """
@@ -552,7 +548,7 @@ async def judge_subclaim(
         interest_warnings = []
         
         # Check 1: Is the source URL from affiliated media?
-        # e.g., washingtonpost.com when claim is about Amazon (both owned by Bezos)
+        # e.g., a news outlet owned by the same person/org as the claim subject
         if affiliated_media and url != "N/A":
             url_lower = url.lower()
             for media_outlet in affiliated_media:
@@ -581,7 +577,7 @@ async def judge_subclaim(
                           entities=quoted_entities, url=url)
 
         # Check 3: Is the source publisher owned by an interested party?
-        # e.g., Fox News owned by Murdoch when Murdoch is in all_parties
+        # e.g., a news outlet owned by someone in all_parties
         if not interest_warnings and all_parties and url != "N/A":
             owner_match = _check_publisher_ownership(url, all_parties)
             if owner_match:
@@ -594,7 +590,7 @@ async def judge_subclaim(
                           owner=owner_match, url=url)
 
         # Check 4: Does the evidence reference other publications as sub-sources?
-        # e.g., "according to a Daily Wire report" — check that outlet's MBFC rating
+        # e.g., "according to a [outlet] report" — check that outlet's MBFC rating
         # Only warn for sub-sources with poor factual reporting or extreme bias
         if content:
             try:

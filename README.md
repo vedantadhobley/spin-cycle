@@ -110,7 +110,7 @@ store_result          Writes results to Postgres
 
 The **flat facts** approach (matching Google SAFE and FActScore) means the LLM outputs facts directly as strings, guided by a comprehensive **linguistic patterns taxonomy** that catches presuppositions, quantifier scope, temporal boundaries, causation types, and more.
 
-The thesis extraction ensures the synthesizer understands the **intent** of the claim, not just the individual facts. For example, a claim saying "both US and China are cutting foreign aid" is rated `mostly_false` even though 5/6 sub-facts are true — because China is actually *increasing* foreign aid, which breaks the parallel comparison.
+The thesis extraction ensures the synthesizer understands the **intent** of the claim, not just the individual facts. For example, a claim comparing two countries' policies is rated `mostly_false` even though 5/6 sub-facts are true — because one country's data contradicts the speaker's parallel comparison.
 
 ### 3. Result
 
@@ -191,7 +191,7 @@ There are three ways to submit claims and observe the pipeline.
 # Submit a claim for verification
 curl -s -X POST http://localhost:4500/claims \
   -H "Content-Type: application/json" \
-  -d '{"text": "The Great Wall of China is visible from space"}' | python3 -m json.tool
+  -d '{"text": "Bitcoin was created by Satoshi Nakamoto in 2009"}' | python3 -m json.tool
 
 # Returns something like:
 # { "id": "abc123...", "text": "...", "status": "pending", ... }
@@ -244,7 +244,7 @@ docker logs -f spin-cycle-dev-worker
 # With LOG_FORMAT=pretty (default in dev), you'll see:
 # I [WORKER    ] starting: Connecting to Temporal | temporal_host=... task_queue=spin-cycle-verify
 # I [WORKER    ] ready: Worker listening | task_queue=spin-cycle-verify activity_count=6
-# I [DECOMPOSE ] done: Claim decomposed | sub_count=4 thesis=The US and China are prioritizing...
+# I [DECOMPOSE ] done: Claim decomposed | sub_count=4 thesis=Both countries are prioritizing...
 # I [WORKFLOW  ] decomposed: Claim decomposed into atomic facts | fact_count=4
 # I [RESEARCH  ] start: Starting research agent | sub_claim=The US is increasing military spending
 # I [RESEARCH  ] done: Research complete | evidence_count=6

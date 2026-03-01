@@ -7,8 +7,8 @@ This module provides tools for the research agent to query Wikidata for:
 - Key personnel (CEO, board members)
 
 This helps identify conflicts of interest when evaluating evidence sources.
-For example, if a claim is about Amazon, and we find that Jeff Bezos owns
-both Amazon and the Washington Post, then WaPo coverage is NOT independent.
+For example, if a claim is about Company X, and we find that the CEO also owns
+a major newspaper, then that newspaper's coverage is NOT independent.
 
 Uses Wikidata's:
 - Search API to find entities by name
@@ -71,7 +71,7 @@ FAMILY_PROPERTIES = {
 }
 
 # Corporate roles to also check for family members (hop-2).
-# These capture orgs that family members LEAD — "Trump FOUNDED Board of Peace".
+# These capture orgs that family members LEAD (e.g., "Person A FOUNDED Org X").
 # Excludes employer/member_of/political_party (too noisy for family-of-family).
 FAMILY_CORPORATE_PROPERTIES = {
     "P112": "founder",
@@ -139,7 +139,7 @@ async def search_entity(name: str) -> Optional[str]:
     """Search Wikidata for an entity by name, return its QID.
     
     Args:
-        name: Entity name (e.g., "Jeff Bezos", "Amazon", "FBI")
+        name: Entity name (e.g., "Acme Corp", "John Smith", "FBI")
     
     Returns:
         Wikidata QID (e.g., "Q312") or None if not found
@@ -239,7 +239,7 @@ async def get_media_owned_by(person_or_org: str) -> list[str]:
     This is the key query for conflict of interest detection.
     
     Args:
-        person_or_org: Name of person or org (e.g., "Jeff Bezos", "News Corp")
+        person_or_org: Name of person or org (e.g., "John Smith", "Acme Corp")
     
     Returns:
         List of media outlet names owned by this entity
@@ -303,7 +303,7 @@ async def get_ownership_chain(entity_name: str) -> dict:
 
     Returns:
         {
-            "entity": "Jared Kushner",
+            "entity": "Person A",
             "qid": "Q...",
             "owned_by": [...], "parent_org": [...], "subsidiary": [...],
             "owner_of": [...], "ceo": [...], "founder": [...],
@@ -374,8 +374,8 @@ async def get_ownership_chain(entity_name: str) -> dict:
     # 2-hop family expansion: for each family member, get THEIR family
     # relationships AND corporate roles (founder/chair/CEO/owner — control
     # relationships only, not employer/member_of which would explode).
-    # This catches in-laws: Kushner → Ivanka (spouse) → Trump (father)
-    # AND orgs they lead: Trump → founder: Board of Peace, Trump Org
+    # This catches in-laws: Person A → Spouse B (spouse) → Parent C (father)
+    # AND orgs they lead: Parent C → founder: Org X, Org Y
     family_members = _extract_with_qids(relationships, "spouse") + \
                      _extract_with_qids(relationships, "partner") + \
                      _extract_with_qids(relationships, "father") + \
@@ -540,7 +540,7 @@ def collect_all_connected_parties(result: dict) -> dict:
                 media.update(names_or_dict)
             elif rel_type == "corporate_roles":
                 # Orgs that family members lead/founded/own
-                # e.g., Trump → founder: ["Board of Peace", "Trump Organization"]
+                # e.g., Person A → founder: ["Org X", "Org Y"]
                 for role_name, org_names in names_or_dict.items():
                     orgs.update(org_names)
             else:

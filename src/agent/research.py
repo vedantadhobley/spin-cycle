@@ -507,7 +507,7 @@ def extract_evidence(messages: list) -> list[dict]:
 async def research_claim(
     sub_claim: str,
     interested_parties_context: str = "",
-    max_steps: int = 28,
+    max_steps: int = 38,
     timeout_secs: int = 120,
 ) -> list[dict]:
     """Run the research agent to gather evidence for a sub-claim.
@@ -524,9 +524,9 @@ async def research_claim(
             parties and their Wikidata connections, injected into the
             agent's system prompt as context.
         max_steps: Maximum number of graph steps (the agent's budget).
-                   Each tool call costs ~2 steps (agent node + tool node).
-                   28 steps allows ~12 tool calls — now that wikidata/MBFC
-                   are programmatic, all tool calls are evidence gathering.
+                   Each tool call costs ~3 steps (pre_model + agent + tools).
+                   38 steps allows ~12 tool calls. The final stop costs 2
+                   steps (pre_model + agent deciding no more tools).
         timeout_secs: Soft timeout in seconds. If the agent exceeds this,
                       we return whatever evidence was gathered so far.
                       Default 120s (2 min).

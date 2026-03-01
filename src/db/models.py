@@ -127,7 +127,7 @@ class WikidataCache(Base):
     """
     __tablename__ = "wikidata_cache"
 
-    entity_name = Column(String(256), primary_key=True)  # Search term, e.g., "Jeff Bezos"
+    entity_name = Column(String(256), primary_key=True)  # Search term, e.g., "Acme Corp"
     qid = Column(String(32), nullable=True)  # Wikidata QID, e.g., "Q312", None if not found
     relationships = Column(JSONB, nullable=True)  # Full get_ownership_chain() result
     scraped_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

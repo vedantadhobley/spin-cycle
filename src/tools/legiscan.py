@@ -93,7 +93,7 @@ async def search_bills(query: str, state: str = "US") -> list[dict]:
     """Search for bills matching a query.
 
     Args:
-        query: Search terms (e.g., "Israel security supplemental")
+        query: Search terms (e.g., "healthcare appropriations bill")
         state: State code or "US" for federal (default: "US")
 
     Returns:

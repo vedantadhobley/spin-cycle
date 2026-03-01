@@ -52,12 +52,12 @@ them for granted without explicitly stating them.
 4. Both must be verified — a false presupposition makes the whole claim misleading
 
 **Example:**
-"Israel started operations in Gaza due to October 7th"
-→ Presupposition: "Israel had no significant operations in Gaza before October 7th"
-→ Assertion: "Israel launched new operations in Gaza after October 7th"
-→ Causal claim: "October 7th caused the new operations"
+"Country X started operations in Region Y due to the attack"
+→ Presupposition: "Country X had no significant operations in Region Y before the attack"
+→ Assertion: "Country X launched new operations in Region Y after the attack"
+→ Causal claim: "The attack caused the new operations"
 
-If the presupposition is false (Israel DID have operations before), the claim
+If the presupposition is false (Country X DID have operations before), the claim
 is misleading even if the assertion is technically true.
 
 
@@ -414,6 +414,10 @@ Before finalizing sub-claims, verify you have addressed ALL applicable patterns:
 ☐ **GENERICS**: Is this a generic statement hiding quantification?
 
 ☐ **IMPLICATURE**: What does the claim IMPLY beyond what it states?
+
+☐ **EXCLUSIONS/CONTRASTS**: Did you make "other"/"besides"/"apart from" explicit?
+   - "other nations" → "nations other than [already-mentioned entity]"
+   - Without this, the researcher finds evidence about the wrong entity
 
 ---
 
