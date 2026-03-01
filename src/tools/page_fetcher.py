@@ -195,7 +195,22 @@ def get_page_fetcher_tool():
         if not result["content"]:
             return f"Page at {url} returned no readable content."
 
-        header = f"Page: {result['title']}\nURL: {result['url']}\n\n"
+        # Extract entities from article content via SpaCy NER
+        # This gives the research agent visibility into who/what is mentioned
+        entities_line = ""
+        try:
+            from src.utils.ner import extract_entities
+            entities = extract_entities(result["content"], labels={"PERSON", "ORG"})
+            if entities:
+                names = list(dict.fromkeys(e["text"] for e in entities))[:15]
+                entities_line = f"Entities mentioned: {', '.join(names)}\n"
+        except Exception:
+            pass  # NER failure is non-fatal
+
+        header = f"Page: {result['title']}\nURL: {result['url']}\n"
+        if entities_line:
+            header += entities_line
+        header += "\n"
         return header + result["content"]
 
     return fetch_page_content

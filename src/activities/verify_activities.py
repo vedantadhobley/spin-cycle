@@ -21,16 +21,13 @@ import time
 import uuid
 from datetime import date, datetime, timezone
 
-from langchain_core.messages import SystemMessage, HumanMessage
 from sqlalchemy import select
 from temporalio import activity
 
 from src.db.session import async_session
 from src.db.models import Claim, SubClaim, Evidence, Verdict
 from src.llm import (
-    get_llm,
     invoke_llm,
-    create_fallback,
     LLMInvocationError,
     validate_decompose,
     validate_judge,
@@ -51,7 +48,7 @@ from src.schemas.llm_outputs import (
     SynthesizeOutput,
     InterestedParties,
 )
-from src.tools.source_ratings import get_source_rating_sync, format_source_tag, detect_claim_subject_quotes, extract_quoted_entities
+from src.tools.source_ratings import get_source_rating_sync, format_source_tag, detect_claim_subject_quotes, extract_quoted_entities, find_rating_by_name
 from src.agent.decompose import expand_interested_parties
 from src.utils.logging import log
 from src.utils.text_cleanup import cleanup_text
@@ -124,6 +121,24 @@ async def decompose_claim(claim_text: str) -> dict:
 
         # Normalize interested parties from LLM output
         raw_parties = _normalize_interested_parties(output.interested_parties)
+
+        # Augment with SpaCy NER — catches entities the LLM might miss
+        from src.utils.ner import extract_entities
+        try:
+            claim_entities = extract_entities(claim_text, labels={"PERSON", "ORG"})
+            existing = {p.lower() for p in raw_parties.get("direct", []) + raw_parties.get("institutional", [])}
+            for ent in claim_entities:
+                if ent["text"].lower() not in existing and len(ent["text"]) >= 3:
+                    # People → direct, orgs → institutional
+                    if ent["label"] == "PERSON":
+                        raw_parties["direct"].append(ent["text"])
+                    else:
+                        raw_parties["institutional"].append(ent["text"])
+                    existing.add(ent["text"].lower())
+        except Exception as e:
+            log.debug(activity.logger, "decompose", "ner_fallback",
+                      "SpaCy NER failed, continuing with LLM parties only",
+                      error=str(e))
 
         # Expand via Wikidata (programmatic — adds executives, family, media)
         expanded_parties = await expand_interested_parties(raw_parties)
@@ -429,57 +444,95 @@ async def judge_subclaim(
               source_types=source_types,
               urls=evidence_urls)
 
-    # --- Pre-judge entity enrichment ---
-    # Extract entities quoted in evidence that aren't in all_parties yet,
-    # Wikidata-expand them, and check for connections to interested parties.
-    # This catches conflicts from entities discovered DURING research.
-    all_content = " ".join(ev.get("content", "") for ev in source_evidence)
-    quoted_entities = extract_quoted_entities(all_content)
+    # --- Pre-judge enrichment: entities + source publishers ---
+    # Two enrichment passes before the judge sees evidence:
+    # 1. SpaCy NER extracts people/orgs from evidence text → Wikidata expand
+    # 2. Source publisher domains → Wikidata expand ownership chains
+    # Both check for connections to existing interested parties.
+    from src.tools.wikidata import get_ownership_chain, collect_all_connected_parties
+    from urllib.parse import urlparse
 
-    # Filter to entities not already known
+    async def _enrich_entity(entity: str) -> None:
+        """Wikidata-expand an entity and add connections to interested parties."""
+        try:
+            result = await get_ownership_chain(entity)
+            if result.get("error"):
+                return
+
+            connected = collect_all_connected_parties(result)
+            all_connected = set(connected["people"]) | set(connected["orgs"]) | set(connected["media"])
+            overlap = all_connected & set(all_parties)
+
+            if overlap:
+                all_parties.append(entity)
+                for person in connected["people"]:
+                    if person not in all_parties:
+                        all_parties.append(person)
+                for media in connected["media"]:
+                    if media not in affiliated_media:
+                        affiliated_media.append(media)
+
+                log.info(activity.logger, "judge", "enrichment_found",
+                         "Evidence entity connects to interested party",
+                         entity=entity, overlap=list(overlap)[:5])
+        except Exception as e:
+            log.debug(activity.logger, "judge", "enrichment_error",
+                      "Entity enrichment failed",
+                      entity=entity, error=str(e))
+
+    # Pass 1: Extract entities from evidence content via SpaCy NER
+    all_content = " ".join(ev.get("content", "") for ev in source_evidence)
+    discovered_entities = extract_quoted_entities(all_content)
+
     all_parties_lower = {p.lower() for p in all_parties}
     new_entities = [
-        e for e in quoted_entities
+        e for e in discovered_entities
         if e.lower() not in all_parties_lower
     ]
 
     if new_entities:
-        from src.tools.wikidata import get_ownership_chain, collect_all_connected_parties
+        log.debug(activity.logger, "judge", "ner_entities",
+                  "SpaCy NER extracted new entities from evidence",
+                  new_entities=new_entities[:15])
 
-        log.debug(activity.logger, "judge", "enrichment_start",
-                  "Enriching interested parties with entities from evidence",
-                  new_entities=new_entities[:10])
+        for entity in new_entities[:8]:  # Cap to avoid too many lookups
+            await _enrich_entity(entity)
 
-        for entity in new_entities[:5]:  # Cap to avoid too many lookups
-            try:
-                result = await get_ownership_chain(entity)
-                if result.get("error"):
-                    continue
+    # Pass 2: Wikidata-expand source publishers
+    # Extract unique domains, look up publisher ownership chains
+    publisher_domains = set()
+    for ev in source_evidence:
+        url = ev.get("source_url") or ""
+        if not url or url == "N/A":
+            continue
+        try:
+            hostname = urlparse(url).hostname or ""
+            hostname = hostname.lower()
+            if hostname.startswith("www."):
+                hostname = hostname[4:]
+            if hostname:
+                publisher_domains.add(hostname)
+        except Exception:
+            continue
 
-                connected = collect_all_connected_parties(result)
-                # Check if this entity connects to any known interested party
-                all_connected = set(connected["people"]) | set(connected["orgs"]) | set(connected["media"])
-                overlap = all_connected & set(all_parties)
+    if publisher_domains:
+        # Refresh after pass 1 may have added entities
+        all_parties_lower = {p.lower() for p in all_parties}
 
-                if overlap:
-                    # This quoted entity has connections to interested parties
-                    all_parties.append(entity)
-                    # Also add their connected entities
-                    for person in connected["people"]:
-                        if person not in all_parties:
-                            all_parties.append(person)
-                    for media in connected["media"]:
-                        if media not in affiliated_media:
-                            affiliated_media.append(media)
-
-                    log.info(activity.logger, "judge", "enrichment_found",
-                             "Evidence entity connects to interested party",
-                             entity=entity, overlap=list(overlap)[:5])
-            except Exception as e:
-                log.debug(activity.logger, "judge", "enrichment_error",
-                          "Entity enrichment failed",
-                          entity=entity, error=str(e))
+        for domain in list(publisher_domains)[:6]:
+            if domain in all_parties_lower:
                 continue
+
+            # Normalize domain to a searchable publisher name
+            # "dailywire.com" → "Dailywire", "foxnews.com" → "Foxnews"
+            # Wikidata search is fuzzy enough to handle these
+            name = domain.split(".")[0]
+            if len(name) < 3:
+                continue
+
+            publisher_name = name.title()
+            if publisher_name.lower() not in all_parties_lower:
+                await _enrich_entity(publisher_name)
 
     # Format evidence for the LLM prompt with source bias/credibility ratings
     evidence_parts = []
@@ -539,6 +592,48 @@ async def judge_subclaim(
                 log.debug(activity.logger, "judge", "publisher_ownership_detected",
                           "Source publisher owned by interested party",
                           owner=owner_match, url=url)
+
+        # Check 4: Does the evidence reference other publications as sub-sources?
+        # e.g., "according to a Daily Wire report" — check that outlet's MBFC rating
+        # Only warn for sub-sources with poor factual reporting or extreme bias
+        if content:
+            try:
+                from src.utils.ner import extract_entities
+                # Extract the primary source domain to avoid self-matching
+                primary_domain = ""
+                if url != "N/A":
+                    from urllib.parse import urlparse
+                    primary_domain = urlparse(url).netloc.lower().replace("www.", "")
+
+                content_orgs = extract_entities(content, labels={"ORG"})
+                for org in content_orgs:
+                    org_name = org["text"]
+
+                    # Skip if org name matches the primary source domain
+                    org_normalized = org_name.lower().replace(" ", "")
+                    if primary_domain and org_normalized in primary_domain:
+                        continue
+
+                    sub_rating = find_rating_by_name(org_name)
+                    if sub_rating:
+                        sub_bias = sub_rating.get("bias", "unknown")
+                        sub_factual = sub_rating.get("factual_reporting", "unknown")
+
+                        # Only warn for concerning sub-sources
+                        low_factual = sub_factual.lower() in ("low", "very low", "mixed") if sub_factual else False
+                        extreme_bias = sub_bias.lower() in ("extreme-left", "extreme-right") if sub_bias else False
+                        if not low_factual and not extreme_bias:
+                            continue
+
+                        interest_warnings.append(
+                            f"⚠️ SUB-SOURCE: References {org_name} [{sub_bias} | {sub_factual} factual reporting]"
+                        )
+                        log.debug(activity.logger, "judge", "sub_source_detected",
+                                  "Evidence references another publication",
+                                  sub_source=org_name, bias=sub_bias,
+                                  factual=sub_factual, url=url)
+            except Exception:
+                pass  # NER failure is non-fatal
 
         # Track bias distribution for judge context
         if rating and rating.get("bias"):
