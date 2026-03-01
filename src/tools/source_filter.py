@@ -25,6 +25,12 @@ from src.utils.logging import log, get_logger
 MODULE = "tools"
 logger = get_logger()
 
+# Hold references to background tasks so they don't get garbage-collected
+_background_tasks: set = set()
+
+# Track domains already being scraped in background to avoid duplicate requests
+_mbfc_pending: set = set()
+
 # Hard blocklist — things that are NOT news sources at all.
 # These can never be cited as evidence regardless of content quality.
 HARD_BLOCKED_DOMAINS = {
@@ -202,15 +208,16 @@ def filter_results(results: list[dict], url_key: str = "url") -> list[dict]:
 async def populate_mbfc_cache(results: list[dict], url_key: str = "url") -> None:
     """Pre-populate MBFC cache for domains in search results.
 
-    Call this BEFORE filter_results() so that is_blocked() has MBFC data
-    for unknown domains. Without this, domains not in the seed data would
-    pass through unfiltered.
+    Launches MBFC scrapes as a background task so search tools return
+    immediately without blocking on HTTP calls to MBFC. The cache will
+    be populated by the time the judge runs (seconds later).
 
-    This async-scrapes MBFC for any domain not already cached. Scraping
-    failures are silently ignored — unknown domains pass through and the
-    judge will see them tagged as "[Unrated source]".
+    filter_results() still works — it uses cached data only, so domains
+    not yet scraped pass through as "unrated" and get filtered at judge time.
 
-    Runs concurrently with a cap to avoid hammering MBFC.
+    This avoids the main bottleneck: each MBFC scrape can take up to 15s,
+    and blocking on 4-8 concurrent scrapes per search query was consuming
+    the research agent's entire 120s timeout budget.
     """
     import asyncio
 
@@ -240,13 +247,20 @@ async def populate_mbfc_cache(results: list[dict], url_key: str = "url") -> None
         if cached_rating is not None:
             continue
 
+        # Skip if already being scraped in another background task
+        if domain in _mbfc_pending:
+            continue
+
         domains_to_check.add(domain)
 
     if not domains_to_check:
         return
 
+    # Mark these domains as pending before launching background task
+    _mbfc_pending.update(domains_to_check)
+
     log.debug(logger, MODULE, "mbfc_populate_start",
-              "Pre-populating MBFC cache for search results",
+              "Pre-populating MBFC cache (background)",
               domain_count=len(domains_to_check))
 
     # Import here to avoid circular imports
@@ -261,9 +275,16 @@ async def populate_mbfc_cache(results: list[dict], url_key: str = "url") -> None
                 await get_source_rating(domain)
             except Exception:
                 pass  # Failures are fine — domain will be "unrated"
+            finally:
+                _mbfc_pending.discard(domain)
 
-    await asyncio.gather(*[_check(d) for d in domains_to_check])
+    async def _run_all() -> None:
+        await asyncio.gather(*[_check(d) for d in domains_to_check])
+        log.debug(logger, MODULE, "mbfc_populate_done",
+                  "MBFC cache populated (background)",
+                  domain_count=len(domains_to_check))
 
-    log.debug(logger, MODULE, "mbfc_populate_done",
-              "MBFC cache populated",
-              domain_count=len(domains_to_check))
+    # Fire-and-forget — don't block the search tool
+    task = asyncio.create_task(_run_all())
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)

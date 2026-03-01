@@ -29,6 +29,7 @@ FETCH_TIMEOUT = 15
 USER_AGENT = "SpinCycle/0.1 (claim verification research tool; +https://github.com/vedantadhobley/spin-cycle)"
 
 
+
 def _extract_text(html: str) -> str:
     """Extract readable text from HTML, stripping boilerplate.
 

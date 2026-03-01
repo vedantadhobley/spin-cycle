@@ -35,7 +35,7 @@ LangChain does NOT handle orchestration, retries, scheduling, or state persisten
 - `src/llm.py` — shared `ChatOpenAI` client configuration
 - `src/tools/web_search.py` — `DuckDuckGoSearchResults` tool
 - `src/tools/wikipedia.py` — custom `@tool`-decorated async function
-- `src/activities/verify_activities.py` — all LLM calls use `SystemMessage`/`HumanMessage`
+- `src/activities/verify_activities.py` — all LLM calls via `invoke_llm()` with structured output schemas
 
 ### LangGraph (agent framework)
 
@@ -202,14 +202,29 @@ These patterns are appended to `DECOMPOSE_SYSTEM` at runtime, replacing the prev
 
 This is passed to the synthesizer so it evaluates whether the speaker's **argument** survives the evidence. Without this, a claim comparing two countries could be rated `mostly_true` if 5 of 6 facts check out — even if the one false fact (e.g., China NOT cutting aid) completely invalidates the speaker's parallel comparison.
 
-**Interested parties extraction:**
+**Interested parties extraction and expansion:**
 
-The decompose step also identifies parties with potential conflicts of interest:
+The decompose step identifies parties with potential conflicts of interest through two layers:
+
+1. **LLM extraction** — identifies direct parties, institutional connections, and reasoning
+2. **SpaCy NER augmentation** — `en_core_web_sm` runs on the claim text to catch PERSON/ORG entities the LLM missed (deterministic, CPU-only, milliseconds)
+3. **Wikidata expansion** — each party is programmatically expanded via SPARQL to discover:
+   - Corporate ownership chains (subsidiaries, parent companies)
+   - Media holdings (critical for source independence)
+   - Political affiliations
+   - Family relationships (2-hop: e.g., Kushner → Ivanka → Trump)
+   - Family members' corporate roles (founder, CEO, chairperson)
+
+The expanded parties object includes:
 - `direct`: Entities directly mentioned in the claim
 - `institutional`: Parent organizations, governing bodies
-- `affiliated_media`: Media outlets with ties to interested parties
+- `affiliated_media`: Media outlets owned by or connected to interested parties
+- `all_parties`: Full deduplicated list (used by judge for conflict detection)
+- `wikidata_context`: Formatted text injected into judge and research prompts
 
-This information is passed to the judge so evidence from interested parties can be weighted appropriately.
+**File:** `src/agent/decompose.py` → `expand_interested_parties()`
+**File:** `src/tools/wikidata.py` → `get_ownership_chain()`, `collect_all_connected_parties()`
+**File:** `src/utils/ner.py` → `extract_entities()` (SpaCy NER)
 
 All prompts include `Today's date: {current_date}` (formatted at call time) so the LLM knows the current date when evaluating temporal claims.
 
@@ -225,9 +240,9 @@ This is where the LangGraph ReAct agent runs. For each **atomic fact**:
 2. LLM decides what to search → calls any of the available tools
 3. Tool executes the search → returns results as text
 4. LLM reads results → decides if it needs more → calls another tool or stops
-5. Typically: 2-4 tool calls per sub-claim, 6-10 agent steps
+5. Typically: 8-14 tool calls per sub-claim, ~28 agent steps
 6. Agent timeout: 120s (soft), 180s (Temporal hard limit)
-7. Max steps: 22 (allows ~10 tool calls before hard stop)
+7. Max steps: 28 (allows ~14 tool calls before hard stop)
 
 The research agent uses **thinking=off**. The ReAct loop is pure tool-routing — picking search queries and deciding when to stop. Thinking mode wastes ~25-45s per iteration generating `<think>` blocks that nobody reads, just to produce an 8-token tool call. With thinking off, the same search queries are produced in ~3s per iteration.
 
@@ -240,6 +255,10 @@ The research agent uses **thinking=off**. The ReAct loop is pure tool-routing �
 - `page_fetcher` — Fetches and extracts text from URLs found in search results.
 
 All search tools pass results through `source_filter.py` before returning — low-quality sources (Reddit, Quora, social media, content farms, etc.) are silently dropped. See **Source Quality Filtering** below.
+
+**MBFC cache population** runs as fire-and-forget background tasks during research. When search results come back, `populate_mbfc_cache()` launches async MBFC scrapes for uncached domains without blocking the agent. A `_mbfc_pending` dedup set prevents the same domain from being scraped multiple times across concurrent searches. By the time the judge runs, the cache is warm.
+
+**Page fetcher entity extraction:** When the agent fetches a full article, SpaCy NER extracts PERSON/ORG entities from the content and includes them in the tool output (e.g., "Entities mentioned: Dario Amodei, Sam Altman, OpenAI"). This gives the agent visibility into who is quoted/mentioned without an additional LLM call.
 
 The RESEARCH_SYSTEM prompt explicitly instructs the agent to prefer authoritative sources: government databases, wire services, established news outlets, academic institutions, official statistics agencies.
 
@@ -257,6 +276,28 @@ After the agent finishes, we extract evidence from the conversation:
 The LLM evaluates evidence for a single sub-claim. This is NOT agentic — it's a single LLM call with structured output. Uses **thinking=off** — the structured prompt guides reasoning explicitly, and thinking mode generates 5000-9500 tokens (3-4 min) without improving verdict quality.
 
 The critical constraint: **"Do NOT use your own knowledge."** The LLM must reason only from the evidence provided. This is what makes verdicts trustworthy — they're grounded in real, citable sources.
+
+**Pre-judge enrichment** runs before the LLM sees any evidence, in two passes:
+
+1. **Entity enrichment (SpaCy NER → Wikidata):** All evidence content is concatenated, SpaCy extracts PERSON/ORG entities, new entities not already in `all_parties` are Wikidata-expanded (capped at 8). If a newly discovered entity connects to an existing interested party, it's added to `all_parties` and its media holdings are added to `affiliated_media`.
+
+2. **Publisher enrichment (domain → Wikidata):** Unique source domains are extracted from evidence URLs and Wikidata-expanded to discover ownership chains. This catches cases like "evidence from washingtonpost.com → owned by Bezos → Bezos is an interested party."
+
+**4 conflict-of-interest checks** run per evidence item during formatting:
+
+| Check | What it detects | Example |
+|-------|----------------|---------|
+| **Affiliated media** | Source URL matches media owned by interested party | Fox News when Murdoch is in `all_parties` |
+| **Quoted interested party** | Evidence content quotes statements from claim subjects | "FBI stated that..." when claim is about FBI conduct |
+| **Publisher ownership** | Source publisher owned by interested party (via MBFC ownership field) | WaPo when Bezos-linked entity is in `all_parties` |
+| **Sub-source MBFC** | Evidence references another publication with poor factual rating or extreme bias | "according to a Daily Wire report" → Daily Wire has Mixed factual |
+
+Each check adds a `⚠️` warning to the evidence header that the LLM sees. The judge prompt has extensive instructions on how to handle self-serving statements, circular evidence, and interested party quotes — including specific patterns to reject and when to verdict "unverifiable."
+
+**Source rating tags** from MBFC (Media Bias/Fact Check) are added to each evidence item:
+- `[Center | Very High factual]` — bias and factual reporting rating
+- `[Unrated source]` — domain not in MBFC database
+- Bias distribution tracking warns if evidence skews heavily left or right
 
 ```
 Input:  sub_claim = "Bitcoin was created by Satoshi Nakamoto in 2009"

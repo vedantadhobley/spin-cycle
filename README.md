@@ -56,7 +56,10 @@ Because we're putting the spin through the wringer.
 | LLM toolkit | [LangChain](https://python.langchain.com/) | ChatOpenAI client, tool wrappers, message types |
 | Workflow engine | [Temporal](https://temporal.io/) | Durable execution, retries, scheduling, visibility |
 | LLM | Qwen3.5-35B-A3B (on joi via llama.cpp/ROCm) | Single instance, ~38 tok/s sustained throughput |
-| Database | PostgreSQL 16 + SQLAlchemy 2.0 (async) | Claims, sub-claims, evidence, verdicts |
+| NER | [SpaCy](https://spacy.io/) (en_core_web_sm) | Entity extraction from claims and evidence (CPU, ~ms) |
+| Knowledge graph | [Wikidata](https://www.wikidata.org/) SPARQL | Ownership chains, media holdings, family relationships |
+| Source ratings | [MBFC](https://mediabiasfactcheck.com/) | Bias and factual reporting ratings (scraped + cached) |
+| Database | PostgreSQL 16 + SQLAlchemy 2.0 (async) | Claims, sub-claims, evidence, verdicts, source ratings |
 | API | FastAPI | REST endpoints for claim submission and querying |
 
 ## How It Works
@@ -78,13 +81,17 @@ create_claim          Creates DB record (skipped if called via API)
     ↓
 decompose_claim       LLM extracts flat atomic facts + thesis
                       Guided by 15-category linguistic pattern taxonomy
+                      SpaCy NER augments entity extraction
+                      Wikidata expands parties → ownership, media, family
     ↓
 For each batch of 2 facts (parallel):
     research_subclaim   LangGraph ReAct agent searches
        ↓                SearXNG + DuckDuckGo + Serper +
        ↓                Brave + Wikipedia + page_fetcher
-       ↓                (all filtered for source quality)
-    judge_subclaim      LLM evaluates evidence (6-level verdict scale)
+       ↓                (source quality filtered, MBFC cached in background)
+    judge_subclaim      Pre-judge: SpaCy NER + Wikidata enrichment
+       ↓                4 conflict-of-interest checks per evidence item
+       ↓                LLM evaluates evidence (6-level verdict scale)
     ↓
 synthesize_verdict    LLM combines sub-verdicts using the speaker's thesis
                       as primary rubric (not naive fact counting)
@@ -290,7 +297,9 @@ spin-cycle/
 │   ├── llm.py                      # Shared LLM client → joi (instruct + thinking)
 │   │
 │   ├── utils/                      # Shared utilities
-│   │   └── logging.py              # Structured logging (JSON for Loki, pretty for dev)
+│   │   ├── logging.py              # Structured logging (JSON for Loki, pretty for dev)
+│   │   ├── ner.py                  # SpaCy NER — entity extraction (PERSON/ORG)
+│   │   └── text_cleanup.py         # Grammar/spell check for LLM output
 │   │
 │   ├── api/                        # FastAPI backend
 │   │   ├── app.py                  # App + lifespan
@@ -299,16 +308,19 @@ spin-cycle/
 │   │       └── claims.py           # Claim CRUD
 │   │
 │   ├── agent/                      # LangGraph agents
-│   │   └── research.py             # ReAct agent (multi-source search)
+│   │   ├── research.py             # ReAct agent (multi-source search)
+│   │   └── decompose.py            # Wikidata expansion for interested parties
 │   │
 │   ├── tools/                      # Evidence gathering tools
-│   │   ├── source_filter.py        # Domain blocklist — filters junk sources
+│   │   ├── source_filter.py        # Domain blocklist + MBFC cache population
+│   │   ├── source_ratings.py       # MBFC bias/factual ratings (scrape + cache)
+│   │   ├── wikidata.py             # Wikidata SPARQL — ownership chains, relationships
 │   │   ├── searxng.py              # SearXNG meta-search (self-hosted)
 │   │   ├── serper.py               # Serper (Google Search API)
 │   │   ├── brave.py                # Brave Search API
 │   │   ├── web_search.py           # DuckDuckGo
 │   │   ├── wikipedia.py            # Wikipedia API
-│   │   └── page_fetcher.py         # URL → text extraction
+│   │   └── page_fetcher.py         # URL → text extraction + SpaCy entity metadata
 │   │
 │   ├── prompts/                    # LLM prompts (heavily documented)
 │   │   ├── verification.py         # Decompose, Research, Judge, Synthesize
@@ -318,7 +330,7 @@ spin-cycle/
 │   │   └── verify.py               # VerifyClaimWorkflow
 │   │
 │   ├── activities/
-│   │   └── verify_activities.py    # 6 Temporal activities
+│   │   └── verify_activities.py    # Temporal activities (decompose, research, judge, synthesize, store)
 │   │
 │   ├── db/
 │   │   ├── models.py               # SQLAlchemy models
@@ -337,8 +349,7 @@ spin-cycle/
 1. **Alembic migrations** — proper database schema versioning (currently using raw SQL ALTER TABLE)
 2. **Extraction pipeline** — automated claim ingestion from RSS feeds via scheduled Temporal workflows
 3. **Adaptive research depth** — scale research effort based on sub-claim complexity
-4. **Source credibility scoring** — tiered scoring system (Reuters > random blog) for evidence weighting
-5. **Calibration test suite** — benchmark against known claims to measure accuracy
-6. **LangFuse** — self-hosted LLM observability for prompt debugging
+4. **Calibration test suite** — benchmark against known claims to measure accuracy
+5. **LangFuse** — self-hosted LLM observability for prompt debugging
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full technical deep dive, including the extraction pipeline design, database schema details, and how LangChain/LangGraph/Temporal fit together.
