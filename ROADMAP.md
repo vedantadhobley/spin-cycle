@@ -4,7 +4,7 @@ Where spin-cycle is, where it needs to go, and what each improvement actually do
 
 ---
 
-## What We Have (v0.6)
+## What We Have (v0.7)
 
 A working end-to-end claim verification pipeline with **flat fact extraction + thesis-aware synthesis**:
 - Manual claim submission via API
@@ -15,7 +15,10 @@ A working end-to-end claim verification pipeline with **flat fact extraction + t
 - **Unified 6-level verdict scale**: `true | mostly_true | mixed | mostly_false | false | unverifiable` with spirit-vs-substance guidance
 - **Single `reasoning` field** — consolidated from separate reasoning/nuance fields for clearer output
 - **Single synthesis activity** uses the thesis as primary rubric when available
-- LangGraph ReAct research agent gathers evidence with dynamically loaded tools (22 max steps, ~10 tool calls per fact)
+- LangGraph ReAct research agent gathers evidence with dynamically loaded tools (28 max steps, ~14 tool calls per fact)
+- **Progress-aware research agent** — pre-model hook injects real-time progress (tool call count, unique URLs, queries used, engines tried, strategic suggestions) before each LLM call, so the agent knows what it's already searched and which engines it hasn't tried
+- **Streaming evidence collection** — agent uses `astream()` instead of `ainvoke()`. If the agent hits its step limit or times out, we keep ALL evidence gathered so far instead of losing everything
+- **LegiScan legislative evidence** — after the research agent finishes, subclaims are programmatically searched against US legislation (bill details, roll call votes with individual member positions, bill text for poison pill detection). Env-var gated via `LEGISCAN_API_KEY`
 - **Source quality filtering** — domain blocklist (~70 domains) silently drops Reddit, Quora, social media, content farms from all search results
 - **3-tier source hierarchy** in prompts — primary documents (charters, legislation, data) > independent reporting (Reuters, BBC) > interested-party statements (government websites, politician claims). Government sites explicitly classified as political actor communications, not neutral sources
 - **All pipeline steps use thinking=off** — llama.cpp lacks thinking token limits, so thinking mode generates excessive internal monologue (5000-9500 tokens) without improving output quality
@@ -34,6 +37,11 @@ A working end-to-end claim verification pipeline with **flat fact extraction + t
 - **DuckDuckGo** (free fallback, always available, no key needed)
 - **Wikipedia** (always available, no key needed)
 - **Page fetcher** (reads full page text from URLs, always available)
+
+**Programmatic data sources (run deterministically, NOT as agent tools):**
+- **Wikidata** — ownership chains, media holdings, family relationships (at decompose time)
+- **MBFC** — bias/factual ratings for source quality filtering and judge annotations
+- **LegiScan** — US legislation search, bill text, roll call votes (after research agent)
 
 **What's missing to make this legit:**
 
@@ -60,6 +68,53 @@ The agent uses these tools in combination — it decides which tools to call, re
 ### ~~1.1b — SearXNG Meta-Search~~ (Merged into 1.1)
 
 SearXNG is now the primary search tool, running self-hosted in the Docker stack.
+
+### 1.1c — LegiScan Legislative Evidence (DONE)
+
+**Status:** ✅ Implemented in `src/tools/legiscan.py`
+
+**Why:** Claims about legislation, voting records, and congressional behavior need structured legislative data — not just news articles *about* bills, but the actual bill text, vote tallies, and individual member positions.
+
+**What was implemented:**
+
+LegiScan runs **programmatically** after the research agent finishes (like Wikidata and MBFC — not an agent tool). For each subclaim:
+- Searches LegiScan for matching US legislation
+- **Top bill**: full treatment — bill details (sponsors, status, history), roll call votes (individual member Yea/Nay/Absent positions), and bill TEXT (the actual legislative language, decoded from base64, truncated to 8000 chars)
+- **Next 2 bills**: details only (conserves API quota)
+- Evidence items are appended alongside the agent's web search results
+
+The bill text is the key value-add. Web search finds articles *about* a bill, but only LegiScan provides the actual legislative language. This lets the judge identify "poison pills" — provisions slipped into otherwise popular bills that explain otherwise puzzling voting patterns.
+
+- Free Civic API tier: 30,000 queries/month
+- Env-var gated: `LEGISCAN_API_KEY`
+- Data is immutable (past votes don't change) → highly cacheable
+
+### 1.1d — Progress-Aware Research Agent (DONE)
+
+**Status:** ✅ Implemented in `src/agent/research.py`
+
+**Why:** The research agent was "flying blind" — it didn't know what it had already searched, how many unique sources it had collected, or which search engines it hadn't tried yet. This led to redundant searches and poor engine diversity.
+
+**What was implemented:**
+
+A `pre_model_hook` runs before every LLM call in the ReAct loop. It analyzes the conversation history and injects a progress summary:
+- Tool call count (budget awareness)
+- Unique URLs and domains found (evidence diversity)
+- Search queries used (avoid repeats)
+- Engines tried (suggest untried engines)
+- Strategic suggestions (e.g., "fetch full articles", "try Brave for diversity", "you have good depth — consider wrapping up")
+
+The progress note is ephemeral (returned via `llm_input_messages`, not written to state), so it doesn't accumulate across iterations.
+
+### 1.1e — Streaming Evidence Collection (DONE)
+
+**Status:** ✅ Implemented in `src/agent/research.py`
+
+**Why:** Using `ainvoke()`, if the agent hit its step limit (`GraphRecursionError`) or timed out, ALL evidence was lost. The agent would gather 10+ good evidence items over ~2 minutes, then the exception would discard everything.
+
+**What was implemented:**
+
+Switched from `ainvoke()` to `astream()` with `stream_mode="updates"`. Messages are collected incrementally as the agent works. If the agent is interrupted (step limit, timeout, any exception), we extract evidence from whatever messages were collected. Only if zero evidence was gathered do we fall back to the direct search fallback.
 
 ### 1.2 — News API Integration
 
@@ -494,7 +549,10 @@ What to build next, in order of impact:
 
 | Priority | Item | Why |
 |----------|------|-----|
-| **1** | **Linguistic pattern taxonomy (1.5.0)** | Foundational — all verification depends on correct decomposition |
+| ~~**1**~~ | ~~**Linguistic pattern taxonomy (1.5.0)**~~ | ✅ Done |
+| ~~**—**~~ | ~~LegiScan legislative evidence (1.1c)~~ | ✅ Done |
+| ~~**—**~~ | ~~Progress-aware research agent (1.1d)~~ | ✅ Done |
+| ~~**—**~~ | ~~Streaming evidence collection (1.1e)~~ | ✅ Done |
 | **2** | Alembic migrations | Unblocks all future schema changes |
 | **3** | Checkability filter (1.5.0b) | Stop wasting cycles on uncheckable claims |
 | **4** | Confidence-weighted synthesis (1.5.1) | Low effort, immediately improves verdict quality |

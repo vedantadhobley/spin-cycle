@@ -41,6 +41,7 @@ services:
       NEWSAPI_KEY: ${NEWSAPI_KEY:-}
       SERPER_API_KEY: ${SERPER_API_KEY:-}
       BRAVE_API_KEY: ${BRAVE_API_KEY:-}
+      LEGISCAN_API_KEY: ${LEGISCAN_API_KEY:-}
       LOG_FORMAT: ${LOG_FORMAT:-json}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:
@@ -72,6 +73,7 @@ services:
       NEWSAPI_KEY: ${NEWSAPI_KEY:-}
       SERPER_API_KEY: ${SERPER_API_KEY:-}
       BRAVE_API_KEY: ${BRAVE_API_KEY:-}
+      LEGISCAN_API_KEY: ${LEGISCAN_API_KEY:-}
       LOG_FORMAT: ${LOG_FORMAT:-json}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:

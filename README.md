@@ -45,6 +45,13 @@ Because we're putting the spin through the wringer.
               │               │ Wikipedia   │                    │
               │               │ Page Fetch  │                    │
               │               └─────────────┘                    │
+              │                      │                            │
+              │               ┌──────▼──────┐                    │
+              │               │ Programmatic│                    │
+              │               │ LegiScan    │                    │
+              │               │ Wikidata    │                    │
+              │               │ MBFC        │                    │
+              │               └─────────────┘                    │
               └─────────────────────────────────────────────────┘
 ```
 
@@ -59,6 +66,7 @@ Because we're putting the spin through the wringer.
 | NER | [SpaCy](https://spacy.io/) (en_core_web_sm) | Entity extraction from claims and evidence (CPU, ~ms) |
 | Knowledge graph | [Wikidata](https://www.wikidata.org/) SPARQL | Ownership chains, media holdings, family relationships |
 | Source ratings | [MBFC](https://mediabiasfactcheck.com/) | Bias and factual reporting ratings (scraped + cached) |
+| Legislation | [LegiScan](https://legiscan.com/) API | US bill search, roll call votes, bill text (Civic API tier) |
 | Database | PostgreSQL 16 + SQLAlchemy 2.0 (async) | Claims, sub-claims, evidence, verdicts, source ratings |
 | API | FastAPI | REST endpoints for claim submission and querying |
 
@@ -85,10 +93,11 @@ decompose_claim       LLM extracts flat atomic facts + thesis
                       Wikidata expands parties → ownership, media, family
     ↓
 For each batch of 2 facts (parallel):
-    research_subclaim   LangGraph ReAct agent searches
+    research_subclaim   LangGraph ReAct agent (with progress awareness)
        ↓                SearXNG + DuckDuckGo + Serper +
        ↓                Brave + Wikipedia + page_fetcher
        ↓                (source quality filtered, MBFC cached in background)
+       ↓                + LegiScan enrichment (bills, votes, bill text)
     judge_subclaim      Pre-judge: SpaCy NER + Wikidata enrichment
        ↓                4 conflict-of-interest checks per evidence item
        ↓                LLM evaluates evidence (6-level verdict scale)
@@ -168,6 +177,7 @@ docker compose -f docker-compose.dev.yml ps
 | API | http://localhost:4500 | FastAPI backend |
 | Temporal UI | http://localhost:4501 | Workflow dashboard |
 | Adminer | http://localhost:4502 | Postgres web UI (Dracula theme) |
+| SearXNG | http://localhost:4503 | Self-hosted meta-search engine |
 
 Adminer login: Server `spin-cycle-dev-postgres`, User `spincycle`, Password `spin-cycle-dev`, Database `spincycle`.
 
@@ -257,6 +267,7 @@ docker logs -f spin-cycle-dev-worker
 | `NEWSAPI_KEY` | (empty) | NewsAPI key (not currently wired — future use) |
 | `SERPER_API_KEY` | (empty) | Serper key for Google search evidence |
 | `BRAVE_API_KEY` | (empty) | Brave Search API key |
+| `LEGISCAN_API_KEY` | (empty) | LegiScan Civic API key (US legislation, votes, bill text) |
 | `SEARXNG_URL` | `http://searxng:8080` | SearXNG meta-search endpoint (self-hosted) |
 
 ## Port Allocation
@@ -266,6 +277,7 @@ docker logs -f spin-cycle-dev-worker
 | Base | 4500 | 3500 | FastAPI API |
 | +1 | 4501 | 3501 | Temporal UI |
 | +2 | 4502 | 3502 | Adminer |
+| +3 | 4503 | — | SearXNG (dev only) |
 
 ## Database
 
@@ -315,6 +327,7 @@ spin-cycle/
 │   │   ├── source_filter.py        # Domain blocklist + MBFC cache population
 │   │   ├── source_ratings.py       # MBFC bias/factual ratings (scrape + cache)
 │   │   ├── wikidata.py             # Wikidata SPARQL — ownership chains, relationships
+│   │   ├── legiscan.py             # LegiScan API — US legislation, votes, bill text
 │   │   ├── searxng.py              # SearXNG meta-search (self-hosted)
 │   │   ├── serper.py               # Serper (Google Search API)
 │   │   ├── brave.py                # Brave Search API

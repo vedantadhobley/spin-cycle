@@ -634,6 +634,10 @@ IMPORTANT — you have a budget of 8-12 tool calls total. Be efficient:
 5. If evidence is thin, try one more search with different terms
 6. Stop and summarize. Do NOT keep searching after 6-7 searches.
 
+A [RESEARCH PROGRESS] note may appear in your conversation showing what \
+you have gathered so far — unique sources, domains, search engines used. \
+Use this to avoid repeating searches and to identify gaps in your coverage.
+
 You are done when:
 - You have evidence from BOTH directions (supporting + contradicting), OR
 - You have done 5 searches and evidence only points one way, OR

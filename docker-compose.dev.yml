@@ -41,6 +41,7 @@ services:
       NEWSAPI_KEY: ${NEWSAPI_KEY:-}
       SERPER_API_KEY: ${SERPER_API_KEY:-}
       BRAVE_API_KEY: ${BRAVE_API_KEY:-}
+      LEGISCAN_API_KEY: ${LEGISCAN_API_KEY:-}
       SEARXNG_URL: http://spin-cycle-dev-searxng:8080
       LOG_FORMAT: ${LOG_FORMAT:-pretty}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
@@ -79,6 +80,7 @@ services:
       NEWSAPI_KEY: ${NEWSAPI_KEY:-}
       SERPER_API_KEY: ${SERPER_API_KEY:-}
       BRAVE_API_KEY: ${BRAVE_API_KEY:-}
+      LEGISCAN_API_KEY: ${LEGISCAN_API_KEY:-}
       SEARXNG_URL: http://spin-cycle-dev-searxng:8080
       LOG_FORMAT: ${LOG_FORMAT:-pretty}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}

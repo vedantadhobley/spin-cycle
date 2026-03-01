@@ -32,21 +32,13 @@ _CORP_INDICATORS = {
     "labs", "ai", "group", "holdings", "media", "news", "foundation",
 }
 
-# Known corporate entities that should always be expanded
-_KNOWN_CORPS = {
-    "openai", "anthropic", "google", "meta", "microsoft", "apple", "amazon",
-    "tesla", "twitter", "x corp", "facebook", "nvidia", "ibm", "oracle",
-    "palantir", "clearview", "bytedance", "tiktok", "alibaba", "tencent",
-}
-
-
 def _should_expand(name: str) -> bool:
     """Check if a party name is worth querying Wikidata for.
 
     Returns True for:
-    - Known corporations
     - Names with corporate indicators
     - People's names (2+ words, likely a person)
+    - Single-word proper nouns (likely orgs)
 
     Returns False for:
     - Abstract concepts ("the economy", "democracy")
@@ -56,10 +48,6 @@ def _should_expand(name: str) -> bool:
 
     if len(name_lower) < 3:
         return False
-
-    # Known corps — always expand
-    if name_lower in _KNOWN_CORPS:
-        return True
 
     # Corporate indicators
     for indicator in _CORP_INDICATORS:

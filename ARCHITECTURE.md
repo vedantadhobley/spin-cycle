@@ -45,28 +45,29 @@ LangGraph is the **agent engine**. It builds on LangChain to create state machin
 - **Tool calling**: the LLM decides which tools to call, the graph executes them, feeds results back
 - **State persistence**: every step reads from and writes to a typed state object
 
-The critical pattern in Spin Cycle is the **ReAct (Reason + Act) agent**:
+The critical pattern in Spin Cycle is the **ReAct (Reason + Act) agent** with progress awareness:
 
 ```
-    ┌──────────┐     ┌───────┐
-    │  agent   │────▶│ tools │
-    │  (LLM)   │◀────│       │
-    └────┬─────┘     └───────┘
-         │ (no more tool calls)
-         ▼
-        END
+    ┌────────────┐     ┌──────────┐     ┌───────┐
+    │ pre_model  │────▶│  agent   │────▶│ tools │
+    │ (progress) │     │  (LLM)   │◀────│       │
+    └────────────┘     └────┬─────┘     └───────┘
+                            │ (no more tool calls)
+                            ▼
+                           END
 ```
 
-1. LLM receives the conversation + tool definitions
-2. LLM decides to call a tool → returns an `AIMessage` with `tool_calls`
-3. Graph executes the tool → appends `ToolMessage` with results
-4. Loop back to LLM — it now sees the tool results
-5. LLM decides it has enough → returns a text response → graph ends
+1. **Pre-model hook** analyzes the conversation so far — counting tool calls, unique URLs, search queries, engines tried — and injects a progress summary into the LLM's system message (ephemeral, doesn't modify state)
+2. LLM receives the conversation + tool definitions + progress note
+3. LLM decides to call a tool → returns an `AIMessage` with `tool_calls`
+4. Graph executes the tool → appends `ToolMessage` with results
+5. Loop back to pre_model → agent. The progress note updates each iteration, giving the agent real-time awareness of what it has
+6. LLM decides it has enough → returns a text response → graph ends
 
-This is what makes the research step **agentic** — the LLM autonomously decides what to search, reads results, decides if it needs more, and adapts its strategy.
+This is what makes the research step **agentic** — the LLM autonomously decides what to search, reads results, knows what it's already tried (via progress), and adapts its strategy.
 
 **Where it's used:**
-- `src/agent/research.py` — `create_react_agent()` builds the ReAct agent for evidence gathering
+- `src/agent/research.py` — `create_react_agent()` builds the ReAct agent with `pre_model_hook=_research_pre_model_hook`
 
 ### Temporal (durable workflow orchestration)
 
@@ -83,15 +84,18 @@ The key insight: **LangGraph runs inside Temporal activities, not instead of the
 ```
 Temporal Workflow
 └── Activity: research_subclaim (retryable, timeout: 180s)
-    └── LangGraph ReAct Agent (cycles between LLM and tools)
-        ├── LLM call (via LangChain ChatOpenAI)
-        ├── SearXNG search (via LangChain tool, filtered by source_filter)
-        ├── DuckDuckGo search (via LangChain tool, filtered by source_filter)
-        ├── Serper / Brave search (via LangChain tool, filtered by source_filter)
-        ├── Wikipedia search (via LangChain tool)
-        ├── Page fetcher (URL → text extraction, blocked URLs rejected)
-        ├── LLM call (sees results, decides next action)
-        └── ... (until LLM decides it has enough)
+    ├── LangGraph ReAct Agent (cycles between LLM and tools)
+    │   ├── pre_model_hook (injects progress: queries used, URLs found, engines tried)
+    │   ├── LLM call (via LangChain ChatOpenAI + progress awareness)
+    │   ├── SearXNG search (via LangChain tool, filtered by source_filter)
+    │   ├── DuckDuckGo search (via LangChain tool, filtered by source_filter)
+    │   ├── Serper / Brave search (via LangChain tool, filtered by source_filter)
+    │   ├── Wikipedia search (via LangChain tool)
+    │   ├── Page fetcher (URL → text extraction, blocked URLs rejected)
+    │   ├── LLM call (sees results + progress, decides next action)
+    │   └── ... (until LLM decides it has enough)
+    └── Programmatic enrichment
+        └── LegiScan (US legislation: bill details, roll call votes, bill text)
 ```
 
 Temporal handles the **macro orchestration** (decompose → research → judge → synthesize → store). LangGraph handles the **micro orchestration** (search → read → decide → search more).
@@ -236,23 +240,30 @@ All prompts include `Today's date: {current_date}` (formatted at call time) so t
 
 This is where the LangGraph ReAct agent runs. For each **atomic fact**:
 
-1. Agent receives: "Find evidence about: {sub-claim}"
-2. LLM decides what to search → calls any of the available tools
-3. Tool executes the search → returns results as text
-4. LLM reads results → decides if it needs more → calls another tool or stops
-5. Typically: 8-14 tool calls per sub-claim, ~28 agent steps
-6. Agent timeout: 120s (soft), 180s (Temporal hard limit)
-7. Max steps: 28 (allows ~14 tool calls before hard stop)
+1. **Pre-model hook** injects a progress note into the system message — tool call count, unique URLs found, search queries used, engines tried, strategic suggestions (e.g., "try Brave for source diversity", "fetch full articles from your best URLs")
+2. Agent receives: "Find evidence about: {sub-claim}" + progress awareness
+3. LLM decides what to search → calls any of the available tools
+4. Tool executes the search → returns results as text
+5. Loop back to pre_model → agent. Progress note updates each iteration
+6. LLM reads results + progress → decides if it needs more → calls another tool or stops
+7. Typically: 8-14 tool calls per sub-claim, ~28 agent steps
+8. Agent timeout: 120s (soft), 180s (Temporal hard limit)
+9. Max steps: 28 (allows ~14 tool calls before hard stop)
+
+**Streaming evidence collection:** The agent uses `astream()` with `stream_mode="updates"` instead of `ainvoke()`. Messages are collected incrementally as the agent works. If the agent hits its step limit (`GraphRecursionError`) or times out, we keep ALL evidence gathered up to that point instead of losing everything. This replaced a direct `ainvoke()` call that would return nothing on interruption.
 
 The research agent uses **thinking=off**. The ReAct loop is pure tool-routing — picking search queries and deciding when to stop. Thinking mode wastes ~25-45s per iteration generating `<think>` blocks that nobody reads, just to produce an 8-token tool call. With thinking off, the same search queries are produced in ~3s per iteration.
 
-**Tools available to the agent:**
+**Tools available to the agent (dynamically loaded based on API keys):**
 - `searxng_search` — SearXNG meta-search (news, general web). Self-hosted, no API key.
 - `web_search` — DuckDuckGo search (fallback/supplementary). No API key needed.
 - `serper_search` — Google search via Serper API. Requires `SERPER_API_KEY`.
 - `brave_search` — Brave Search API. Requires `BRAVE_API_KEY`.
 - `wikipedia_search` — Wikipedia API search (established facts, background).
 - `page_fetcher` — Fetches and extracts text from URLs found in search results.
+
+**Programmatic enrichment (NOT agent tools — runs after the agent finishes):**
+- **LegiScan** — US legislation search. If the subclaim matches any legislation, appends bill details (sponsors, status, history), roll call votes (individual member positions), and bill text (the actual legislative language). The bill text enables the judge to detect "poison pills" — provisions slipped into otherwise popular bills that explain otherwise puzzling voting patterns. Requires `LEGISCAN_API_KEY`.
 
 All search tools pass results through `source_filter.py` before returning — low-quality sources (Reddit, Quora, social media, content farms, etc.) are silently dropped. See **Source Quality Filtering** below.
 
@@ -264,9 +275,10 @@ The RESEARCH_SYSTEM prompt explicitly instructs the agent to prefer authoritativ
 
 After the agent finishes, we extract evidence from the conversation:
 - Each `ToolMessage` becomes an evidence record (source_type: web/wikipedia)
-- The agent's final `AIMessage` is captured as an "agent_summary" (not stored in DB, used for context)
+- The agent's final `AIMessage` is NOT included — it's the agent's own interpretation, not primary evidence
+- LegiScan enrichment appends legislative evidence items (no URL dedup against agent evidence — LegiScan returns structured data fundamentally different from web search)
 
-**Fallback:** If the ReAct agent fails (tool calling issues, network errors), we fall back to direct tool calls — no LLM reasoning, just search the claim text directly. Less targeted but still produces evidence.
+**Fallback:** If the ReAct agent fails (tool calling issues, network errors) with no evidence gathered, we fall back to direct tool calls — no LLM reasoning, just search the claim text directly. Less targeted but still produces evidence. If the agent fails WITH partial evidence (common with step limit or timeout), we use that partial evidence instead of falling back.
 
 ### Step 3: judge_subclaim
 
@@ -370,8 +382,14 @@ VerifyClaimWorkflow
 │
 ├── For each batch of MAX_CONCURRENT=2 facts:
 │   └── asyncio.gather(
-│       ├── research_subclaim (180s timeout) → judge_subclaim (300s timeout)
-│       └── research_subclaim (180s timeout) → judge_subclaim (300s timeout)
+│       ├── research_subclaim (180s timeout)
+│       │   ├── ReAct agent (streaming evidence collection)
+│       │   └── LegiScan enrichment (programmatic, after agent)
+│       │   → judge_subclaim (300s timeout)
+│       └── research_subclaim (180s timeout)
+│           ├── ReAct agent (streaming evidence collection)
+│           └── LegiScan enrichment (programmatic, after agent)
+│           → judge_subclaim (300s timeout)
 │       )
 │
 ├── IF 1 fact: skip synthesis, use judgment directly
@@ -386,6 +404,8 @@ Key properties:
 - **Thesis-aware** — the decompose step extracts the speaker's intent (thesis, structure, key_test) and passes it to synthesis. The synthesizer evaluates whether the argument survives the evidence, not just whether a majority of facts are true.
 - **No hard fact limit** — fact count is driven by claim complexity, not an arbitrary cap. Complex claims get full coverage.
 - **MAX_CONCURRENT = 2** — limits parallel research+judge pipelines to match GPU bandwidth. Two research agents run simultaneously.
+- **Streaming evidence** — agent uses `astream()` to collect evidence incrementally. Timeout or step limit preserves all evidence gathered so far.
+- **Programmatic enrichment** — after the agent finishes, LegiScan searches for matching legislation and appends structured evidence (bill details, roll call votes, bill text).
 - **Single synthesis** — `synthesize_verdict` combines all fact-level judgments into one final verdict. Single-fact claims skip synthesis entirely.
 - **Temporal retries per activity** — if one research call fails, only that activity retries (max 3 attempts).
 - **Date-aware** — all prompts include `Today's date: {current_date}` so the LLM references current data, not training cutoff data.

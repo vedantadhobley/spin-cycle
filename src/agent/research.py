@@ -5,32 +5,36 @@ agent that autonomously searches for evidence using web tools.
 
 ## How it works
 
-LangGraph's create_react_agent builds a StateGraph with two nodes:
+LangGraph's create_react_agent builds a StateGraph with a pre-model hook:
 
-    ┌──────────┐     ┌───────┐
-    │  agent   │────▶│ tools │
-    │  (LLM)   │◀────│       │
-    └────┬─────┘     └───────┘
-         │ (no more tool calls)
-         ▼
-        END
+    ┌────────────┐     ┌──────────┐     ┌───────┐
+    │ pre_model  │────▶│  agent   │────▶│ tools │
+    │ (progress) │     │  (LLM)   │◀────│       │
+    └────────────┘     └────┬─────┘     └───────┘
+                            │ (no more tool calls)
+                            ▼
+                           END
 
-1. The "agent" node calls the LLM with tool definitions in the request.
-   The LLM reads the conversation history and decides either:
+1. The "pre_model" hook analyzes the conversation so far — counting tool
+   calls, unique URLs, search queries used, engines tried — and injects
+   a progress summary into the LLM's input (without modifying state).
+
+2. The "agent" node calls the LLM with tool definitions + progress note.
+   The LLM reads the conversation history and progress, then decides:
      (a) Call a tool — returns an AIMessage with tool_calls
      (b) Respond — returns an AIMessage with text content (no tool_calls)
 
-2. If the LLM chose (a), the "tools" node executes the tool calls and
+3. If the LLM chose (a), the "tools" node executes the tool calls and
    appends ToolMessage results to the conversation.
 
-3. Loop back to the "agent" node. The LLM now sees the tool results
-   and decides what to do next.
+4. Loop back to pre_model → agent. The progress note updates each
+   iteration, giving the agent real-time awareness of what it has.
 
-4. When the LLM chooses (b), the graph ends.
+5. When the LLM chooses (b), the graph ends.
 
-This is the ReAct pattern — the LLM Reasons about what to do, Acts by
-calling tools, Observes the results, and Reasons again. It's the standard
-agentic AI pattern used across the LangChain/LangGraph ecosystem.
+This is the ReAct pattern with progress awareness — the agent knows what
+it's already searched, how many unique sources it has, and which engines
+it hasn't tried, so it can make strategic decisions about next steps.
 
 ## Why this is "agentic"
 
@@ -56,6 +60,9 @@ Tools are dynamically registered based on which API keys are configured:
 
 Set API keys in .env to enable/disable tools. No key = tool not loaded.
 
+Programmatic enrichment (runs after the agent, not as agent tools):
+  - LegiScan: US legislation, bill text, votes, sponsors (needs LEGISCAN_API_KEY)
+
 ## Integration with Temporal
 
 This agent runs INSIDE the research_subclaim Temporal activity. This gives us:
@@ -66,8 +73,9 @@ This agent runs INSIDE the research_subclaim Temporal activity. This gives us:
 """
 
 import re as _re
+from urllib.parse import urlparse
 
-from langchain_core.messages import HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.prebuilt import create_react_agent
 
 from src.llm import get_llm
@@ -78,10 +86,171 @@ from src.tools.page_fetcher import get_page_fetcher_tool
 from src.tools.serper import get_serper_tool, is_available as serper_available
 from src.tools.brave import get_brave_tool, is_available as brave_available
 from src.tools.searxng import get_searxng_tool, is_available as searxng_available
+from src.tools.legiscan import search_legislation, is_available as legiscan_available
 from src.utils.logging import log, get_logger
 
 MODULE = "research"
 logger = get_logger()
+
+
+def _build_progress_note(messages: list) -> str | None:
+    """Analyze conversation history and build a progress summary.
+
+    Scans the agent's message history to understand:
+    - How many tool calls have been made (and which tools)
+    - What search queries were used (to avoid repeats)
+    - How many unique URLs/domains are in the evidence
+    - How many page fetches vs search-only results
+    - Whether evidence appears one-sided
+
+    Returns a concise progress note for injection before the next LLM call,
+    or None if there's nothing useful to report yet (first call).
+    """
+    tool_calls = 0
+    search_queries: list[str] = []
+    fetch_urls: list[str] = []
+    evidence_urls: set[str] = set()
+    evidence_domains: set[str] = set()
+    tools_used: set[str] = set()
+
+    for msg in messages:
+        # Count tool calls from AIMessages
+        if isinstance(msg, AIMessage) and msg.tool_calls:
+            for tc in msg.tool_calls:
+                tool_calls += 1
+                tool_name = tc.get("name", "")
+                tools_used.add(tool_name)
+                args = tc.get("args", {})
+
+                # Track search queries
+                if "search" in tool_name.lower():
+                    query = args.get("query") or args.get("input") or ""
+                    if query:
+                        search_queries.append(query)
+
+                # Track page fetch URLs
+                if "fetch" in tool_name.lower():
+                    url = args.get("url", "")
+                    if url:
+                        fetch_urls.append(url)
+
+        # Extract URLs from tool results
+        if isinstance(msg, ToolMessage):
+            content = msg.content if isinstance(msg.content, str) else str(msg.content)
+            for url_match in _re.finditer(r"URL:\s*(https?://\S+)", content):
+                url = url_match.group(1).strip()
+                evidence_urls.add(url)
+                try:
+                    domain = urlparse(url).netloc.lower().replace("www.", "")
+                    if domain:
+                        evidence_domains.add(domain)
+                except Exception:
+                    pass
+
+    # Don't inject progress on the first call (no tool calls yet)
+    if tool_calls == 0:
+        return None
+
+    lines = [f"[RESEARCH PROGRESS — {tool_calls} tool calls completed]"]
+
+    # Evidence inventory
+    lines.append(
+        f"Evidence: {len(evidence_urls)} unique URLs across "
+        f"{len(evidence_domains)} domains"
+    )
+
+    # Page fetches
+    lines.append(f"Full articles read: {len(fetch_urls)}")
+
+    # Queries used (so agent can avoid repeats)
+    if search_queries:
+        # Show last 6 queries to keep it concise
+        recent = search_queries[-6:]
+        q_list = ", ".join(f'"{q}"' for q in recent)
+        if len(search_queries) > 6:
+            q_list = f"... {q_list}"
+        lines.append(f"Queries used: {q_list}")
+
+    # Search engines used
+    engine_names = []
+    for t in tools_used:
+        tl = t.lower()
+        if "searxng" in tl:
+            engine_names.append("SearXNG")
+        elif "serper" in tl:
+            engine_names.append("Serper")
+        elif "brave" in tl:
+            engine_names.append("Brave")
+        elif "web_search" in tl or "duckduckgo" in tl:
+            engine_names.append("DuckDuckGo")
+        elif "wikipedia" in tl:
+            engine_names.append("Wikipedia")
+    if engine_names:
+        lines.append(f"Engines used: {', '.join(sorted(set(engine_names)))}")
+
+    # Strategic suggestions based on current state
+    suggestions = []
+    # Only suggest engines that are actually configured
+    available_engines = {"DuckDuckGo", "Wikipedia"}
+    if searxng_available():
+        available_engines.add("SearXNG")
+    if serper_available():
+        available_engines.add("Serper")
+    if brave_available():
+        available_engines.add("Brave")
+    unused_engines = available_engines - set(engine_names)
+    if unused_engines and tool_calls <= 6:
+        suggestions.append(
+            f"try {', '.join(sorted(unused_engines))} for source diversity"
+        )
+    if len(fetch_urls) == 0 and len(evidence_urls) >= 4:
+        suggestions.append(
+            "fetch full articles from your best URLs — snippets may miss detail"
+        )
+    if len(fetch_urls) >= 3 and tool_calls >= 8:
+        suggestions.append(
+            "you have good depth — consider wrapping up if both sides are covered"
+        )
+
+    if suggestions:
+        lines.append(f"Suggestions: {'; '.join(suggestions)}")
+
+    return "\n".join(lines)
+
+
+def _research_pre_model_hook(state: dict) -> dict:
+    """Pre-model hook: inject progress awareness before each LLM call.
+
+    This runs before every LLM invocation in the ReAct loop. It analyzes
+    what the agent has gathered so far and injects a progress note into
+    the system message. The note is ephemeral — returned via
+    llm_input_messages, so it doesn't modify the actual conversation state
+    and won't accumulate across iterations.
+
+    This gives the agent awareness of:
+    - What it's already searched for (don't repeat queries)
+    - How many unique sources it has (is diversity sufficient?)
+    - Whether it's read full articles or only has snippets
+    - Which search engines it hasn't tried yet
+    """
+    messages = list(state.get("messages", []))
+    progress = _build_progress_note(messages)
+
+    if progress:
+        # Inject into the system message — llama.cpp/Jinja requires system
+        # messages to be at the beginning, so we can't append a new one.
+        # Instead, append the progress note to the existing system message.
+        updated = []
+        for msg in messages:
+            if isinstance(msg, SystemMessage):
+                updated.append(
+                    SystemMessage(content=msg.content + "\n\n" + progress)
+                )
+            else:
+                updated.append(msg)
+        messages = updated
+
+    return {"llm_input_messages": messages}
 
 
 def _build_tool_list() -> list:
@@ -121,9 +290,11 @@ def _build_tool_list() -> list:
     # Page fetcher — always available, lets agent read full articles
     tools.append(get_page_fetcher_tool())
 
-    # NOTE: Wikidata and MBFC are NOT agent tools. They run programmatically:
+    # NOTE: Wikidata, MBFC, and LegiScan are NOT agent tools. They run
+    # programmatically:
     # - Wikidata: runs at decompose time, results passed as prompt context
     # - MBFC: runs in search tools (pre-filters) and judge (annotations)
+    # - LegiScan: runs after agent finishes, appends legislative evidence
     # This frees up the agent's tool budget for actual evidence gathering.
 
     tool_names = [t.name for t in tools]
@@ -170,6 +341,7 @@ def build_research_agent(interested_parties_context: str = ""):
         llm,
         tools,
         prompt=prompt,
+        pre_model_hook=_research_pre_model_hook,
     )
 
 
@@ -342,18 +514,22 @@ async def research_claim(
 
     This is the main entry point called by the research_subclaim activity.
 
+    Uses streaming (astream) instead of ainvoke so that when the agent
+    hits its step limit or times out, we keep ALL evidence gathered up
+    to that point instead of falling back to a limited direct search.
+
     Args:
         sub_claim: The specific sub-claim to find evidence for.
         interested_parties_context: Pre-formatted text about interested
             parties and their Wikidata connections, injected into the
             agent's system prompt as context.
-        max_steps: Maximum number of graph steps (prevents infinite loops).
+        max_steps: Maximum number of graph steps (the agent's budget).
                    Each tool call costs ~2 steps (agent node + tool node).
                    28 steps allows ~12 tool calls — now that wikidata/MBFC
                    are programmatic, all tool calls are evidence gathering.
         timeout_secs: Soft timeout in seconds. If the agent exceeds this,
-                      we cancel it and return whatever evidence was gathered
-                      so far via the fallback. Default 120s (2 min).
+                      we return whatever evidence was gathered so far.
+                      Default 120s (2 min).
 
     Returns:
         List of evidence dicts (deduplicated by URL), each with:
@@ -368,51 +544,118 @@ async def research_claim(
     log.info(logger, MODULE, "start", "Starting research agent",
              sub_claim=sub_claim)
 
+    # Collect messages incrementally via streaming so we keep evidence
+    # even if the agent hits recursion limit or times out.
+    collected_messages: list = []
+
     try:
         agent = build_research_agent(interested_parties_context)
-
-        result = await asyncio.wait_for(
-            agent.ainvoke(
-                {
-                    "messages": [
-                        HumanMessage(
-                            content=RESEARCH_USER.format(sub_claim=sub_claim)
-                        )
-                    ]
-                },
-                config={"recursion_limit": max_steps},
-            ),
-            timeout=timeout_secs,
+        input_msg = HumanMessage(
+            content=RESEARCH_USER.format(sub_claim=sub_claim)
         )
 
-        # Extract evidence from tool results in the conversation
-        evidence = extract_evidence(result["messages"])
+        async def _run_stream():
+            async for chunk in agent.astream(
+                {"messages": [input_msg]},
+                config={"recursion_limit": max_steps},
+                stream_mode="updates",
+            ):
+                # Each chunk is {node_name: state_update}
+                # The "tools" node emits {"messages": [ToolMessage, ...]}
+                for node_name, update in chunk.items():
+                    msgs = update.get("messages", [])
+                    collected_messages.extend(msgs)
 
+        await asyncio.wait_for(_run_stream(), timeout=timeout_secs)
+
+        evidence = extract_evidence(collected_messages)
         log.info(logger, MODULE, "done", "Research agent complete",
                  sub_claim=sub_claim, evidence_count=len(evidence),
-                 agent_steps=len(result["messages"]))
+                 agent_steps=len(collected_messages))
+
+        # Programmatic enrichment: LegiScan (legislation, votes, bill text)
+        evidence = await _enrich_with_legislation(evidence, sub_claim)
+
         return evidence
 
-    except asyncio.TimeoutError:
-        log.error(logger, MODULE, "agent_timeout",
-                  "Research agent timed out, falling back to direct search",
-                  error="TimeoutError", error_type="TimeoutError",
-                  timeout_secs=timeout_secs, sub_claim=sub_claim)
-        return await _research_fallback(sub_claim)
+    except (asyncio.TimeoutError, Exception) as e:
+        from langgraph.errors import GraphRecursionError
 
-    except Exception as e:
-        # If the ReAct agent fails, fall back to direct tool calls.
-        # This can happen if:
-        #   - The LLM doesn't support tool calling properly
-        #   - DuckDuckGo is rate-limited or down
-        #   - Network issues
-        # The judge step will see the evidence and can still work with it,
-        # or will return "unverifiable" if there's nothing useful.
+        # Extract whatever evidence was gathered before the interruption
+        evidence = extract_evidence(collected_messages)
+
+        if isinstance(e, asyncio.TimeoutError):
+            error_type = "TimeoutError"
+            log_msg = "Research agent timed out"
+        elif isinstance(e, GraphRecursionError):
+            error_type = "GraphRecursionError"
+            log_msg = "Research agent hit step limit"
+        else:
+            error_type = type(e).__name__
+            log_msg = "Research agent failed"
+
+        if evidence:
+            # We have partial evidence — use it instead of falling back
+            log.info(logger, MODULE, "partial_evidence",
+                     f"{log_msg}, using {len(evidence)} items gathered so far",
+                     error_type=error_type, sub_claim=sub_claim,
+                     evidence_count=len(evidence),
+                     messages_collected=len(collected_messages))
+
+            # Programmatic enrichment: LegiScan
+            evidence = await _enrich_with_legislation(evidence, sub_claim)
+
+            return evidence
+
+        # No evidence gathered at all — fall back to direct search
         log.error(logger, MODULE, "agent_failed",
-                  "Research agent failed, falling back to direct search",
-                  error=str(e), error_type=type(e).__name__,
+                  f"{log_msg} with no evidence, falling back to direct search",
+                  error=str(e), error_type=error_type,
                   sub_claim=sub_claim)
         return await _research_fallback(sub_claim)
+
+
+async def _enrich_with_legislation(
+    evidence: list[dict], sub_claim: str
+) -> list[dict]:
+    """Programmatic LegiScan enrichment: search for matching legislation.
+
+    Runs after the agent finishes gathering web evidence. If the subclaim
+    matches any legislation, appends bill details, roll call votes, and
+    bill text as additional evidence items.
+
+    Like Wikidata (decompose) and MBFC (source_filter), this is NOT an
+    agent tool — it runs deterministically for every subclaim. LegiScan
+    queries that don't match return empty, so there's no harm searching.
+
+    Deduplicates against URLs already in the evidence set.
+    """
+    if not legiscan_available():
+        return evidence
+
+    try:
+        legiscan_items = await search_legislation(sub_claim)
+    except Exception as e:
+        log.warning(logger, MODULE, "legiscan_failed",
+                    "LegiScan enrichment failed",
+                    error=str(e), sub_claim=sub_claim)
+        return evidence
+
+    if not legiscan_items:
+        return evidence
+
+    # No URL dedup against agent evidence — LegiScan returns structured
+    # data (votes, bill text, sponsors) that's fundamentally different from
+    # what the agent found at the same URL via web search. The agent gets
+    # the HTML page; LegiScan gets roll call votes with member positions.
+    evidence.extend(legiscan_items)
+    log.info(logger, MODULE, "legiscan_enriched",
+             "Added legislative evidence",
+             sub_claim=sub_claim,
+             items_added=len(legiscan_items),
+             total_evidence=len(evidence))
+
+    return evidence
 
 
 async def _research_fallback(sub_claim: str) -> list[dict]:
