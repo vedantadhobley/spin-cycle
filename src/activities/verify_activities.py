@@ -117,7 +117,11 @@ async def decompose_claim(claim_text: str) -> dict:
             activity_name="decompose",
         )
 
-        facts = [{"text": f.strip()} for f in output.facts if f and f.strip()]
+        # Clean up LLM output text using LanguageTool
+        # Catches grammar oddities from quantized model (e.g., "priming" → "primary")
+        facts = [{"text": cleanup_text(f.strip()) or f.strip()} for f in output.facts if f and f.strip()]
+        if output.thesis:
+            output.thesis = cleanup_text(output.thesis) or output.thesis
 
         # Normalize interested parties from LLM output
         raw_parties = _normalize_interested_parties(output.interested_parties)
