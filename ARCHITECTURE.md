@@ -233,7 +233,7 @@ The expanded parties object includes:
 **LanguageTool grammar correction** runs on all LLM text outputs (facts, thesis, reasoning) to catch grammar oddities from quantized model outputs. Quantized LLMs sometimes produce valid-word substitutions that spell checkers miss (e.g., "priming" instead of "primary") — LanguageTool catches these because they create grammatically odd phrases even though each word is valid. The Java server lazy-loads on first use and runs locally inside the worker container.
 
 **File:** `src/utils/text_cleanup.py` → `cleanup_text()` (LanguageTool)
-**Applied in:** `decompose_claim` (facts, thesis), `judge_subclaim` (reasoning), `synthesize_verdict` (reasoning)
+**Applied in:** `decompose_claim` (facts, thesis), `extract_evidence` (content, title), `judge_subclaim` (reasoning), `synthesize_verdict` (reasoning)
 
 All prompts include `Today's date: {current_date}` (formatted at call time) so the LLM knows the current date when evaluating temporal claims.
 

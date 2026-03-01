@@ -88,6 +88,7 @@ from src.tools.brave import get_brave_tool, is_available as brave_available
 from src.tools.searxng import get_searxng_tool, is_available as searxng_available
 from src.tools.legiscan import search_legislation, is_available as legiscan_available
 from src.utils.logging import log, get_logger
+from src.utils.text_cleanup import cleanup_text
 
 MODULE = "research"
 logger = get_logger()
@@ -495,6 +496,12 @@ def extract_evidence(messages: list) -> list[dict]:
                     deduped_count += 1
                     continue
                 seen_urls.add(url)
+            # Clean up evidence text — catches grammar oddities from
+            # web content and LLM-generated snippets
+            if item.get("content"):
+                item["content"] = cleanup_text(item["content"]) or item["content"]
+            if item.get("title"):
+                item["title"] = cleanup_text(item["title"]) or item["title"]
             evidence.append(item)
 
     log.info(logger, MODULE, "evidence_dedup",
