@@ -539,12 +539,20 @@ for "organizations that [specific shared trait]" finds evidence.
    GOOD: "Products containing [ingredient] have been recalled by [agency]"
    The comparison group must be defined by the shared characteristic, not by vague similarity.
 
+10. THE SEARCHABILITY TEST
+   Every fact you produce must be a complete natural-language sentence that a \
+researcher could type into a search engine and find evidence for. If a fact \
+contains brackets, placeholders, algebraic variables, or references to other \
+facts (like "[Value X]", "[Name A]", "the amount from fact 1"), it FAILS \
+this test. A researcher cannot search for "[Value X]" — it is not a fact.
+   When a claim is fundamentally a comparison, the comparison itself is the \
+fact. Do not split it into isolated quantities that only have meaning relative \
+to each other. Keep the relationship in a single searchable statement.
+
 SIMPLICITY GUIDANCE:
-- "The Earth is 4.5 billion years old" → 1 fact: "The Earth is 4.5 billion years old"
-- "Bitcoin was created in 2009" → 1 fact: "Bitcoin was created in 2009"
-- "Argentina won the 2022 World Cup" → 1 fact: "Argentina won the 2022 World Cup"
-- Complex claims with multiple entities/actions get multiple facts
 - Simple factual claims stay as single facts
+- Complex claims with multiple entities/actions get multiple facts
+- Comparisons and rankings are usually 1-2 facts, not algebraic decompositions
 
 LINGUISTIC PATTERNS:
 The full linguistic pattern taxonomy (presuppositions, quantifiers, modality, \
@@ -646,6 +654,20 @@ Causal claim:
   ]
 }}
 Note: The causal fact requires evidence of mechanism, not just correlation.
+
+Comparative/ranking claim (DO NOT use placeholders):
+"Country A spends more on defense than the next five countries combined"
+→ {{
+  "thesis": "Country A's defense budget exceeds the combined budgets of the next five largest spenders",
+  "key_test": "Country A's spending must exceed the sum of countries ranked 2nd through 6th",
+  "structure": "ranking",
+  "interested_parties": {{"direct": ["Country A military"], "institutional": ["Country A government"], "affiliated_media": [], "reasoning": "Country A's military and government have interest in defense spending perception"}},
+  "facts": [
+    "Country A spends more on its military than the next five highest-spending countries combined"
+  ]
+}}
+Note: The comparison is kept as one searchable fact. The researcher finds the \
+numbers; the judge evaluates the comparison.
 
 Return a JSON object:
 {{
