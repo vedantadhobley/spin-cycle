@@ -40,7 +40,7 @@ with workflow.unsafe.imports_passed_through():
 MODULE = "workflow"
 
 # Maximum atomic facts to process. If decomposition returns more, we cap it.
-# 6 facts × ~4 min each = ~12 min per batch of 2 = ~12 min total. Reasonable.
+# 10 facts × ~4 min each ÷ 2 concurrent = ~20 min total.
 MAX_FACTS = 10
 
 # Maximum concurrent research+judge pipelines. Matched to --parallel on

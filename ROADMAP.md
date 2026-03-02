@@ -26,7 +26,7 @@ A working end-to-end claim verification pipeline with **flat fact extraction + t
 - **Importance-weighted synthesis** — verdicts weighed by significance, not count
 - **Date-aware prompts** — all prompts include `Today's date: {current_date}` so the LLM references current data
 - Results stored in Postgres with sub-claims, evidence, and reasoning chains
-- Temporal orchestrates everything with retries and durability (5 activities, 1 workflow)
+- Temporal orchestrates everything with retries and durability (7 activities, 1 workflow)
 - Production-grade structured JSON logging (for Grafana Loki, pretty format for dev) — INFO for pipeline milestones, DEBUG for per-query tool noise
 - LLM max_tokens configured to prevent truncated output (2048 for all steps)
 

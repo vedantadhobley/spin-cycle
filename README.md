@@ -83,7 +83,7 @@ curl -X POST http://localhost:4500/claims \
 
 ### 2. Verification Pipeline (Temporal workflow)
 
-The claim triggers `VerifyClaimWorkflow` — a flat pipeline of 5 activities:
+The claim triggers `VerifyClaimWorkflow` — a flat pipeline of 7 activities:
 
 ```
 create_claim          Creates DB record (skipped if called via API)
@@ -112,8 +112,12 @@ For each batch of 2 facts (parallel):
 synthesize_verdict    LLM combines sub-verdicts using the speaker's thesis
                       as primary rubric (not naive fact counting)
     ↓
-store_result          Writes results to Postgres
+store_result              Writes results to Postgres
+    ↓
+start_next_queued_claim   Picks up next queued claim (if any) and starts its workflow
 ```
+
+Only one claim verifies at a time (to avoid LLM contention). When a claim finishes, the workflow starts the next queued one. Submitting while a claim is running queues it as a DB row.
 
 The **flat facts** approach (matching Google SAFE and FActScore) means the LLM outputs facts directly as strings, guided by a comprehensive **linguistic patterns taxonomy** that catches presuppositions, quantifier scope, temporal boundaries, causation types, and more.
 
@@ -214,6 +218,19 @@ curl -s 'http://localhost:4500/claims?status=verified' | python3 -m json.tool
 curl -s http://localhost:4500/health
 ```
 
+Submit multiple claims at once (first starts immediately, rest are queued):
+```bash
+curl -s -X POST http://localhost:4500/claims/batch \
+  -H "Content-Type: application/json" \
+  -d '{
+    "claims": [
+      {"text": "Claim one to verify", "source_name": "Source A"},
+      {"text": "Claim two to verify"},
+      {"text": "Claim three to verify"}
+    ]
+  }' | python3 -m json.tool
+```
+
 You can also submit a claim with source attribution:
 ```bash
 curl -s -X POST http://localhost:4500/claims \
@@ -250,7 +267,7 @@ docker logs -f spin-cycle-dev-worker
 
 # With LOG_FORMAT=pretty (default in dev), you'll see:
 # I [WORKER    ] starting: Connecting to Temporal | temporal_host=... task_queue=spin-cycle-verify
-# I [WORKER    ] ready: Worker listening | task_queue=spin-cycle-verify activity_count=6
+# I [WORKER    ] ready: Worker listening | task_queue=spin-cycle-verify activity_count=7
 # I [DECOMPOSE ] normalized: Claim normalized | changes=[...]
 # I [DECOMPOSE ] done: Claim decomposed | sub_count=3 thesis=...
 # I [WORKFLOW  ] decomposed: Claim decomposed into atomic facts | fact_count=3
@@ -319,7 +336,8 @@ spin-cycle/
 │   ├── utils/                      # Shared utilities
 │   │   ├── logging.py              # Structured logging (JSON for Loki, pretty for dev)
 │   │   ├── ner.py                  # SpaCy NER — entity extraction (PERSON/ORG)
-│   │   └── text_cleanup.py         # Grammar/spell check for LLM output
+│   │   ├── text_cleanup.py         # Grammar/spell check for LLM output
+│   │   └── evidence_ranker.py      # Quality-ranked evidence selection (top 20 by score)
 │   │
 │   ├── api/                        # FastAPI backend
 │   │   ├── app.py                  # App + lifespan

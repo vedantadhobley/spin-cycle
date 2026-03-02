@@ -3,13 +3,14 @@
 Each activity is a single unit of work that the Temporal worker executes.
 Activities can be retried independently if they fail.
 
-The verification pipeline has 6 activities:
-  0. create_claim      — creates a claim record in the DB (when started from Temporal UI)
-  1. decompose_claim   — LLM extracts atomic facts from a claim (one flat pass)
-  2. research_subclaim — LangGraph agent gathers evidence using tools
-  3. judge_subclaim    — LLM evaluates evidence for/against a sub-claim
-  4. synthesize_verdict — LLM combines sub-verdicts into a final verdict
-  5. store_result       — writes result to Postgres
+The verification pipeline has 7 activities:
+  0. create_claim             — creates a claim record in the DB (when started from Temporal UI)
+  1. decompose_claim          — normalize + LLM extracts atomic facts from a claim (one flat pass)
+  2. research_subclaim        — LangGraph agent gathers evidence using tools
+  3. judge_subclaim           — LLM evaluates evidence for/against a sub-claim
+  4. synthesize_verdict       — LLM combines sub-verdicts into a final verdict
+  5. store_result             — writes result to Postgres
+  6. start_next_queued_claim  — picks up next queued claim and starts its workflow
 
 The pipeline is flat: decompose once → research+judge each fact → synthesize.
 No recursion, no tree — follows the approach used by Google's SAFE and FActScore.

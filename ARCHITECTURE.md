@@ -110,7 +110,7 @@ Temporal handles the **macro orchestration** (decompose → research → judge �
 
 ## The Verification Pipeline (what's working now)
 
-A claim enters the system (via API or extraction) and is processed as a **flat pipeline of atomic facts**, orchestrated by Temporal with 6 activities. Inspired by Google DeepMind's SAFE (NeurIPS 2024) and FActScore — factual claims are flat structures, not hierarchical trees.
+A claim enters the system (via API or extraction) and is processed as a **flat pipeline of atomic facts**, orchestrated by Temporal with 7 activities. Inspired by Google DeepMind's SAFE (NeurIPS 2024) and FActScore — factual claims are flat structures, not hierarchical trees.
 
 ### Model Assignment
 
@@ -482,7 +482,7 @@ All search results pass through a domain blocklist before reaching the research 
 
 Search engines return Reddit comments, Quora answers, Medium blogs, and other user-generated content that isn't citable for fact-checking. The LLM prompt also instructs the agent to prefer authoritative sources, but the code-level filter catches what the LLM might miss.
 
-### Blocked Categories (~70 domains)
+### Blocked Categories (~55 domains)
 
 | Category | Examples | Reason |
 |----------|----------|--------|
@@ -729,8 +729,7 @@ One unified model running via llama.cpp, with thinking toggled per-request:
 
 | Port | Model | Mode | Used By |
 |------|-------|------|--------|
-| `:3101` | Qwen3.5-35B-A3B | `enable_thinking=False` | decompose, research, synthesize |
-| `:3101` | Qwen3.5-35B-A3B | `enable_thinking=True` | judge |
+| `:3101` | Qwen3.5-35B-A3B | `enable_thinking=False` | decompose, research, judge, synthesize |
 | `:3103` | (embeddings — not yet used) | — | planned: evidence caching |
 
 30B params, 3B active MoE. Thinking mode is toggled via `chat_template_kwargs` in the request body. When thinking is enabled, the model produces `<think>...</think>` blocks that are stripped before parsing.
@@ -1013,16 +1012,16 @@ Config: `~/workspace/monitor/promtail/promtail.yml`
 | Docker infrastructure | **Done** | 7 containers, health checks, volume persistence |
 | PostgreSQL schema | **Done** | 4 tables: claims, sub_claims (with tree structure), evidence, verdicts |
 | FastAPI API | **Done** | POST/GET claims, health check, lifespan management |
-| Temporal workflow | **Done** | VerifyClaimWorkflow with 5 activities, flat pipeline, thesis-aware synthesis, retry policies |
-| Temporal worker | **Done** | Registers workflow + 6 activities, structured logging configured |
+| Temporal workflow | **Done** | VerifyClaimWorkflow with 7 activities, flat pipeline, thesis-aware synthesis, retry policies |
+| Temporal worker | **Done** | Registers workflow + 7 activities, max_concurrent_activities=2, structured logging |
 | `decompose_claim` | **Done** | LLM decomposes text into flat facts (guided by linguistic patterns) + thesis (structure, key_test) in one pass |
 | `research_subclaim` | **Done** | LangGraph ReAct agent with SearXNG + DuckDuckGo + Serper + Brave + Wikipedia + page_fetcher |
 | `judge_subclaim` | **Done** | LLM evaluates evidence, returns structured verdict |
 | `synthesize_verdict` | **Done** | Thesis-aware synthesis — evaluates whether speaker's argument survives sub-verdicts (importance-weighted, not count-based) |
 | `store_result` | **Done** | Writes flat result to Postgres (all sub-claims as leaves) |
-| Source quality filtering | **Done** | Domain blocklist (~40 domains) filters all search results + page fetches |
+| Source quality filtering | **Done** | Domain blocklist (~55 domains) filters all search results + page fetches |
 | Prompts | **Done** | 4 prompt pairs documented in `src/prompts/verification.py` |
-| LLM connectivity | **Done** | Unified Qwen3.5 on :3101 — `enable_thinking` toggled per-request (off: decompose/research/synthesize, on: judge) |
+| LLM connectivity | **Done** | Unified Qwen3.5 via `LLAMA_URL` — `enable_thinking=False` for all steps (thinking mode unused, generates excessive tokens) |
 | Logging | **Done** | Structured JSON logging via `src/utils/logging.py`, Promtail → Loki → Grafana |
 | Tests | **Done** | Health endpoint, schema validation |
 
@@ -1086,7 +1085,7 @@ docker logs -f spin-cycle-dev-worker
 
 # With LOG_FORMAT=pretty (default in dev), output looks like:
 # I [WORKER    ] starting: Connecting to Temporal | temporal_host=spin-cycle-dev-temporal:7233 task_queue=spin-cycle-verify
-# I [WORKER    ] ready: Worker listening | task_queue=spin-cycle-verify activity_count=6 workflow_count=1
+# I [WORKER    ] ready: Worker listening | task_queue=spin-cycle-verify activity_count=7 workflow_count=1
 # I [CREATE    ] start: Creating claim record | claim=Bitcoin was created by Satoshi Nakamoto in ...
 # I [DECOMPOSE ] start: Decomposing claim | claim=Bitcoin was created by Satoshi Nakamoto in ...
 # I [DECOMPOSE ] done: Claim decomposed | sub_count=1
