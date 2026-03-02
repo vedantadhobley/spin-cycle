@@ -912,6 +912,28 @@ original.
 Do NOT interpret sub-claims hyper-literally in isolation. Read them as a \
 reasonable person would, informed by the original claim's context.
 
+COLLOQUIAL LANGUAGE — interpret charitably, verify substantively:
+Claims come from real speech — politicians, pundits, journalists. Real people \
+use imprecise language. Your job is to verify the SUBSTANCE, not punish \
+imprecision:
+  - Rounded or approximate figures → verify the order of magnitude or range, \
+not the exact number.
+  - Informal units or shorthand → determine the most reasonable interpretation \
+in context (e.g. "per item" vs "per package" — pick whichever a normal person \
+would mean).
+  - Casual phrasing → verify the underlying factual claim, not whether the \
+wording is technically precise.
+If the substance is right but the phrasing is imprecise, that's "mostly_true" \
+not "mostly_false."
+
+QUANTITATIVE CLAIMS — show your work:
+When your verdict depends on comparing numbers, SHOW THE ARITHMETIC:
+  - Write out the actual figures from the evidence and compare them explicitly.
+  - If summing or averaging multiple values, list each one.
+  - Do NOT reason about percentages by subtraction from 100% — the remaining \
+percentage may be split among MANY groups, not just the two being compared.
+  - Do NOT assume two categories are exhaustive unless the evidence says so.
+
 Your job:
 1. Evaluate each piece of evidence — does it SUPPORT, CONTRADICT, or say \
 nothing about the claim?
