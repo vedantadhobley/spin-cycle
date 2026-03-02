@@ -20,6 +20,7 @@ Caching:
 - Cache hit = instant, cache miss = API query + store
 """
 
+import re
 import httpx
 import logging
 from datetime import datetime, timezone, timedelta
@@ -144,12 +145,19 @@ async def search_entity(name: str) -> Optional[str]:
     Returns:
         Wikidata QID (e.g., "Q312") or None if not found
     """
+    # Strip leading articles — NER often extracts "the Cato Institute" but
+    # Wikidata search needs "Cato Institute"
+    clean_name = re.sub(r"^(?:the|a|an)\s+", "", name, flags=re.IGNORECASE)
+
+    if clean_name in _entity_cache:
+        return _entity_cache[clean_name]
+    # Also check original name in cache
     if name in _entity_cache:
         return _entity_cache[name]
-    
+
     params = {
         "action": "wbsearchentities",
-        "search": name,
+        "search": clean_name,
         "language": "en",
         "format": "json",
         "limit": 1,
@@ -169,15 +177,18 @@ async def search_entity(name: str) -> Optional[str]:
             if results:
                 qid = results[0].get("id")
                 _entity_cache[name] = qid
-                logger.debug(f"Wikidata: '{name}' → {qid}")
+                _entity_cache[clean_name] = qid
+                logger.debug(f"Wikidata: '{clean_name}' → {qid}")
                 return qid
-            
+
             _entity_cache[name] = None
+            _entity_cache[clean_name] = None
             return None
             
     except Exception as e:
         logger.warning(f"Wikidata search failed for '{name}': {e}")
         return None
+
 
 
 async def get_entity_relationships(qid: str) -> dict:
@@ -315,8 +326,11 @@ async def get_ownership_chain(entity_name: str) -> dict:
             "family_expanded": {...},  # 2nd-hop family connections
         }
     """
-    # Check cache first
-    cached = _get_cached_entity(entity_name)
+    # Strip leading articles to match search_entity behavior
+    clean_name = re.sub(r"^(?:the|a|an)\s+", "", entity_name, flags=re.IGNORECASE)
+
+    # Check cache with cleaned name first, then original
+    cached = _get_cached_entity(clean_name) or _get_cached_entity(entity_name)
     if cached:
         return cached
 
@@ -327,7 +341,7 @@ async def get_ownership_chain(entity_name: str) -> dict:
             "qid": None,
             "error": f"Entity '{entity_name}' not found in Wikidata",
         }
-        _store_cached_entity(entity_name, None, result)
+        _store_cached_entity(clean_name, None, result)
         return result
 
     # Get direct relationships (corporate + family)
@@ -425,7 +439,7 @@ async def get_ownership_chain(entity_name: str) -> dict:
     # Deduplicate media holdings
     result["media_holdings"] = list(set(result["media_holdings"]))
 
-    _store_cached_entity(entity_name, qid, result)
+    _store_cached_entity(clean_name, qid, result)
     return result
 
 
