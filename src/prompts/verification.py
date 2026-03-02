@@ -27,13 +27,13 @@ Instead, we break it into steps:
 ### Step 1: DECOMPOSE
 Split a complex claim into simple, atomic sub-claims.
 
-  "The UK spent £50B on HS2 before cancelling the northern leg"
-  →  ["The UK spent £50B on HS2",
-      "The northern leg of HS2 was cancelled"]
+  "Country A spent $50B on Project X before cancelling the second phase"
+  →  ["Country A spent $50B on Project X",
+      "The second phase of Project X was cancelled"]
 
-Why? Because each piece might have a different truth value. The UK DID
-cancel the northern leg (true), but the exact £50B figure might be wrong
-(the actual number was ~£45B at cancellation). Checking them separately
+Why? Because each piece might have a different truth value. Country A DID
+cancel the second phase (true), but the exact $50B figure might be wrong
+(the actual number was ~$45B at cancellation). Checking them separately
 gives a more accurate and useful result.
 
 ### Step 2: RESEARCH (for each sub-claim)
@@ -85,14 +85,30 @@ The decompose prompt extracts structured representations of claims. Beyond the
 basic entity/predicate structure, it recognizes special patterns that require
 different verification approaches:
 
-### Core Structure (Rules 1-5)
-  1. ENTITIES: Subjects being discussed (people, countries, orgs)
-  2. PREDICATES: Assertions about entities, with {entity} placeholders
-  3. APPLIES_TO: Which entities each predicate applies to
-  4. COMPARISONS: Kept as single facts ("A > B"), not split
-  5. ATTRIBUTIONS: Extract BOTH "X said Y" AND the substance Y itself
+### Pre-Decomposition: Normalization (1 LLM call)
+  The claim is normalized before decomposition to neutralize loaded language,
+  separate opinions from facts, resolve coreferences, and ground vague references.
+  Seven transformations from the literature (Pryzant et al., VeriScore, SAFE, AmbiFC):
+    1. Bias neutralization — loaded language → neutral equivalents
+    2. Operationalization — vague abstractions → measurable indicators
+    3. Normative/factual separation — opinions stripped, facts kept
+    4. Coreference resolution — pronouns → explicit referents
+    5. Reference grounding — acronyms expanded, dates grounded
+    6. Speculative language handling — predictions flagged
+    7. Rhetorical/sarcastic framing — conditional, only when clearly present
 
-### Special Claim Patterns (Rules 6-15)
+### Core Structure (Rules 1-9)
+  1. EXPAND PARALLEL STRUCTURES: "Both X and Y do Z" → two facts
+  2. PRESERVE EXACT QUANTITIES: Keep numbers, dates, names verbatim
+  3. EXTRACT HIDDEN PRESUPPOSITIONS: Only for trigger words (stopped, again, etc.)
+  4. FALSIFYING CONDITIONS: Only for superlatives (only, first, never)
+  5. MAKE EXCLUSIONS EXPLICIT: "other", "besides" → name excluded entity
+  6. DECONTEXTUALIZE: Each fact self-contained, no dangling pronouns
+  7. EXTRACT UNDERLYING QUESTION: Loaded phrasing → factual question underneath
+  8. ENTITY DISAMBIGUATION: Add minimum context for unique identification
+  9. OPERATIONALIZE COMPARISONS: Define comparison groups by shared trait, not vague similarity
+
+### Special Claim Patterns (Rules in linguistic taxonomy)
 
   6. TEMPORAL ("X after Y", "X before Z"):
      WHY: Sequence matters. "Fired after investigation started" has different
@@ -309,6 +325,96 @@ counter-evidence to look for.
 
 
 # =============================================================================
+# STEP 0: NORMALIZE — neutralize loaded language, separate opinions from facts
+# =============================================================================
+
+NORMALIZE_SYSTEM = """\
+You are a linguistic preprocessor for a fact-checking pipeline. Your job is to \
+rewrite claims in neutral, researchable language WITHOUT changing their meaning.
+
+You perform exactly 7 transformations:
+
+1. BIAS NEUTRALIZATION (Pryzant et al. AAAI 2020)
+   Replace loaded/framing language with neutral factual equivalents.
+   - "special exceptions" → "exemption from [specific regulation]"
+   - "measured response" → "proportional response"
+   - "unfounded claims" → "claims" (the pipeline determines if founded)
+   - "slammed" / "blasted" → "criticized"
+   - "regime" (when editorializing) → "government"
+
+2. OPERATIONALIZATION
+   Convert vague/abstract concepts into observable, measurable indicators.
+   - "special exceptions granted to X" → "X is treated differently than comparable entities regarding [regulation]"
+   - "measured response" → "response proportional to the triggering event"
+   - "significant investment" → "investment" (let evidence determine significance)
+   - Do NOT invent thresholds — just make the concept researchable
+
+3. NORMATIVE/FACTUAL SEPARATION
+   Strip opinions and prescriptive statements. Keep only factual assertions.
+   - "X should register" → OPINION (remove, note in changes)
+   - "X is not registered" → FACT (keep)
+   - "aim to censor" → OPINION about intent (remove, note in changes)
+   - "X needs to be held accountable" → OPINION (remove)
+   - If removing opinions leaves nothing factual, return whatever factual \
+content is implied (e.g., "should register" implies "is not registered")
+
+4. COREFERENCE RESOLUTION
+   Replace pronouns and anaphora with their referents using context from the claim.
+   - "He said it was..." → "[Speaker name] said [specific thing] was..."
+   - "this policy" → "[the specific policy name]"
+   - Only resolve when the referent is clear from the claim text
+
+5. REFERENCE GROUNDING
+   Anchor vague references where the claim provides enough context.
+   - Expand acronyms: "WHO" → "World Health Organization (WHO)"
+   - Ground dates: "the 2011 disaster" → "the March 2011 [specific disaster name]"
+   - Do NOT add information not present or clearly implied in the original claim
+
+6. SPECULATIVE LANGUAGE HANDLING
+   Flag speculative/predictive framing so decomposition can handle it properly.
+   - "X could lead to Y" → note in changes that this is speculative
+   - "X is expected to" → preserve but note as forward-looking in changes
+
+7. RHETORICAL/SARCASTIC FRAMING
+   ONLY apply this when the claim clearly uses rhetorical questions, sarcasm, or \
+ironic framing. Most claims are straightforward — skip this step for them.
+   Convert rhetorical devices to the literal assertion being implied:
+   - Rhetorical questions: "Isn't it convenient that X happened right after Y?" \
+→ "X happened shortly after Y" (extract the implied causal/temporal claim)
+   - Sarcasm/irony: "Oh sure, X is just a totally normal organization" \
+→ "X is not a normal organization" (invert to the speaker's actual belief)
+   - Loaded rhetorical: "So we're just supposed to believe X?" \
+→ "X lacks sufficient evidence" (extract the implied doubt)
+   - Air quotes / distancing: 'The "investigation" found nothing' \
+→ "The investigation found nothing" (note in changes that speaker disputes legitimacy)
+   Do NOT flag straightforward claims as rhetorical. If the tone is ambiguous, \
+treat it as literal.
+
+WHAT YOU DO NOT DO:
+- Do NOT decompose (that is step 2)
+- Do NOT add information not present in the original claim
+- Do NOT change meaning — only clarify the factual questions being asked
+- Do NOT touch direct quotes (attributed content stays verbatim)
+- Do NOT expand claims — you may shorten them by removing opinions
+
+If the claim is already neutral and precise, return it unchanged with empty changes.
+
+Return a JSON object:
+{{"normalized_claim": "...", "changes": ["what was changed and why", ...]}}
+
+Return ONLY the JSON object. No markdown, no explanation, no wrapping.\
+"""
+
+NORMALIZE_USER = """\
+Normalize this claim into neutral, researchable language.
+
+Claim: {claim_text}
+
+Return ONLY the JSON object.\
+"""
+
+
+# =============================================================================
 # STEP 1: DECOMPOSE — extract all atomic verifiable facts in ONE pass
 # =============================================================================
 
@@ -362,6 +468,50 @@ countries besides X that threatened it" (NOT just "Y spoke about countries")
    "Besides the CEO, other executives..." → "executives other than the CEO..."
    The exclusion is CRITICAL — without it, the researcher will find evidence about \
 the already-mentioned entity and the judge will accept it, missing the point entirely.
+
+6. DECONTEXTUALIZE EACH FACT
+   Each fact must stand alone. Include subject, object, and enough context that \
+someone who has NOT seen the original claim can verify it.
+   BAD:  "The response was proportional" (whose response? proportional to what?)
+   GOOD: "Country A's military response was proportional to the border incursion"
+   BAD:  "The organization is exempt" (which organization? exempt from what?)
+   GOOD: "Organization X is exempt from customs duties under [specific treaty]"
+   BAD:  "Spending increased significantly" (whose spending? what baseline?)
+   GOOD: "Agency Y spending increased from $140B to $160B between 2019 and 2023"
+
+7. EXTRACT THE UNDERLYING FACTUAL QUESTION
+   When phrasing is loaded or abstract, ask: "what factual question is actually being asked?" \
+Extract THAT question as the fact, not the literal loaded phrasing.
+   Loaded:   "Special exceptions were granted to X"
+   Factual:  "X receives differential regulatory treatment compared to similar entities"
+   Loaded:   "Claims about X are unfounded"
+   Factual:  "Claims about X lack supporting evidence or legal basis"
+   Abstract: "X has a cozy relationship with Y"
+   Factual:  "X has financial or institutional ties to Y"
+
+8. ENTITY DISAMBIGUATION
+   Add minimum context to uniquely identify entities. Don't assume the researcher \
+knows which "X" you mean.
+   BAD:  "Mercury is toxic" (planet or element?)
+   GOOD: "Mercury (the chemical element) is toxic to humans"
+   BAD:  "The administration increased spending" (which administration? which country?)
+   GOOD: "The current [country] administration increased federal spending in [year]"
+   BAD:  "The bill was passed" (which bill?)
+   GOOD: "[Specific Act Name] was passed by [specific legislative body]"
+
+9. OPERATIONALIZE COMPARISONS
+   When a claim compares an entity to a group ("similar organizations", "other countries", \
+"comparable products"), define the comparison group by the TRAIT that makes them comparable. \
+A researcher searching for "comparable organizations" finds nothing. A researcher searching \
+for "organizations that [specific shared trait]" finds evidence.
+   BAD:  "Comparable organizations are treated differently" (comparable how?)
+   GOOD: "Organizations that [specific shared activity] are subject to \
+[specific regulation]"
+   BAD:  "Other countries spend more on healthcare"
+   GOOD: "[Specific group, e.g. member nations of treaty X] spend a higher percentage of GDP on healthcare"
+   BAD:  "Similar products have been recalled"
+   GOOD: "Products containing [ingredient] have been recalled by [agency]"
+   The comparison group must be defined by the shared characteristic, not by vague similarity.
 
 SIMPLICITY GUIDANCE:
 - "The Earth is 4.5 billion years old" → 1 fact: "The Earth is 4.5 billion years old"
@@ -530,6 +680,17 @@ you MUST do at least one search for the OPPOSITE perspective. For example:
 - If you find "X is true," search for "X criticism" or "X debunked"
 This prevents one-sided evidence that misleads the judge. A claim about a \
 complex topic needs evidence from both angles.
+
+COMPARATIVE CLAIMS — SEARCH EACH SIDE INDEPENDENTLY:
+When the claim asserts differential treatment, comparison, or inconsistency \
+between entities, do NOT search for the comparison as a whole. Instead:
+1. Search for evidence about Side A (e.g., "Entity X registration status under [regulation]")
+2. Search for evidence about Side B (e.g., "[regulation] registered entities list")
+3. Optionally search for direct comparisons (e.g., "[regulation] registration comparison")
+Searching only for the comparison ("X treated differently than Y") produces \
+opinion pieces. Searching for each side produces the factual data needed to \
+MAKE the comparison. For regulatory claims: search for the official registry \
+or database — most regulatory frameworks have public registrant lists.
 
 RECENCY MATTERS:
 For claims about CURRENT situations (policies, spending, relationships), \

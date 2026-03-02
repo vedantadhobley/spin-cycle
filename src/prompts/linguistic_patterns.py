@@ -390,8 +390,10 @@ Before finalizing sub-claims, verify you have addressed ALL applicable patterns:
 ☐ **TEMPORAL**: Did you test the timeframe boundaries?
    - "Since X" → what about before X?
 
-☐ **CAUSATION**: Did you separate correlation from causation?
-   - "X caused Y" needs causal mechanism, not just sequence
+☐ **CAUSATION**: Did you PRESERVE causal/logical connectives between facts?
+   - Don't split "X caused Y" into just "X happened" + "Y happened" — keep the causal link
+   - Identify causation strength: sole > primary > contributing > correlation
+   - If claim says "caused", extract it as stated — the judge evaluates strength
 
 ☐ **COMPARISONS**: For superlatives, did you extract exhaustive tests?
    - "First" → "No earlier instance exists"
@@ -399,11 +401,15 @@ Before finalizing sub-claims, verify you have addressed ALL applicable patterns:
 
 ☐ **NEGATION**: For "never"/"nobody" claims, did you note verification difficulty?
 
-☐ **SPEECH ACTS**: Is this actually an assertion?
-   - Opinions, predictions, and questions are not verifiable
+☐ **SPEECH ACTS**: Did you SEPARATE normative opinions from factual assertions?
+   - "Should" / "ought to" / "need to" = OPINION → note in thesis, NOT a fact
+   - "aim to" / "intend to" = INTENT claim → usually unverifiable, flag in thesis
+   - Extract the factual question UNDERNEATH the opinion
 
-☐ **VAGUENESS**: Did you flag undefined terms?
-   - "Significant", "many", "often" without thresholds
+☐ **VAGUENESS**: Did you OPERATIONALIZE vague terms into specific, researchable assertions?
+   - "Significant" → what threshold? "Special" → what specific treatment?
+   - "Many" → how many? "Recently" → what time period?
+   - If the claim doesn't specify, use the most natural interpretation (don't invent thresholds)
 
 ☐ **ATTRIBUTION**: Did you extract BOTH who-said and what-they-said?
 
@@ -413,11 +419,19 @@ Before finalizing sub-claims, verify you have addressed ALL applicable patterns:
 
 ☐ **GENERICS**: Is this a generic statement hiding quantification?
 
-☐ **IMPLICATURE**: What does the claim IMPLY beyond what it states?
+☐ **IMPLICATURE**: Did you extract the IMPLIED factual question, not just the literal phrasing?
+   - The implied question is often more researchable than the literal claim
+   - "Special exceptions" implies "differential treatment" — extract the latter
+   - Scalar: "some" implicates "not all" — extract both sides if relevant
 
 ☐ **EXCLUSIONS/CONTRASTS**: Did you make "other"/"besides"/"apart from" explicit?
    - "other nations" → "nations other than [already-mentioned entity]"
    - Without this, the researcher finds evidence about the wrong entity
+
+☐ **DECONTEXTUALIZATION**: Can each fact be verified by someone who has NOT seen the original claim?
+   - Every fact needs: explicit subject, explicit predicate, enough context to stand alone
+   - No dangling pronouns ("it", "they", "the response")
+   - No implicit references ("the policy" — which policy?)
 
 ---
 

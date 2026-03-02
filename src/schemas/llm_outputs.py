@@ -29,6 +29,22 @@ Verdict = Literal[
 
 
 # =============================================================================
+# NORMALIZE OUTPUT
+# =============================================================================
+
+class NormalizeOutput(BaseModel):
+    """Normalized claim with loaded language neutralized and opinions separated."""
+    normalized_claim: str = Field(
+        ...,
+        description="Claim rewritten with neutral, researchable language"
+    )
+    changes: list[str] = Field(
+        default_factory=list,
+        description="What was changed and why"
+    )
+
+
+# =============================================================================
 # DECOMPOSE OUTPUT
 # =============================================================================
 

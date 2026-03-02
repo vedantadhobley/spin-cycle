@@ -51,9 +51,11 @@ from src.llm.parser import (
 
 # Validators
 from src.llm.validators import (
+    validate_normalize,
     validate_decompose,
     validate_judge,
     validate_synthesize,
+    normalize_validator,
     decompose_validator,
     judge_validator,
     synthesize_validator,
@@ -74,9 +76,11 @@ __all__ = [
     "safe_extract_json",
     "JSONExtractionError",
     # Validators
+    "validate_normalize",
     "validate_decompose",
     "validate_judge",
     "validate_synthesize",
+    "normalize_validator",
     "decompose_validator",
     "judge_validator",
     "synthesize_validator",

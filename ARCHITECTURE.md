@@ -128,11 +128,28 @@ Thinking mode is toggled per-request via `chat_template_kwargs`, but currently *
 **Why thinking is disabled everywhere:**
 llama.cpp's `--reasoning-budget` flag only supports `-1` (unlimited) or `0` (disabled) — no intermediate values for token limits. The model generates excessive internal monologue before responding. Until llama.cpp adds proper `max_thinking_tokens` support (or we migrate to vLLM which supports it), thinking mode is impractical.
 
-### Step 1: decompose_claim (flat facts + linguistic patterns + thesis)
+### Step 1: decompose_claim (normalize → flat facts + linguistic patterns + thesis)
 
 **File:** `src/activities/verify_activities.py`
-**Prompt:** `src/prompts/verification.py` → `DECOMPOSE_SYSTEM` / `DECOMPOSE_USER`
-**Patterns:** `src/prompts/linguistic_patterns.py` → 15 canonical linguistic categories
+**Prompts:** `src/prompts/verification.py` → `NORMALIZE_SYSTEM` / `NORMALIZE_USER` + `DECOMPOSE_SYSTEM` / `DECOMPOSE_USER`
+**Patterns:** `src/prompts/linguistic_patterns.py` → 15 canonical linguistic categories + decomposition checklist
+
+The decompose activity now runs **two LLM calls** internally:
+
+1. **Normalize** — rewrites the claim in neutral, researchable language (1 LLM call, max_retries=1). Performs 7 transformations grounded in the academic literature:
+   - **Bias neutralization** (Pryzant et al. AAAI 2020) — loaded language → neutral equivalents
+   - **Operationalization** — vague abstractions → measurable indicators
+   - **Normative/factual separation** (VeriScore, GCC taxonomy) — opinions stripped, facts kept
+   - **Coreference resolution** — pronouns → explicit referents
+   - **Reference grounding** (SAFE decontextualization) — acronyms expanded, dates grounded
+   - **Speculative language handling** (AmbiFC ambiguity taxonomy) — predictions flagged
+   - **Rhetorical/sarcastic framing** — conditional: only when claim clearly uses irony, rhetorical questions, or sarcasm; converts to literal assertion
+
+   If normalization fails, the raw claim is used as fallback (graceful degradation).
+
+2. **Decompose** — extracts flat atomic facts + thesis from the normalized claim (existing logic).
+
+The normalized claim and list of changes are stored in `thesis_info` for auditability.
 
 The LLM extracts a **flat list of atomic facts** plus **thesis information** that captures the speaker's intent. This approach matches Google SAFE and FActScore — simple, direct fact extraction without template expansion.
 
@@ -197,7 +214,18 @@ The decompose prompt is augmented with a comprehensive **linguistic pattern taxo
 | **Generics** | "Politicians lie" — generalizations |
 | **Implicature** | Hidden meaning beyond literal text |
 
-These patterns are appended to `DECOMPOSE_SYSTEM` at runtime, replacing the previous ad-hoc rules.
+These patterns are appended to `DECOMPOSE_SYSTEM` at runtime.
+
+**Extraction rules 6-9** (added alongside normalization) address missing capabilities from the literature:
+
+| Rule | What it does | Source |
+|------|-------------|--------|
+| **6. Decontextualize** | Each fact must stand alone — no dangling pronouns or implicit references | Google SAFE, Molecular Facts (Gunjal et al. 2024) |
+| **7. Extract underlying question** | Loaded phrasing → factual question being asked | ClaimDecomp (Chen et al. EMNLP 2022) |
+| **8. Entity disambiguation** | Add minimum context for unique identification | Molecular Facts (Gunjal et al. 2024) |
+| **9. Operationalize comparisons** | Define comparison groups by shared trait, not vague similarity | — |
+
+The **decomposition checklist** now includes action directives (not just detection prompts) for vagueness operationalization, implicature extraction, speech act separation, causation preservation, and a new decontextualization quality check.
 
 **The thesis extraction** captures the speaker's rhetorical intent:
 - `thesis` — the argument the speaker is making
@@ -276,7 +304,10 @@ All search tools pass results through `source_filter.py` before returning — lo
 
 **Page fetcher entity extraction:** When the agent fetches a full article, SpaCy NER extracts PERSON/ORG entities from the content and includes them in the tool output (e.g., "Entities mentioned: Person A, Person B, Organization X"). This gives the agent visibility into who is quoted/mentioned without an additional LLM call.
 
-The RESEARCH_SYSTEM prompt explicitly instructs the agent to prefer authoritative sources: government databases, wire services, established news outlets, academic institutions, official statistics agencies.
+The RESEARCH_SYSTEM prompt explicitly instructs the agent to prefer authoritative sources: government databases, wire services, established news outlets, academic institutions, official statistics agencies. It also includes three strategic search directives:
+- **Search both sides** — after finding evidence leaning one direction, search for the opposite perspective
+- **Comparative claims** — search for each side of a comparison independently instead of searching for the comparison as a whole (which produces opinion pieces instead of factual data)
+- **Resolve position titles** — when a claim references a title ("head of Agency X"), first search to resolve who currently holds that position, then use the name in subsequent searches
 
 After the agent finishes, we extract evidence from the conversation:
 - Each `ToolMessage` becomes an evidence record (source_type: web/wikipedia)
@@ -383,7 +414,8 @@ The workflow processes claims in a flat pipeline — one decompose call (with th
 ```
 VerifyClaimWorkflow
 ├── create_claim (if needed)
-├── decompose_claim (60s timeout) → {facts: [...], thesis_info: {thesis, structure, key_test}}
+├── decompose_claim (90s timeout) → {facts: [...], thesis_info: {thesis, normalized_claim, normalization_changes, structure, key_test}}
+│   ├── normalize (internal LLM call, max_retries=1, graceful fallback)
 │
 ├── For each batch of MAX_CONCURRENT=2 facts:
 │   └── asyncio.gather(
@@ -546,7 +578,7 @@ Return a JSON array of objects:
 ```
 
 Key decisions:
-- **Atomic claims only** — "UK spent £50B on HS2" not "UK spent £50B on HS2 and cancelled the northern leg"
+- **Atomic claims only** — "Country A spent $50B on Project X" not "Country A spent $50B on Project X and cancelled the second phase"
 - **No opinions** — "The government wasted money" is not a verifiable claim
 - **Context preserved** — knowing where in the article the claim appeared helps with verification
 - **Dedup at insert** — same claim text (or near-duplicate) already exists → skip it

@@ -82,11 +82,11 @@ class VerifyClaimWorkflow:
         log.info(workflow.logger, MODULE, "started", "Starting verification pipeline",
                  claim_id=claim_id, claim=claim_text)
 
-        # Step 1: Decompose — extract atomic facts + thesis in one pass
+        # Step 1: Normalize + Decompose — normalize claim, then extract atomic facts + thesis
         decomposition = await workflow.execute_activity(
             decompose_claim,
             args=[claim_text],
-            start_to_close_timeout=timedelta(seconds=60),
+            start_to_close_timeout=timedelta(seconds=90),
             retry_policy=RetryPolicy(maximum_attempts=3),
         )
 

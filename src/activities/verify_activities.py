@@ -29,11 +29,14 @@ from src.db.models import Claim, SubClaim, Evidence, Verdict
 from src.llm import (
     invoke_llm,
     LLMInvocationError,
+    validate_normalize,
     validate_decompose,
     validate_judge,
     validate_synthesize,
 )
 from src.prompts.verification import (
+    NORMALIZE_SYSTEM,
+    NORMALIZE_USER,
     DECOMPOSE_SYSTEM,
     DECOMPOSE_USER,
     JUDGE_SYSTEM,
@@ -43,6 +46,7 @@ from src.prompts.verification import (
 )
 from src.prompts.linguistic_patterns import get_linguistic_patterns
 from src.schemas.llm_outputs import (
+    NormalizeOutput,
     DecomposeOutput,
     JudgeOutput,
     SynthesizeOutput,
@@ -83,14 +87,20 @@ async def create_claim(claim_text: str) -> str:
 
 @activity.defn
 async def decompose_claim(claim_text: str) -> dict:
-    """Extract atomic verifiable facts and thesis from a claim.
+    """Normalize and extract atomic verifiable facts and thesis from a claim.
 
     Pipeline:
-    1. LLM extracts facts, thesis, and interested parties (direct invocation)
-    2. Code expands interested parties via Wikidata (programmatic, cached)
+    1. LLM normalizes claim (bias neutralization, operationalization, opinion
+       separation, coreference resolution, reference grounding, speculation handling)
+    2. LLM extracts facts, thesis, and interested parties from normalized claim
+    3. Code expands interested parties via Wikidata (programmatic, cached)
        - Corporate: CEO, founder, chairperson, parent/subsidiary
        - Family: spouse, parents, children, siblings + 2-hop in-laws
        - Media: ownership ties to news outlets
+
+    The normalization step is critical: loaded language like "special exceptions"
+    produces subclaims that are structurally valid but un-researchable. Normalizing
+    to "exemption from [regulation]" makes the factual question researchable.
 
     The Wikidata expansion is critical: when a claim is about a person,
     we need to know that their in-laws (via 2-hop family expansion) are also
@@ -98,19 +108,45 @@ async def decompose_claim(claim_text: str) -> dict:
 
     Returns a dict with:
       - "facts": list of {"text": "..."} dicts, each an atomic fact
-      - "thesis_info": {"thesis", "structure", "key_test", "interested_parties"}
+      - "thesis_info": {"thesis", "normalized_claim", "normalization_changes",
+                        "structure", "key_test", "interested_parties"}
       - interested_parties includes "wikidata_context" for research prompt injection
     """
     log.info(activity.logger, "decompose", "start", "Decomposing claim",
              claim=claim_text)
 
+    # Step 1: Normalize claim (bias neutralization, operationalization, opinion separation)
+    norm_output = None
+    try:
+        norm_output = await invoke_llm(
+            system_prompt=NORMALIZE_SYSTEM,
+            user_prompt=NORMALIZE_USER.format(claim_text=claim_text),
+            schema=NormalizeOutput,
+            semantic_validator=validate_normalize,
+            max_retries=1,  # Don't burn time retrying — fall back to raw claim
+            activity_name="normalize",
+        )
+        normalized = cleanup_text(norm_output.normalized_claim) or norm_output.normalized_claim
+        if norm_output.changes:
+            log.info(activity.logger, "decompose", "normalized",
+                     "Claim normalized", original=claim_text,
+                     normalized=normalized, changes=norm_output.changes)
+        else:
+            log.info(activity.logger, "decompose", "no_normalization_needed",
+                     "No normalization needed", claim=claim_text)
+    except LLMInvocationError:
+        normalized = claim_text
+        log.warning(activity.logger, "decompose", "normalization_failed",
+                    "Normalization failed, using raw claim", claim=claim_text)
+
+    # Step 2: Decompose the NORMALIZED claim
     # Build decompose system prompt with linguistic patterns
     decompose_system_with_patterns = DECOMPOSE_SYSTEM + "\n\n" + get_linguistic_patterns()
 
     try:
         output = await invoke_llm(
             system_prompt=decompose_system_with_patterns,
-            user_prompt=DECOMPOSE_USER.format(claim_text=claim_text),
+            user_prompt=DECOMPOSE_USER.format(claim_text=normalized),
             schema=DecomposeOutput,
             semantic_validator=validate_decompose,
             max_retries=2,
@@ -149,6 +185,8 @@ async def decompose_claim(claim_text: str) -> dict:
 
         thesis_info = {
             "thesis": output.thesis,
+            "normalized_claim": normalized,
+            "normalization_changes": norm_output.changes if norm_output else [],
             "structure": output.structure,
             "key_test": output.key_test,
             "interested_parties": expanded_parties,

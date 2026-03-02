@@ -88,8 +88,14 @@ The claim triggers `VerifyClaimWorkflow` — a flat pipeline of 5 activities:
 ```
 create_claim          Creates DB record (skipped if called via API)
     ↓
-decompose_claim       LLM extracts flat atomic facts + thesis
+decompose_claim       Normalize → Decompose (2 LLM calls, 1 activity)
+                      Normalize: 7 transformations (bias neutralization,
+                        operationalization, opinion separation, coreference,
+                        reference grounding, speculation, rhetorical framing)
+                      Decompose: flat atomic facts + thesis extraction
                       Guided by 15-category linguistic pattern taxonomy
+                        + 9 extraction rules (decontextualize, entity disambig.,
+                          operationalize comparisons)
                       SpaCy NER augments entity extraction
                       Wikidata expands parties → ownership, media, family
     ↓
@@ -213,7 +219,7 @@ You can also submit a claim with source attribution:
 curl -s -X POST http://localhost:4500/claims \
   -H "Content-Type: application/json" \
   -d '{
-    "text": "UK spent £50 billion on HS2 before cancelling the northern leg",
+    "text": "Country A spent $50 billion on Project X before cancelling the second phase",
     "source": "https://example.com/article",
     "source_name": "The Example Times"
   }' | python3 -m json.tool
@@ -245,13 +251,14 @@ docker logs -f spin-cycle-dev-worker
 # With LOG_FORMAT=pretty (default in dev), you'll see:
 # I [WORKER    ] starting: Connecting to Temporal | temporal_host=... task_queue=spin-cycle-verify
 # I [WORKER    ] ready: Worker listening | task_queue=spin-cycle-verify activity_count=6
-# I [DECOMPOSE ] done: Claim decomposed | sub_count=4 thesis=Both countries are prioritizing...
-# I [WORKFLOW  ] decomposed: Claim decomposed into atomic facts | fact_count=4
-# I [RESEARCH  ] start: Starting research agent | sub_claim=The US is increasing military spending
-# I [RESEARCH  ] done: Research complete | evidence_count=6
+# I [DECOMPOSE ] normalized: Claim normalized | changes=[...]
+# I [DECOMPOSE ] done: Claim decomposed | sub_count=3 thesis=...
+# I [WORKFLOW  ] decomposed: Claim decomposed into atomic facts | fact_count=3
+# I [RESEARCH  ] start: Starting research agent | sub_claim=...
+# I [RESEARCH  ] done: Research complete | evidence_count=16
 # I [JUDGE     ] done: Sub-claim judged | verdict=true confidence=0.95
-# I [SYNTHESIZE] done: Verdict synthesized | is_final=True verdict=mostly_false confidence=0.85
-# I [STORE     ] done: Result stored in database | claim_id=... verdict=mostly_false
+# I [SYNTHESIZE] done: Verdict synthesized | is_final=True verdict=mostly_true confidence=0.85
+# I [STORE     ] done: Result stored in database | claim_id=... verdict=mostly_true
 
 # With LOG_FORMAT=json (default in prod), output is JSON for Grafana Loki
 ```

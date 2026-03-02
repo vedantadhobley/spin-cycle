@@ -10,6 +10,8 @@ malformed outputs early.
 """
 
 from src.schemas.llm_outputs import (
+    # Normalize
+    NormalizeOutput,
     # Decompose
     InterestedParties,
     DecomposeOutput,
@@ -30,6 +32,7 @@ from src.schemas.api import (
 
 __all__ = [
     # LLM outputs
+    "NormalizeOutput",
     "InterestedParties",
     "DecomposeOutput",
     "Verdict",

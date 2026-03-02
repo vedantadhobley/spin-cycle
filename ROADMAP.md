@@ -211,17 +211,32 @@ The patterns are dynamically appended to `DECOMPOSE_SYSTEM` at runtime via `get_
 
 **Effort:** Small. One LLM call before decomposition.
 
-### 1.5.0c — Claim Normalization
+### 1.5.0c — Claim Normalization (DONE)
 
-**Why:** Ambiguous claims lead to unfocused research. "The President" — which one? "Recently" — when? Normalizing claims before decomposition clarifies what we're actually checking.
+**Status:** ✅ Implemented in `src/prompts/verification.py` + `src/activities/verify_activities.py`
 
-**What:**
-- Resolve references: "The President" → "[current president] (as of [date])"
-- Expand time references: "recently" → "in the past 6 months (Sep 2025 - Feb 2026)"
-- Disambiguate entities: "Washington" → "Washington D.C." or "George Washington" or "Washington State"
-- Pass normalized claim to decomposition
+**Why:** Ambiguous claims lead to unfocused research. Loaded language produces subclaims that are structurally valid but un-researchable ("special exceptions" → `unverifiable`, "measured response" → `unverifiable`).
 
-**Effort:** Small-Medium. Pre-processing step with LLM.
+**What was implemented:**
+
+A normalization `invoke_llm` call within `decompose_claim` (not a separate Temporal activity) performs 7 transformations grounded in the academic literature:
+
+1. **Bias neutralization** (Pryzant et al. AAAI 2020) — loaded language → neutral equivalents
+2. **Operationalization** — vague abstractions → measurable indicators
+3. **Normative/factual separation** (VeriScore, GCC taxonomy) — opinions stripped, facts kept
+4. **Coreference resolution** — pronouns → explicit referents
+5. **Reference grounding** (SAFE decontextualization) — acronyms expanded, dates grounded
+6. **Speculative language handling** (AmbiFC ambiguity taxonomy) — predictions flagged
+7. **Rhetorical/sarcastic framing** — conditional: only when claim clearly uses irony, rhetorical questions, or sarcasm; converts to literal assertion
+
+Plus 4 new extraction rules (6-9) in the decompose prompt: decontextualization, implied question extraction, entity disambiguation, operationalize comparisons. Plus enhanced decomposition checklist with action directives. Plus semantic validator improvements (independence/dedup check, minimum fact length).
+
+Plus a comparative claims research strategy in `RESEARCH_SYSTEM`: teaches the agent to search for each side of a comparison independently instead of searching for the comparison as a whole (which produces opinion pieces instead of factual data).
+
+- +1 LLM call (~12s), decompose timeout bumped 60s → 90s
+- Graceful degradation: if normalization fails, raw claim is used
+- Normalized claim + changes stored in `thesis_info` for auditability
+- Covers 13/13 missing capabilities identified from academic literature (Google SAFE, ClaimDecomp, FActScore, Molecular Facts, AmbiFC, VeriScore, Pryzant et al., DecMetrics)
 
 ### 1.5.0d — Domain-Specific Research Strategies
 
@@ -406,7 +421,7 @@ For this to be legitimate, people need to trust the verdicts. Trust comes from t
 - Update the judge prompt to require direct quotes from evidence
 - Store the relevant quote/passage alongside each evidence item
 - Add `relevance_score` computation (currently the column exists but isn't populated meaningfully)
-- Frontend can show: "Source: Reuters — 'BYD sold 4.2 million EVs in 2025, surpassing Tesla's 3.8 million'"
+- Frontend can show: "Source: [wire service] — '[specific quoted passage from evidence]'"
 
 **Effort:** Small-Medium. Mostly prompt engineering + schema tweaks.
 
@@ -440,7 +455,7 @@ For this to be legitimate, people need to trust the verdicts. Trust comes from t
 
 ### 4.1 — Evidence Caching
 
-**Why:** Multiple claims often reference the same facts. If 10 claims mention "BYD overtook Tesla in EV sales," you don't need to web-search that 10 times.
+**Why:** Multiple claims often reference the same facts. If 10 claims reference the same statistic, you don't need to web-search that 10 times.
 
 **What:**
 - Cache search results by query (with TTL — evidence goes stale)
@@ -487,9 +502,9 @@ Sub-claims are processed in parallel batches using `asyncio.gather`:
 The core product vision: read an article and see claims highlighted inline, color-coded by verdict.
 
 ```
-"The Prime Minister said unemployment fell to [3.2%]{.verdict-true} last quarter,
- while the opposition claimed the government [spent £50 billion on HS2]{.verdict-mostly-true}
- before [cancelling the northern leg]{.verdict-true}."
+"The official said unemployment fell to [3.2%]{.verdict-true} last quarter,
+ while the opposition claimed the government [spent $50 billion on Project X]{.verdict-mostly-true}
+ before [cancelling the second phase]{.verdict-true}."
 ```
 
 - Green: true / mostly true
@@ -558,7 +573,7 @@ What to build next, in order of impact:
 | **4** | Confidence-weighted synthesis (1.5.1) | Low effort, immediately improves verdict quality |
 | **5** | Interested party weighting (1.5.0f) | We have the data, just need to use it |
 | **6** | Source credibility scoring (1.3) | Tiered weighting (basic filtering already done) |
-| **7** | Claim normalization (1.5.0c) | Clearer claims = better research |
+| ~~**7**~~ | ~~Claim normalization (1.5.0c)~~ | ✅ Done |
 | **8** | Adaptive research depth (1.5.2) | Cuts pipeline time in half for simple claims |
 | **9** | Calibration test suite (3.1) | Can't improve without measuring |
 | **10** | Domain-specific research (1.5.0d) | Right sources for right claims |
