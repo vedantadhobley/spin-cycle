@@ -316,7 +316,7 @@ Plus a comparative claims research strategy in `RESEARCH_SYSTEM`: teaches the ag
 
 **What:**
 - **Within-run dedup**: Before researching a leaf, check if an identical (or semantically similar) leaf has already been processed in this workflow run. If so, reuse its result.
-- **Cross-run caching**: Cache research results by sub-claim text with a TTL (evidence goes stale). Use embeddings (joi:3103) to find semantically similar sub-claims that have already been verified.
+- **Cross-run caching**: Cache research results by sub-claim text with a TTL (evidence goes stale). Use embeddings (the embeddings endpoint) to find semantically similar sub-claims that have already been verified.
 - Start simple (exact text match within a run) and evolve to semantic similarity with TTL.
 
 **Effort:** Medium-Large. Within-run dedup is straightforward (dict lookup in workflow). Cross-run caching needs a caching layer and embedding similarity search.
@@ -460,7 +460,7 @@ For this to be legitimate, people need to trust the verdicts. Trust comes from t
 **What:**
 - Cache search results by query (with TTL — evidence goes stale)
 - Cache at the evidence level: if we already have high-quality evidence for a sub-claim, skip research
-- Use embeddings (joi:3103) to find semantically similar sub-claims that have already been researched
+- Use embeddings (the embeddings endpoint) to find semantically similar sub-claims that have already been researched
 
 **Effort:** Medium. Need a caching layer (Redis or just Postgres with TTL) and embedding similarity search.
 

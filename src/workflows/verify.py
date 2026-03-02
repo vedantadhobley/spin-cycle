@@ -15,7 +15,7 @@ timeouts when judge and research overlapped.
 This follows the approach used by Google's SAFE (NeurIPS 2024) and FActScore:
 extract all facts in one pass, verify each independently, aggregate.
 
-Concurrency is tuned for vLLM on joi. With --parallel set on the unified
+Concurrency is tuned for the local LLM server. With --parallel set on the unified
 Qwen3.5 model, MAX_CONCURRENT=2 gives each research agent a dedicated slot — no
 interleaving overhead.
 """
@@ -44,7 +44,7 @@ MODULE = "workflow"
 MAX_FACTS = 10
 
 # Maximum concurrent research+judge pipelines. Matched to --parallel on
-# joi's Qwen3.5 instance — each agent gets a dedicated inference slot.
+# the LLM server's Qwen3.5 instance — each agent gets a dedicated inference slot.
 MAX_CONCURRENT = 2
 
 
@@ -92,7 +92,7 @@ class VerifyClaimWorkflow:
 
         atomic_facts = decomposition["facts"]
         thesis_info = decomposition.get("thesis_info", {})
-        
+
         # interested_parties is now an object with all_parties, direct, institutional, affiliated_media
         interested_parties = thesis_info.get("interested_parties", {})
         if isinstance(interested_parties, list):
@@ -139,7 +139,7 @@ class VerifyClaimWorkflow:
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
             return (fact_text, evidence)
-        
+
         async def _judge(fact_text: str, evidence: list) -> dict:
             """Judge a single fact given its evidence."""
             return await workflow.execute_activity(
@@ -153,22 +153,22 @@ class VerifyClaimWorkflow:
         # Uses semaphore to maintain MAX_CONCURRENT tasks at all times.
         # As soon as one finishes, the next starts immediately (no batch waiting).
         research_semaphore = asyncio.Semaphore(MAX_CONCURRENT)
-        
+
         async def _research_with_limit(fact_text: str) -> tuple[str, list]:
             async with research_semaphore:
                 return await _research(fact_text)
-        
+
         log.info(workflow.logger, MODULE, "research_phase_start",
                  "Starting research phase with sliding window",
-                 claim_id=claim_id, fact_count=len(atomic_facts), 
+                 claim_id=claim_id, fact_count=len(atomic_facts),
                  max_concurrent=MAX_CONCURRENT)
-        
+
         _t0 = workflow.time()
         research_results = await asyncio.gather(
             *[_research_with_limit(fact["text"]) for fact in atomic_facts],
             return_exceptions=True
         )
-        
+
         # Filter out failures
         all_evidence = []
         research_failures = 0
@@ -181,7 +181,7 @@ class VerifyClaimWorkflow:
                 research_failures += 1
             else:
                 all_evidence.append(result)
-        
+
         _research_ms = round((workflow.time() - _t0) * 1000)
         log.info(workflow.logger, MODULE, "research_phase_done",
                  "Research phase completed",
@@ -190,22 +190,22 @@ class VerifyClaimWorkflow:
 
         # Phase 2: Judge all facts with sliding window concurrency
         judge_semaphore = asyncio.Semaphore(MAX_CONCURRENT)
-        
+
         async def _judge_with_limit(fact_text: str, evidence: list) -> dict:
             async with judge_semaphore:
                 return await _judge(fact_text, evidence)
-        
+
         log.info(workflow.logger, MODULE, "judge_phase_start",
                  "Starting judge phase with sliding window",
                  claim_id=claim_id, evidence_count=len(all_evidence),
                  max_concurrent=MAX_CONCURRENT)
-        
+
         _t0 = workflow.time()
         judge_results = await asyncio.gather(
             *[_judge_with_limit(fact_text, evidence) for fact_text, evidence in all_evidence],
             return_exceptions=True
         )
-        
+
         # Filter out failures
         sub_results = []
         judge_failures = 0
@@ -219,7 +219,7 @@ class VerifyClaimWorkflow:
                 judge_failures += 1
             else:
                 sub_results.append(result)
-        
+
         _judge_ms = round((workflow.time() - _t0) * 1000)
         log.info(workflow.logger, MODULE, "judge_phase_done",
                  "Judge phase completed",

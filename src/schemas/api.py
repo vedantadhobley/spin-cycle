@@ -19,6 +19,16 @@ class ClaimSubmit(BaseModel):
         return v.strip()
 
 
+class ClaimBatchSubmit(BaseModel):
+    """Request body for batch claim submission."""
+    claims: list[ClaimSubmit] = Field(..., min_length=1, description="List of claims to verify")
+
+
+class ClaimBatchResponse(BaseModel):
+    """Response after batch claim submission."""
+    claims: list["ClaimResponse"]
+
+
 class ClaimResponse(BaseModel):
     """Response after submitting a claim."""
     id: str

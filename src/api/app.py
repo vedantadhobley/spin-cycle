@@ -36,7 +36,7 @@ TASK_QUEUE = "spin-cycle-verify"
 
 async def _kickstart_queue(temporal: TemporalClient):
     """Start first queued claim if queue is stalled (no running workflows).
-    
+
     Called on API startup to handle edge cases like restarts where
     queued claims exist but nothing is processing them.
     """
@@ -47,12 +47,12 @@ async def _kickstart_queue(temporal: TemporalClient):
     ):
         running_count += 1
         break  # Just need to know if any are running
-    
+
     if running_count > 0:
-        log.info(logger, MODULE, "queue_active", 
+        log.info(logger, MODULE, "queue_active",
                  "Workflow already running, queue is active")
         return
-    
+
     # No running workflows — check for queued claims
     async with async_session() as session:
         result = await session.execute(
@@ -62,25 +62,25 @@ async def _kickstart_queue(temporal: TemporalClient):
             .limit(1)
         )
         claim = result.scalar_one_or_none()
-        
+
         if not claim:
             log.info(logger, MODULE, "queue_empty", "No queued claims")
             return
-        
+
         claim_id = str(claim.id)
         claim_text = claim.text
-        
+
         # Update status and start workflow
         claim.status = "pending"
         await session.commit()
-        
+
         await temporal.start_workflow(
             VerifyClaimWorkflow.run,
             args=[claim_id, claim_text],
             id=f"verify-{claim_id}",
             task_queue=TASK_QUEUE,
         )
-        log.info(logger, MODULE, "queue_kickstart", 
+        log.info(logger, MODULE, "queue_kickstart",
                  "Started queued claim on startup",
                  claim_id=claim_id)
 

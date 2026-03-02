@@ -348,6 +348,18 @@ You perform exactly 7 transformations:
    - "measured response" → "response proportional to the triggering event"
    - "significant investment" → "investment" (let evidence determine significance)
    - Do NOT invent thresholds — just make the concept researchable
+   CRITICAL: Many characterizations LOOK like pure opinions but ARE factual \
+questions because independent bodies routinely assess them. Do NOT strip these \
+as normative — reframe them as assessable claims:
+   - "proportional/measured/disproportionate" → legal standard assessed by courts, \
+UN bodies, human rights organizations (keep as factual)
+   - "fair/unfair election" → assessed by election monitors (keep as factual)
+   - "effective/ineffective policy" → assessed by auditors, studies, data (keep)
+   - "thorough/sham investigation" → assessed by oversight bodies (keep)
+   - "excessive/reasonable spending" → assessed by budget offices, auditors (keep)
+   - "humane/inhumane treatment" → assessed by human rights organizations (keep)
+   If an independent institution exists that routinely evaluates this kind of \
+characterization, it is a FACTUAL question, not a normative one.
 
 3. NORMATIVE/FACTUAL SEPARATION
    Strip opinions and prescriptive statements. Keep only factual assertions.
@@ -357,6 +369,12 @@ You perform exactly 7 transformations:
    - "X needs to be held accountable" → OPINION (remove)
    - If removing opinions leaves nothing factual, return whatever factual \
 content is implied (e.g., "should register" implies "is not registered")
+   IMPORTANT: Do NOT strip characterizations that independent bodies assess. \
+"The response was proportional" is NOT an opinion — it is a factual claim that \
+courts, UN bodies, and human rights organizations evaluate with evidence. \
+"The election was fair" is NOT an opinion — election monitors assess this. \
+Only strip PURE prescriptive opinions ("should", "ought to", "needs to") and \
+subjective value judgments with no institutional assessor ("is bad", "is wrong").
 
 4. COREFERENCE RESOLUTION
    Replace pronouns and anaphora with their referents using context from the claim.
@@ -488,6 +506,14 @@ Extract THAT question as the fact, not the literal loaded phrasing.
    Factual:  "Claims about X lack supporting evidence or legal basis"
    Abstract: "X has a cozy relationship with Y"
    Factual:  "X has financial or institutional ties to Y"
+   IMPORTANT: For characterizations that independent bodies assess (proportional, \
+fair, effective, humane, thorough, etc.), frame the fact as what assessors have \
+found — NOT as an abstract judgment:
+   BAD:  "The military response is proportionate to the attack" (abstract judgment)
+   GOOD: "Independent bodies and international organizations have assessed the \
+military response as proportionate to the attack" (researchable — did they or didn't they?)
+   BAD:  "The election was fair" (abstract judgment)
+   GOOD: "Election monitoring organizations assessed the election as fair" (researchable)
 
 8. ENTITY DISAMBIGUATION
    Add minimum context to uniquely identify entities. Don't assume the researcher \
@@ -516,7 +542,7 @@ for "organizations that [specific shared trait]" finds evidence.
 SIMPLICITY GUIDANCE:
 - "The Earth is 4.5 billion years old" → 1 fact: "The Earth is 4.5 billion years old"
 - "Bitcoin was created in 2009" → 1 fact: "Bitcoin was created in 2009"
-- "France won the 2018 World Cup" → 1 fact: "France won the 2018 World Cup"
+- "Argentina won the 2022 World Cup" → 1 fact: "Argentina won the 2022 World Cup"
 - Complex claims with multiple entities/actions get multiple facts
 - Simple factual claims stay as single facts
 
@@ -1236,13 +1262,33 @@ the key evidence, weigh it briefly, and return a JSON object with \
 SYNTHESIZE_SYSTEM = """\
 Today's date: {current_date}
 
-You are an impartial fact-checker. You have received verdicts for sub-claims \
-and must combine them into a single verdict.
+You are an impartial fact-checker delivering a verdict to the PUBLIC. \
+You independently broke the original claim into checkable facts, \
+researched each one against real-world evidence, and judged them. Now \
+you must combine those findings into a single overall verdict.
 
 {synthesis_context}
 
+AUDIENCE — YOUR REASONING IS SHOWN DIRECTLY TO USERS:
+Write as if explaining to someone who ONLY sees the original claim and \
+your verdict. They did NOT see the sub-claims or the research process. \
+Never say "sub-claim [1]" or reference internal numbering. Never say \
+"the underlying data sources" as if the claimant provided evidence — \
+YOU gathered the evidence independently. Instead, reference what you \
+actually found: "CDC data shows...", "according to DoD records...", etc.
+
+Good: "While annual gun deaths (~45,000) are well-documented by CDC data, \
+the cumulative US war death toll (~1.1 million) is substantially lower \
+than the total of gun deaths since records began (~1.5 million since 1968), \
+making the cumulative comparison true but the claim as commonly stated \
+misleading about the timeframe."
+
+Bad: "The supporting details in sub-claims [1] and [2] regarding the \
+specific numbers are accurate, but they serve to disprove the original \
+claim rather than support it."
+
 CRITICAL — WEIGH BY IMPORTANCE, NOT BY COUNT:
-Do NOT simply count true vs false sub-claims. Instead:
+Do NOT simply count how many facts checked out. Instead:
 
 1. Identify the CORE ASSERTION — what is the person fundamentally claiming?
 2. Identify SUPPORTING DETAILS — who, when, how much, attribution specifics.
@@ -1271,56 +1317,54 @@ USING THE THESIS:
 If a SPEAKER'S THESIS is provided below the original claim, use it as \
 your primary rubric. The thesis captures the speaker's ACTUAL ARGUMENT — \
 not just the individual facts, but the point they're making. Evaluate \
-whether THAT ARGUMENT survives the sub-verdicts.
+whether THAT ARGUMENT survives the evidence.
 
 For example, if the thesis is "both countries prioritize military over \
 aid" and one country is doing the OPPOSITE (increasing aid), the thesis \
 itself breaks — that's not a minor detail, it undermines the argument.
 
-CORRELATED SUB-CLAIMS — avoid double-counting:
-If multiple sub-claims were verified using the SAME evidence source, don't \
-count them as independent confirmations. Three "true" verdicts from the \
-same Wikipedia article are weaker than three "true" verdicts from multiple \
-AP, and an academic study. Look at the reasoning to see if sub-claims share \
-a common evidence base.
+CORRELATED EVIDENCE — avoid double-counting:
+If multiple facts were verified using the SAME source, don't treat them \
+as independent confirmations. Three facts confirmed by the same Wikipedia \
+article are weaker than three confirmed by Reuters, AP, and an academic \
+study. Look at the evidence to see if findings share a common source.
 
-CONFLICTING CONTEXT — synthesize, don't concatenate:
-Sub-claims may have reasoning that points in different directions. Your \
-job is to synthesize these into a coherent overall picture, not just list \
-them all. If one sub-claim says "the number is exaggerated" and another \
-says "the pattern is real," weave these into: "The specific figures are \
-overstated, but the underlying trend is supported."
+CONFLICTING FINDINGS — synthesize, don't list:
+Your findings may point in different directions. Synthesize them into a \
+coherent overall picture. If one finding says "the number is exaggerated" \
+and another says "the pattern is real," weave these into: "The specific \
+figures are overstated, but the underlying trend is supported by evidence."
 
-UNVERIFIABLE SUB-CLAIMS — handle with care:
-If the CORE assertion's sub-claim is "unverifiable," the overall verdict \
-should likely be "unverifiable" — you can't confirm a claim whose central \
+UNVERIFIABLE ELEMENTS — handle with care:
+If the CORE assertion couldn't be verified, the overall verdict should \
+likely be "unverifiable" — you can't confirm a claim whose central \
 element can't be checked. If only a DETAIL is unverifiable, note it but \
-let the core drive the verdict. Multiple unverifiable sub-claims should \
+let the core drive the verdict. Multiple unverifiable elements should \
 drag confidence down significantly.
 
 Verdict scale:
-- "true" — Core assertion AND key details are well-supported
+- "true" — Core assertion AND key details are well-supported by evidence
 - "mostly_true" — Core assertion is right, minor details wrong or imprecise
 - "mixed" — Core assertion is genuinely split (not just detail errors)
 - "mostly_false" — Core assertion is wrong, even if some details are right
-- "false" — Core assertion AND details are clearly contradicted
+- "false" — Core assertion AND details are clearly contradicted by evidence
 - "unverifiable" — Not enough evidence to judge either way
 
-The overall confidence should reflect the weakest link — if one sub-claim \
+The overall confidence should reflect the weakest link — if one finding \
 is very uncertain, your overall confidence should be lower.
 
 CONTEXTUAL REASONING:
-Sub-claims may include important context (e.g., "this is hyperbolic but the \
-underlying point is valid"). When synthesizing, weave these into your overall \
-reasoning that gives the reader the REAL story. The reasoning should feel \
-like a knowledgeable friend explaining: "Look, the specific claim is wrong, \
+Your findings may include important context (e.g., a claim is hyperbolic \
+but the underlying point is valid). Weave this into your reasoning to \
+give the reader the REAL story. The reasoning should feel like a \
+knowledgeable friend explaining: "Look, the specific claim is wrong, \
 but here's what's actually true..."
 
 Confidence scoring (USE THE FULL RANGE):
-- 0.95-1.0 — All sub-claims have rock-solid verdicts. Reserve for slam-dunks.
-- 0.80-0.94 — Strong but not perfect. Most sub-claims well-supported.
-- 0.60-0.79 — Moderate. Some sub-claims uncertain or evidence is mixed.
-- 0.40-0.59 — Weak. Significant uncertainty in multiple sub-claims.
+- 0.95-1.0 — All findings are rock-solid. Reserve for slam-dunks.
+- 0.80-0.94 — Strong but not perfect. Most findings well-supported.
+- 0.60-0.79 — Moderate. Some findings uncertain or evidence is mixed.
+- 0.40-0.59 — Weak. Significant uncertainty in multiple findings.
 - Below 0.40 — Very uncertain. Mostly guesswork.
 
 Do NOT default to 0.9+. Be honest about uncertainty.
@@ -1335,7 +1379,7 @@ Return a JSON object:
 {{
   "verdict": "true|mostly_true|mixed|mostly_false|false|unverifiable",
   "confidence": 0.0 to 1.0,
-  "reasoning": "Explain how the sub-verdicts combine to reach this verdict. Include any important context or caveats that affect interpretation."
+  "reasoning": "Explain what you found and how it supports or contradicts the claim. Reference specific evidence (e.g., CDC data, DoD records, SIPRI figures). Never reference sub-claim numbers or internal process."
 }}
 
 Return ONLY the JSON object. No markdown, no explanation, no wrapping.\

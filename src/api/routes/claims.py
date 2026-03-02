@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from temporalio.client import Client as TemporalClient
 
-from src.schemas import ClaimSubmit, ClaimResponse, VerdictResponse, ClaimListResponse, SubClaimResponse
+from src.schemas import ClaimSubmit, ClaimBatchSubmit, ClaimBatchResponse, ClaimResponse, VerdictResponse, ClaimListResponse, SubClaimResponse
 from src.db.models import Claim, SubClaim, Verdict
 from src.db.session import get_session
 from src.utils.logging import log, get_logger
@@ -42,6 +42,7 @@ async def count_queued_claims(session: AsyncSession) -> int:
         select(func.count(Claim.id)).where(Claim.status == "queued")
     )
     return result.scalar() or 0
+
 
 router = APIRouter()
 
@@ -88,21 +89,21 @@ async def submit_claim(
     session: AsyncSession = Depends(get_session),
 ):
     """Submit a claim for verification.
-    
+
     Claims are queued to ensure sequential processing (one at a time).
     If no workflow is running, starts immediately. Otherwise, queued.
     """
     temporal = request.app.state.temporal
-    
+
     # Check if any verification is currently running
     running_count = await count_running_workflows(temporal)
-    
+
     # Determine initial status
     if running_count > 0:
         initial_status = "queued"
     else:
         initial_status = "pending"
-    
+
     claim = Claim(
         text=body.text,
         source_url=body.source,
@@ -114,14 +115,12 @@ async def submit_claim(
     await session.refresh(claim)
 
     claim_id = str(claim.id)
-    
+
     if initial_status == "queued":
-        # Get queue position
         queue_position = await count_queued_claims(session)
         log.info(logger, MODULE, "queued", "Claim queued for verification",
                  claim_id=claim_id, queue_position=queue_position)
     else:
-        # No workflow running — start immediately
         await temporal.start_workflow(
             VerifyClaimWorkflow.run,
             args=[claim_id, body.text],
@@ -137,6 +136,73 @@ async def submit_claim(
         status=claim.status,
         created_at=claim.created_at,
     )
+
+
+@router.post("/batch", response_model=ClaimBatchResponse, status_code=201)
+async def submit_claims_batch(
+    body: ClaimBatchSubmit,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+):
+    """Submit multiple claims for verification.
+
+    Inserts all claims into the database. If no workflow is currently
+    running, starts the first claim immediately; the rest are queued.
+    """
+    temporal = request.app.state.temporal
+
+    running_count = await count_running_workflows(temporal)
+    started_first = False
+    responses = []
+
+    for item in body.claims:
+        if running_count == 0 and not started_first:
+            initial_status = "pending"
+        else:
+            initial_status = "queued"
+
+        claim = Claim(
+            text=item.text,
+            source_url=item.source,
+            source_name=item.source_name,
+            status=initial_status,
+        )
+        session.add(claim)
+        await session.commit()
+        await session.refresh(claim)
+
+        claim_id = str(claim.id)
+
+        if initial_status == "pending":
+            await temporal.start_workflow(
+                VerifyClaimWorkflow.run,
+                args=[claim_id, item.text],
+                id=f"verify-{claim_id}",
+                task_queue=TASK_QUEUE,
+            )
+            started_first = True
+            log.info(logger, MODULE, "batch_workflow_started",
+                     "Batch: first claim workflow started",
+                     claim_id=claim_id)
+        else:
+            log.info(logger, MODULE, "batch_queued",
+                     "Batch: claim queued",
+                     claim_id=claim_id)
+
+        responses.append(ClaimResponse(
+            id=claim_id,
+            text=claim.text,
+            status=claim.status,
+            created_at=claim.created_at,
+        ))
+
+    log.info(logger, MODULE, "batch_submitted",
+             "Batch submission complete",
+             total=len(responses),
+             started=1 if started_first else 0,
+             queued=len(responses) - (1 if started_first else 0))
+
+    return ClaimBatchResponse(claims=responses)
 
 
 @router.get("/{claim_id}", response_model=VerdictResponse)

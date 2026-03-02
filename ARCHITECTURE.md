@@ -25,7 +25,7 @@ There are three major technologies in play, each doing a different job. Understa
 
 LangChain is the **toolbox**. It provides:
 
-- **`ChatOpenAI`** — the LLM client that talks to joi's OpenAI-compatible API. Every LLM call in the project goes through this class. It handles message formatting, streaming, structured output, and tool calling.
+- **`ChatOpenAI`** — the LLM client that talks to the LLM server's OpenAI-compatible API. Every LLM call in the project goes through this class. It handles message formatting, streaming, structured output, and tool calling.
 - **LangChain tools** — standardised interfaces for external services. DuckDuckGo search, Wikipedia, SearXNG, Serper, Brave, and page fetching are all wrapped as LangChain tools with a common `.invoke()` / `.ainvoke()` API.
 - **Message types** — `SystemMessage`, `HumanMessage`, `AIMessage`, `ToolMessage`. These are the primitives that make up an LLM conversation.
 
@@ -114,7 +114,7 @@ A claim enters the system (via API or extraction) and is processed as a **flat p
 
 ### Model Assignment
 
-All steps use the same **Qwen3.5-35B-A3B** instance on joi (:3101), now running on **ROCm** for improved AMD GPU performance (~38 tok/s sustained throughput).
+All steps use the same **Qwen3.5-35B-A3B** instance on the LLM server, running on **ROCm** for improved AMD GPU performance (~38 tok/s sustained throughput).
 
 Thinking mode is toggled per-request via `chat_template_kwargs`, but currently **disabled for all steps**:
 
@@ -325,6 +325,18 @@ The LLM evaluates evidence for a single sub-claim. This is NOT agentic — it's 
 
 The critical constraint: **"Do NOT use your own knowledge."** The LLM must reason only from the evidence provided. This is what makes verdicts trustworthy — they're grounded in real, citable sources.
 
+**Evidence quality ranking** (`src/utils/evidence_ranker.py`) runs when the research agent returns more than 20 evidence items. Instead of naively taking the first 20 (discovery order), evidence is scored 0-100 on quality signals and sorted before capping:
+
+| Component | Range | Signals |
+|-----------|-------|---------|
+| Source type | 0-30 | Wikipedia=30, LegiScan=28, web=10 |
+| MBFC factual | 0-30 | very-high=30, high=24, mostly-factual=16, unrated=12 |
+| Gov/institutional TLD | 0-15 | .gov/.mil=15, .edu=10 |
+| Content richness | 0-15 | >2000 chars=15, >800=10, >200=5 |
+| MBFC credibility | 0-10 | high=10, medium=5, unrated=4 |
+
+A domain diversity cap (max 3 items per domain) ensures at least 7 unique source domains in the final 20. Political bias is deliberately NOT a scoring signal — factual quality matters, political lean doesn't. Unrated sources get generous defaults (12/30 factual) because they include .gov data portals, academic papers, and international sources outside MBFC coverage. Scoring uses `get_source_rating_sync()` — cache-only, zero network calls.
+
 **Pre-judge enrichment** runs before the LLM sees any evidence, in two passes:
 
 1. **Entity enrichment (SpaCy NER → Wikidata):** All evidence content is concatenated, SpaCy extracts PERSON/ORG entities, new entities not already in `all_parties` are Wikidata-expanded (capped at 8). If a newly discovered entity connects to an existing interested party, it's added to `all_parties` and its media holdings are added to `affiliated_media`.
@@ -449,7 +461,7 @@ Key properties:
 
 ### GPU Compute Constraints
 
-The LLM runs on joi via llama.cpp with **ROCm backend** (AMD GPU optimization). `--parallel N` slots multiplex concurrent requests onto a single GPU — it does NOT parallelize them. N concurrent requests = each takes ~Nx longer, total throughput is constant (~38 tok/s sustained).
+The LLM runs via llama.cpp with **ROCm backend** (AMD GPU optimization). `--parallel N` slots multiplex concurrent requests onto a single GPU — it does NOT parallelize them. N concurrent requests = each takes ~Nx longer, total throughput is constant (~38 tok/s sustained).
 
 | Service | Port | `--parallel` | Backend | Notes |
 |---------|------|-------------|---------|-------|
@@ -713,7 +725,7 @@ All models use SQLAlchemy 2.0 declarative base (`src/db/models.py`):
 
 ### Models
 
-One unified model running on joi via llama.cpp, with thinking toggled per-request:
+One unified model running via llama.cpp, with thinking toggled per-request:
 
 | Port | Model | Mode | Used By |
 |------|-------|------|--------|
@@ -726,10 +738,10 @@ One unified model running on joi via llama.cpp, with thinking toggled per-reques
 ### Connection Path
 
 ```
-Container → Docker DNS (127.0.0.11) → systemd-resolved → Tailscale MagicDNS → joi (100.70.38.37)
+Container → Docker DNS (127.0.0.11) → Tailscale FQDN → LLM server
 ```
 
-Short hostnames (`joi`) work because Docker is configured to use systemd-resolved as upstream DNS, and Tailscale registers machine names there.
+The `LLAMA_URL` env var points to the LLM server's Tailscale FQDN (e.g. `http://host.tailf424db.ts.net:3101`).
 
 ### Configuration
 
@@ -845,8 +857,8 @@ spin-cycle-dev-adminer           :4502  ← Postgres web UI (Dracula theme)
 
 ### External Services
 
-- `joi:3101` — LLM API (llama.cpp Qwen3.5-35B-A3B, unified thinking/non-thinking, via Tailscale)
-- `joi:3103` — LLM embeddings API (llama.cpp, via Tailscale)
+- `LLAMA_URL` — LLM API (llama.cpp Qwen3.5-35B-A3B, unified thinking/non-thinking, via Tailscale)
+- `LLAMA_EMBED_URL` — LLM embeddings API (llama.cpp, via Tailscale)
 - SearXNG — self-hosted meta-search (configured via `SEARXNG_URL`)
 - DuckDuckGo — web search (no API key)
 - Serper — Google search API (requires `SERPER_API_KEY`)
@@ -1145,7 +1157,7 @@ spin-cycle/
 ├── src/
 │   ├── __init__.py
 │   ├── worker.py                   # Temporal worker entrypoint
-│   ├── llm.py                      # Shared LLM client (ChatOpenAI → joi)
+│   ├── llm.py                      # Shared LLM client (ChatOpenAI → LLM server)
 │   │
 │   ├── utils/                      # Shared utilities
 │   │   └── logging.py              # Structured logging (JSON for Loki, pretty for dev)
@@ -1201,7 +1213,7 @@ spin-cycle/
 |---------|---------|---------|
 | `langgraph` | >=0.2.0 | Agent state machine framework (ReAct agent) |
 | `langchain` | >=0.3.0 | Foundation: message types, tool interfaces |
-| `langchain-openai` | >=0.2.0 | `ChatOpenAI` client for joi's API |
+| `langchain-openai` | >=0.2.0 | `ChatOpenAI` client for LLM server API |
 | `langchain-community` | >=0.3.0 | `DuckDuckGoSearchResults` tool |
 | `temporalio` | >=1.7.0 | Workflow orchestration, workers, activities |
 | `fastapi` | >=0.115.0 | REST API framework |

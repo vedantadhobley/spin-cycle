@@ -62,9 +62,9 @@ async def main():
             store_result,
             start_next_queued_claim,
         ],
-        # Serialize activity execution - only one LLM call at a time
-        # Workflows may still interleave but activities (where LLM calls happen)
-        # will be strictly sequential
+        # Allow 2 concurrent activities to match MAX_CONCURRENT=2 in the workflow.
+        # The workflow uses a semaphore to run 2 research/judge tasks in parallel,
+        # matched to --parallel 2 on the LLM server.
         max_concurrent_activities=2,
     )
 

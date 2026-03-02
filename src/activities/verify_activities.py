@@ -459,12 +459,22 @@ async def judge_subclaim(
     # The thinking model's chain-of-thought scales super-linearly with
     # evidence count — 34 items can take >180s while 20 takes ~60s.
     # 20 unique items is plenty for a well-grounded verdict.
+    # Ranked by quality (MBFC, source type, TLD, content richness) rather
+    # than discovery order — prevents high-quality late-discovered sources
+    # from being dropped.
     MAX_JUDGE_EVIDENCE = 20
     if len(source_evidence) > MAX_JUDGE_EVIDENCE:
-        log.info(activity.logger, "judge", "evidence_capped",
-                 "Capping evidence for judge prompt",
-                 original=len(source_evidence), capped=MAX_JUDGE_EVIDENCE)
-        source_evidence = source_evidence[:MAX_JUDGE_EVIDENCE]
+        from src.utils.evidence_ranker import rank_and_select, format_ranking_log
+        original_count = len(source_evidence)
+        source_evidence, dropped = rank_and_select(
+            source_evidence, max_items=MAX_JUDGE_EVIDENCE,
+        )
+        log.info(activity.logger, "judge", "evidence_ranked",
+                 "Ranked and selected evidence for judge prompt",
+                 original=original_count, selected=len(source_evidence))
+        log.debug(activity.logger, "judge", "evidence_ranking_detail",
+                  "Evidence ranking breakdown",
+                  **format_ranking_log(source_evidence, dropped))
 
     # Log which URLs the judge will see — critical for debugging verdicts
     evidence_urls = [
@@ -974,46 +984,48 @@ async def store_result(claim_id: str, result: dict) -> None:
 @activity.defn
 async def start_next_queued_claim() -> str | None:
     """Check for queued claims and start the next one.
-    
+
     Called at the end of each workflow to trigger the next claim in queue.
+    Uses SELECT ... FOR UPDATE for race safety.
     Returns the claim_id if a workflow was started, None otherwise.
     """
     import os
     from temporalio.client import Client as TemporalClient
-    
+
     TEMPORAL_HOST = os.getenv("TEMPORAL_HOST", "localhost:7233")
     TASK_QUEUE = "spin-cycle-verify"
-    
+
     async with async_session() as session:
-        # Find oldest queued claim
+        # Find oldest queued claim (locked to prevent races)
         result = await session.execute(
             select(Claim)
             .where(Claim.status == "queued")
             .order_by(Claim.created_at.asc())
+            .with_for_update()
             .limit(1)
         )
         claim = result.scalar_one_or_none()
-        
+
         if not claim:
             log.info(activity.logger, "queue", "empty", "No queued claims")
             return None
-        
+
         claim_id = str(claim.id)
         claim_text = claim.text
-        
+
         # Update status to pending before starting workflow
         claim.status = "pending"
         claim.updated_at = datetime.now(timezone.utc)
         await session.commit()
-        
-        log.info(activity.logger, "queue", "starting_next", 
+
+        log.info(activity.logger, "queue", "starting_next",
                  "Starting next queued claim",
                  claim_id=claim_id)
-    
+
     # Connect to Temporal and start the workflow
     # Import here to avoid circular dependency with workflow module
     from src.workflows.verify import VerifyClaimWorkflow
-    
+
     temporal = await TemporalClient.connect(TEMPORAL_HOST)
     await temporal.start_workflow(
         VerifyClaimWorkflow.run,
@@ -1021,9 +1033,9 @@ async def start_next_queued_claim() -> str | None:
         id=f"verify-{claim_id}",
         task_queue=TASK_QUEUE,
     )
-    
+
     log.info(activity.logger, "queue", "workflow_started",
              "Queued claim workflow started",
              claim_id=claim_id)
-    
+
     return claim_id

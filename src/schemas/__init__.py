@@ -24,6 +24,8 @@ from src.schemas.llm_outputs import (
 
 from src.schemas.api import (
     ClaimSubmit,
+    ClaimBatchSubmit,
+    ClaimBatchResponse,
     ClaimResponse,
     SubClaimResponse,
     VerdictResponse,
@@ -40,6 +42,8 @@ __all__ = [
     "SynthesizeOutput",
     # API
     "ClaimSubmit",
+    "ClaimBatchSubmit",
+    "ClaimBatchResponse",
     "ClaimResponse",
     "SubClaimResponse",
     "VerdictResponse",

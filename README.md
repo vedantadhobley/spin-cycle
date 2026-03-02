@@ -62,7 +62,7 @@ Because we're putting the spin through the wringer.
 | Agent framework | [LangGraph](https://langchain-ai.github.io/langgraph/) | ReAct agent for autonomous evidence gathering |
 | LLM toolkit | [LangChain](https://python.langchain.com/) | ChatOpenAI client, tool wrappers, message types |
 | Workflow engine | [Temporal](https://temporal.io/) | Durable execution, retries, scheduling, visibility |
-| LLM | Qwen3.5-35B-A3B (on joi via llama.cpp/ROCm) | Single instance, ~38 tok/s sustained throughput |
+| LLM | Qwen3.5-35B-A3B (via llama.cpp/ROCm) | Single instance, ~38 tok/s sustained throughput |
 | NER | [SpaCy](https://spacy.io/) (en_core_web_sm) | Entity extraction from claims and evidence (CPU, ~ms) |
 | Knowledge graph | [Wikidata](https://www.wikidata.org/) SPARQL | Ownership chains, media holdings, family relationships |
 | Source ratings | [MBFC](https://mediabiasfactcheck.com/) | Bias and factual reporting ratings (scraped + cached) |
@@ -153,7 +153,7 @@ curl http://localhost:4500/claims/{id}
 ### Prerequisites
 
 - Docker and Docker Compose
-- Access to an LLM server (joi via Tailscale, or any OpenAI-compatible endpoint)
+- Access to an LLM server (any OpenAI-compatible endpoint, e.g. llama.cpp via Tailscale)
 - (Optional) The `luv-dev` Docker network if running alongside vedanta-systems
 
 ### Setup
@@ -267,8 +267,8 @@ docker logs -f spin-cycle-dev-worker
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LLAMA_URL` | `http://joi:3101` | LLM endpoint (Qwen3.5-35B-A3B, unified thinking/non-thinking) |
-| `LLAMA_EMBED_URL` | `http://joi:3103` | Embeddings endpoint (not yet used) |
+| `LLAMA_URL` | (required) | LLM endpoint (Qwen3.5-35B-A3B, unified thinking/non-thinking) |
+| `LLAMA_EMBED_URL` | (optional) | Embeddings endpoint (not yet used) |
 | `POSTGRES_PASSWORD` | `spin-cycle-dev` | Application Postgres password |
 | `LOG_FORMAT` | `json` (prod) / `pretty` (dev) | Log output format — `json` for Grafana Loki, `pretty` for terminal |
 | `LOG_LEVEL` | `INFO` | Log level — `DEBUG`, `INFO`, `WARNING`, `ERROR` |
@@ -314,7 +314,7 @@ spin-cycle/
 │
 ├── src/
 │   ├── worker.py                   # Temporal worker entrypoint
-│   ├── llm.py                      # Shared LLM client → joi (instruct + thinking)
+│   ├── llm.py                      # Shared LLM client (instruct + thinking)
 │   │
 │   ├── utils/                      # Shared utilities
 │   │   ├── logging.py              # Structured logging (JSON for Loki, pretty for dev)
