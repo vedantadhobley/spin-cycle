@@ -33,7 +33,8 @@ FACTUAL_SCORES = {
     "low": 4,
     "very-low": 2,
 }
-FACTUAL_UNRATED = 12  # generous default — covers .gov, academic, international
+FACTUAL_UNRATED_GOV = 20  # .gov/.edu/.mil — trustworthy even without MBFC
+FACTUAL_UNRATED = 4        # unknown domains — low default, must earn trust via MBFC
 
 # --- MBFC credibility scoring (0-10) ---
 CREDIBILITY_SCORES = {
@@ -41,7 +42,7 @@ CREDIBILITY_SCORES = {
     "medium": 5,
     "low": 2,
 }
-CREDIBILITY_UNRATED = 4
+CREDIBILITY_UNRATED = 2
 
 # --- Government/institutional TLD scoring (0-15) ---
 GOV_TLD_SCORE = 15   # .gov, .mil
@@ -113,7 +114,11 @@ def score_evidence(ev: dict) -> tuple[float, dict]:
     factual = rating.get("factual_reporting") if rating else None
     if factual and factual in FACTUAL_SCORES:
         breakdown["factual"] = FACTUAL_SCORES[factual]
+    elif _tld_score(domain) > 0:
+        # Government/edu domains are trustworthy even without MBFC rating
+        breakdown["factual"] = FACTUAL_UNRATED_GOV
     else:
+        # Unknown domains get low default — MBFC-rated sources should win
         breakdown["factual"] = FACTUAL_UNRATED
 
     # 3. Government/institutional TLD (0-15)

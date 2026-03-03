@@ -101,6 +101,55 @@ HARD_BLOCKED_DOMAINS = {
     # (Wikipedia has its own tool, shouldn't come from web search)
     "wikipedia.org",
     "britannica.com",
+
+    # Dictionaries / language reference — never evidence for factual claims
+    "merriam-webster.com",
+    "dictionary.cambridge.org",
+    "collinsdictionary.com",
+    "dictionary.com",
+    "thesaurus.com",
+    "wordreference.com",
+    "wiktionary.org",
+    "urbandictionary.com",
+    "etymonline.com",
+
+    # Name meaning / baby name sites — SearXNG matches person names to these
+    "namediscoveries.com",
+    "behindthename.com",
+    "babynamewizard.com",
+    "nameberry.com",
+    "names.org",
+    "babynames.com",
+    "momlovesbest.com",
+
+    # Shopping / commerce / banking — not evidence sources
+    "amazon.com",
+    "ebay.com",
+    "etsy.com",
+    "walmart.com",
+    "target.com",
+    "alibaba.com",
+
+    # Recipe / lifestyle — SearXNG word-matches to these
+    "allrecipes.com",
+    "food.com",
+    "tasty.co",
+    "yelp.com",
+    "tripadvisor.com",
+    "theboheme.com",
+
+    # Microsoft community / tech support forums
+    "answers.microsoft.com",
+    "support.microsoft.com",
+    "support.google.com",
+    "support.apple.com",
+
+    # Generic search engines — not primary sources
+    "google.com",
+    "bing.com",
+    "duckduckgo.com",
+    "yahoo.com",
+    "baidu.com",
 }
 
 # Factual ratings that we block — "mixed" and worse

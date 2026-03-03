@@ -116,9 +116,9 @@ class TestScoreEvidence:
         ev = _make_ev(url="https://eia.gov/data/electricity", content="x" * 2500)
         score, breakdown = score_evidence(ev)
         assert breakdown["gov_tld"] == 15
-        # Factual/credibility should be unrated defaults since gov has None values
-        assert breakdown["factual"] == 12
-        assert breakdown["credibility"] == 4
+        # .gov gets elevated unrated default (trustworthy without MBFC)
+        assert breakdown["factual"] == 20
+        assert breakdown["credibility"] == 2
 
     def test_legiscan_source_type_score(self):
         ev = _make_ev(url="https://legiscan.com/US/bill/HR5678")
@@ -128,10 +128,10 @@ class TestScoreEvidence:
     def test_unrated_short_snippet(self):
         ev = _make_ev(url="https://random-blog.net/post", content="x" * 100)
         score, breakdown = score_evidence(ev)
-        assert breakdown["factual"] == 12   # unrated default
-        assert breakdown["credibility"] == 4  # unrated default
+        assert breakdown["factual"] == 4    # unknown domain — low default
+        assert breakdown["credibility"] == 2  # unknown domain — low default
         assert breakdown["content"] == 0     # too short
-        assert score < 35
+        assert score < 20
 
     def test_breakdown_sums_to_total(self):
         ev = _make_ev(url="https://reuters.com/article/x", content="x" * 1000)

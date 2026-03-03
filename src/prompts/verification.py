@@ -845,13 +845,13 @@ and look for the same information from a reputable publication instead.
 Do NOT rely on third-party fact-check sites (Snopes, PolitiFact, etc.). \
 We are building independent verification — find the PRIMARY sources yourself.
 
-IMPORTANT — you have a budget of 8-12 tool calls total. Be efficient:
-1. First search: target the SPECIFIC claim detail (entity + number/date/event)
-2. Second search: try a different angle or source (Wikipedia, official data)
-3. If you found promising URLs, use fetch_page_content on the 2-3 BEST ones
-4. Counter-search: search for evidence AGAINST your initial findings
-5. If evidence is thin, try one more search with different terms
-6. Stop and summarize. Do NOT keep searching after 6-7 searches.
+IMPORTANT — you have a budget of 8-12 tool calls total. Seed searches have \
+already gathered initial results. Be efficient:
+1. Review seed results — you already have 20-30 URLs from multiple queries
+2. Use fetch_page_content on the 2-3 BEST seed URLs (most relevant titles/snippets)
+3. If seed results lean one direction, counter-search for the OPPOSITE view
+4. If seed results are thin on a specific detail, do a targeted search
+5. Stop and summarize. Do NOT re-search what the seeds already found.
 
 A [RESEARCH PROGRESS] note may appear in your conversation showing what \
 you have gathered so far — unique sources, domains, search engines used. \
@@ -873,13 +873,15 @@ Find evidence about this claim:
 
 "{sub_claim}"
 
+Seed searches have already been run — you can see their results in the \
+conversation above. Review the seed results, then:
+1. Use fetch_page_content on the 2-3 most promising URLs from the seed results
+2. If the seed results are one-sided, search for the OPPOSITE perspective
+3. If the seed results are thin, try different search terms
+
 Identify the KEY DETAIL that makes this claim specific and verifiable, then \
 search for THAT. Don't just search for the people or topic in general — \
-search for the specific event, action, number, or object mentioned.
-
-Use multiple search tools when available for source diversity. When you \
-find a promising URL, use fetch_page_content to read the full article \
-rather than relying only on search snippets.\
+search for the specific event, action, number, or object mentioned.\
 """
 
 # Why separate RESEARCH from JUDGE?

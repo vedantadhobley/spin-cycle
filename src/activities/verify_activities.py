@@ -125,6 +125,7 @@ async def decompose_claim(claim_text: str) -> dict:
             schema=NormalizeOutput,
             semantic_validator=validate_normalize,
             max_retries=1,  # Don't burn time retrying — fall back to raw claim
+            temperature=0,
             activity_name="normalize",
         )
         normalized = cleanup_text(norm_output.normalized_claim) or norm_output.normalized_claim
@@ -151,6 +152,7 @@ async def decompose_claim(claim_text: str) -> dict:
             schema=DecomposeOutput,
             semantic_validator=validate_decompose,
             max_retries=2,
+            temperature=0,
             activity_name="decompose",
         )
 
@@ -748,6 +750,7 @@ async def judge_subclaim(
             schema=JudgeOutput,
             semantic_validator=validate_judge,
             max_retries=2,
+            temperature=0,
             activity_name="judge",
         )
         
@@ -853,6 +856,7 @@ async def synthesize_verdict(
             schema=SynthesizeOutput,
             semantic_validator=validate_synthesize,
             max_retries=2,
+            temperature=0,
             activity_name="synthesize",
         )
         

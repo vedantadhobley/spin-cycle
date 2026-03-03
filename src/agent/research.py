@@ -73,6 +73,7 @@ This agent runs INSIDE the research_subclaim Temporal activity. This gives us:
 """
 
 import re as _re
+import uuid as _uuid
 from urllib.parse import urlparse
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -511,6 +512,219 @@ def extract_evidence(messages: list) -> list[dict]:
     return evidence
 
 
+def _generate_query_variants(sub_claim: str) -> list[str]:
+    """Generate 1-2 search query variants from a sub-claim using NER.
+
+    Uses SpaCy to pull PERSON/ORG/GPE entities, then builds:
+      1. Entity-focused query: entities + key verb/noun (if entities found)
+      2. Counter-evidence query: entities + key terms + counter keywords
+
+    Both variants are kept SHORT (<80 chars) so SearXNG can handle them.
+    Long queries cause SearXNG to match individual common words, returning
+    dictionary definitions, school homepages, and other garbage.
+
+    No LLM calls — pure string manipulation on NER output.
+    """
+    from src.utils.ner import extract_entity_names
+
+    entities = extract_entity_names(sub_claim, labels={"PERSON", "ORG", "GPE"})
+
+    # Extract content words (4+ chars) that aren't entity names
+    entity_set = {e.lower() for e in entities}
+    words = _re.findall(r"\b[a-zA-Z]{4,}\b", sub_claim)
+    key_terms = [
+        w for w in words
+        if w.lower() not in entity_set
+    ][:4]
+
+    variants = []
+
+    # Variant 1: entity-focused query (entities + key words from the claim)
+    if entities:
+        entity_query = " ".join(entities + key_terms[:3])
+        if entity_query.lower().strip() != sub_claim.lower().strip():
+            variants.append(entity_query)
+
+    # Variant 2: counter-evidence query — SHORT, using entities + key terms
+    # NOT the full sub-claim (which can be 100+ chars and breaks SearXNG)
+    counter_parts = (entities or []) + key_terms[:2] + ["false OR criticism"]
+    counter_query = " ".join(counter_parts)
+    # Only add if meaningfully different from entity query
+    if not variants or counter_query != variants[0]:
+        variants.append(counter_query)
+
+    return variants
+
+
+async def _run_seed_searches(sub_claim: str) -> list[dict]:
+    """Run broad programmatic seed searches concurrently.
+
+    Fires off the primary claim query (wider net), NER-derived variants,
+    and Wikipedia in parallel via asyncio.gather. Deduplicates by URL.
+
+    Returns evidence dicts matching _parse_tool_output schema:
+        {source_type, source_url, title, content, supports_claim}
+    """
+    import asyncio
+
+    variants = _generate_query_variants(sub_claim)
+
+    log.info(logger, MODULE, "seed_start", "Starting seed searches",
+             sub_claim=sub_claim, variant_count=len(variants))
+
+    # Build concurrent tasks
+    tasks = []
+
+    # Primary SearXNG query with wider net
+    if searxng_available():
+        from src.tools.searxng import search_searxng
+
+        async def _searxng_primary():
+            return ("searxng", sub_claim,
+                    await search_searxng(sub_claim, max_results=15))
+
+        tasks.append(_searxng_primary())
+
+        # Variant queries
+        for v in variants:
+            async def _searxng_variant(query=v):
+                return ("searxng", query,
+                        await search_searxng(query, max_results=10))
+
+            tasks.append(_searxng_variant())
+
+    # Wikipedia — always stable
+    from src.tools.wikipedia import search_wikipedia
+
+    async def _wiki():
+        return ("wikipedia", sub_claim,
+                await search_wikipedia(sub_claim, max_results=3))
+
+    tasks.append(_wiki())
+
+    # Run all concurrently
+    import time as _time
+    _t0 = _time.monotonic()
+    raw_results = await asyncio.gather(*tasks, return_exceptions=True)
+    elapsed_ms = int((_time.monotonic() - _t0) * 1000)
+
+    # Flatten and deduplicate by URL
+    seen_urls: set[str] = set()
+    evidence: list[dict] = []
+
+    for result in raw_results:
+        if isinstance(result, Exception):
+            log.warning(logger, MODULE, "seed_search_failed",
+                        "A seed search failed",
+                        error=str(result), error_type=type(result).__name__)
+            continue
+
+        source_type_label, query, items = result
+
+        for item in items:
+            url = item.get("url")
+            if url and url in seen_urls:
+                continue
+            if url:
+                seen_urls.add(url)
+
+            if source_type_label == "wikipedia":
+                evidence.append({
+                    "source_type": "wikipedia",
+                    "source_url": url,
+                    "title": item.get("title", ""),
+                    "content": item.get("summary", ""),
+                    "supports_claim": None,
+                    "_seed_query": query,
+                })
+            else:
+                evidence.append({
+                    "source_type": "web",
+                    "source_url": url,
+                    "title": item.get("title", ""),
+                    "content": item.get("snippet", ""),
+                    "supports_claim": None,
+                    "_seed_query": query,
+                })
+
+    log.info(logger, MODULE, "seed_done", "Seed searches complete",
+             sub_claim=sub_claim, total_results=len(evidence),
+             unique_urls=len(seen_urls), latency_ms=elapsed_ms)
+    return evidence
+
+
+def _format_seed_results(results: list[dict], source: str) -> str:
+    """Format seed results into the same text format search tools return.
+
+    Uses Title/URL/Snippet blocks separated by '---' — the same format
+    that _parse_tool_output and extract_evidence already understand.
+    """
+    if not results:
+        return "No results found."
+
+    parts = []
+    for r in results:
+        title = r.get("title", "")
+        url = r.get("source_url", "")
+        snippet = r.get("content", "")
+        parts.append(
+            f"Title: {title}\n"
+            f"URL: {url}\n"
+            f"Snippet: {snippet}"
+        )
+    return "\n\n---\n\n".join(parts)
+
+
+def _build_seed_messages(seed_results: list[dict]) -> list:
+    """Build synthetic AIMessage + ToolMessage pairs from seed results.
+
+    Groups results by source query, then creates pairs that look like the
+    agent already made those searches. This way _build_progress_note and
+    extract_evidence parse them without special handling.
+    """
+    if not seed_results:
+        return []
+
+    # Group by query
+    groups: dict[str, list[dict]] = {}
+    for r in seed_results:
+        query = r.get("_seed_query", "seed")
+        groups.setdefault(query, []).append(r)
+
+    messages = []
+    for query, results in groups.items():
+        # Determine tool name from source type
+        is_wiki = all(r.get("source_type") == "wikipedia" for r in results)
+        tool_name = "wikipedia_search" if is_wiki else "searxng_search"
+
+        # Unique tool call ID
+        tool_call_id = f"seed_{_uuid.uuid4().hex[:12]}"
+
+        # AIMessage with tool_calls (looks like the agent decided to search)
+        ai_msg = AIMessage(
+            content="",
+            tool_calls=[{
+                "name": tool_name,
+                "args": {"query": query},
+                "id": tool_call_id,
+                "type": "tool_call",
+            }],
+        )
+
+        # ToolMessage with formatted results
+        formatted = _format_seed_results(results, tool_name)
+        tool_msg = ToolMessage(
+            content=formatted,
+            tool_call_id=tool_call_id,
+            name=tool_name,
+        )
+
+        messages.append(ai_msg)
+        messages.append(tool_msg)
+
+    return messages
+
+
 async def research_claim(
     sub_claim: str,
     interested_parties_context: str = "",
@@ -551,9 +765,29 @@ async def research_claim(
     log.info(logger, MODULE, "start", "Starting research agent",
              sub_claim=sub_claim)
 
+    # Phase 1: Programmatic seed searches (no LLM, ~2-5 seconds)
+    # Gathers a broad, deterministic evidence pool before the agent starts.
+    # The agent sees these as prior searches and spends its budget on
+    # deep-dive fetching and targeted follow-up instead of initial discovery.
+    try:
+        seed_results = await _run_seed_searches(sub_claim)
+    except Exception as e:
+        log.warning(logger, MODULE, "seed_failed",
+                    "Seed searches failed, agent will search from scratch",
+                    error=str(e), error_type=type(e).__name__)
+        seed_results = []
+
+    seed_messages = _build_seed_messages(seed_results)
+
+    log.info(logger, MODULE, "seed_complete",
+             "Seed phase complete, starting agent",
+             seed_results=len(seed_results),
+             seed_messages=len(seed_messages))
+
+    # Phase 2: Agentic deep dive — LLM decides what to fetch/follow-up.
     # Collect messages incrementally via streaming so we keep evidence
     # even if the agent hits recursion limit or times out.
-    collected_messages: list = []
+    collected_messages: list = list(seed_messages)
 
     try:
         agent = build_research_agent(interested_parties_context)
@@ -563,7 +797,7 @@ async def research_claim(
 
         async def _run_stream():
             async for chunk in agent.astream(
-                {"messages": [input_msg]},
+                {"messages": [input_msg] + seed_messages},
                 config={"recursion_limit": max_steps},
                 stream_mode="updates",
             ):
@@ -578,7 +812,8 @@ async def research_claim(
         evidence = extract_evidence(collected_messages)
         log.info(logger, MODULE, "done", "Research agent complete",
                  sub_claim=sub_claim, evidence_count=len(evidence),
-                 agent_steps=len(collected_messages))
+                 agent_steps=len(collected_messages),
+                 seed_results=len(seed_results))
 
         # Programmatic enrichment: LegiScan (legislation, votes, bill text)
         evidence = await _enrich_with_legislation(evidence, sub_claim)
