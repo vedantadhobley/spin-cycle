@@ -84,8 +84,8 @@ from src.prompts.verification import RESEARCH_SYSTEM, RESEARCH_USER
 from src.tools.web_search import get_web_search_tool
 from src.tools.wikipedia import get_wikipedia_tool
 from src.tools.page_fetcher import get_page_fetcher_tool
-from src.tools.serper import get_serper_tool, is_available as serper_available
-from src.tools.brave import get_brave_tool, is_available as brave_available
+from src.tools.serper import get_serper_tool, is_available as serper_available, search_serper
+from src.tools.brave import get_brave_tool, is_available as brave_available, search_brave
 from src.tools.searxng import get_searxng_tool, is_available as searxng_available
 from src.tools.legiscan import search_legislation, is_available as legiscan_available
 from src.utils.logging import log, get_logger
@@ -512,95 +512,85 @@ def extract_evidence(messages: list) -> list[dict]:
     return evidence
 
 
-def _generate_query_variants(sub_claim: str) -> list[str]:
-    """Generate 1-2 search query variants from a sub-claim using NER.
+async def _run_seed_searches(
+    sub_claim: str,
+    structure: str | None = None,
+    categories: list[str] | None = None,
+    seed_queries: list[str] | None = None,
+) -> list[dict]:
+    """Run seed searches concurrently using LLM-written queries.
 
-    Uses SpaCy to pull PERSON/ORG/GPE entities, then builds:
-      1. Entity-focused query: entities + key verb/noun (if entities found)
-      2. Counter-evidence query: entities + key terms + counter keywords
+    The decompose LLM writes targeted search queries per fact. This
+    function wraps them in backend routing (SearXNG category based on
+    the fact's categories) and fires them alongside mechanical base
+    queries (raw sub-claim, Wikipedia).
 
-    Both variants are kept SHORT (<80 chars) so SearXNG can handle them.
-    Long queries cause SearXNG to match individual common words, returning
-    dictionary definitions, school homepages, and other garbage.
-
-    No LLM calls — pure string manipulation on NER output.
-    """
-    from src.utils.ner import extract_entity_names
-
-    entities = extract_entity_names(sub_claim, labels={"PERSON", "ORG", "GPE"})
-
-    # Extract content words (4+ chars) that aren't entity names
-    entity_set = {e.lower() for e in entities}
-    words = _re.findall(r"\b[a-zA-Z]{4,}\b", sub_claim)
-    key_terms = [
-        w for w in words
-        if w.lower() not in entity_set
-    ][:4]
-
-    variants = []
-
-    # Variant 1: entity-focused query (entities + key words from the claim)
-    if entities:
-        entity_query = " ".join(entities + key_terms[:3])
-        if entity_query.lower().strip() != sub_claim.lower().strip():
-            variants.append(entity_query)
-
-    # Variant 2: counter-evidence query — SHORT, using entities + key terms
-    # NOT the full sub-claim (which can be 100+ chars and breaks SearXNG)
-    counter_parts = (entities or []) + key_terms[:2] + ["false OR criticism"]
-    counter_query = " ".join(counter_parts)
-    # Only add if meaningfully different from entity query
-    if not variants or counter_query != variants[0]:
-        variants.append(counter_query)
-
-    return variants
-
-
-async def _run_seed_searches(sub_claim: str) -> list[dict]:
-    """Run broad programmatic seed searches concurrently.
-
-    Fires off the primary claim query (wider net), NER-derived variants,
-    and Wikipedia in parallel via asyncio.gather. Deduplicates by URL.
+    Unavailable backends fall back to SearXNG (self-hosted, always available).
 
     Returns evidence dicts matching _parse_tool_output schema:
         {source_type, source_url, title, content, supports_claim}
     """
     import asyncio
 
-    variants = _generate_query_variants(sub_claim)
-
-    log.info(logger, MODULE, "seed_start", "Starting seed searches",
-             sub_claim=sub_claim, variant_count=len(variants))
-
-    # Build concurrent tasks
-    tasks = []
-
-    # Primary SearXNG query with wider net
-    if searxng_available():
-        from src.tools.searxng import search_searxng
-
-        async def _searxng_primary():
-            return ("searxng", sub_claim,
-                    await search_searxng(sub_claim, max_results=15))
-
-        tasks.append(_searxng_primary())
-
-        # Variant queries
-        for v in variants:
-            async def _searxng_variant(query=v):
-                return ("searxng", query,
-                        await search_searxng(query, max_results=10))
-
-            tasks.append(_searxng_variant())
-
-    # Wikipedia — always stable
+    from src.agent.claim_category import generate_seed_queries
+    from src.tools.searxng import search_searxng
     from src.tools.wikipedia import search_wikipedia
 
-    async def _wiki():
-        return ("wikipedia", sub_claim,
-                await search_wikipedia(sub_claim, max_results=3))
+    if not categories:
+        categories = ["GENERAL"]
+    query_specs = generate_seed_queries(sub_claim, categories, structure, seed_queries)
 
-    tasks.append(_wiki())
+    log.info(logger, MODULE, "seed_plan", "Seed search plan",
+             sub_claim=sub_claim, categories=categories,
+             structure=structure, query_count=len(query_specs),
+             labels=[s["label"] for s in query_specs])
+
+    sem = asyncio.Semaphore(8)
+    tasks = []
+
+    for spec in query_specs:
+        for backend in spec["backends"]:
+            # Resolve backend with availability fallback
+            resolved_backend = backend
+            if backend == "serper" and not serper_available():
+                resolved_backend = "searxng" if searxng_available() else None
+            elif backend == "brave" and not brave_available():
+                resolved_backend = "searxng" if searxng_available() else None
+            elif backend == "searxng" and not searxng_available():
+                resolved_backend = None
+
+            if not resolved_backend:
+                continue
+
+            async def _do_search(
+                q=spec["query"],
+                mx=spec["max_results"],
+                cat=spec["searxng_category"],
+                be=resolved_backend,
+                lbl=spec["label"],
+            ):
+                async with sem:
+                    try:
+                        if be == "searxng":
+                            return (lbl, q, "web",
+                                    await search_searxng(q, max_results=mx, categories=cat or "general"))
+                        elif be == "serper":
+                            return (lbl, q, "web",
+                                    await search_serper(q, max_results=mx))
+                        elif be == "brave":
+                            return (lbl, q, "web",
+                                    await search_brave(q, max_results=mx))
+                        elif be == "wikipedia":
+                            return (lbl, q, "wikipedia",
+                                    await search_wikipedia(q, max_results=mx))
+                    except Exception as exc:
+                        log.warning(logger, MODULE, "seed_task_failed",
+                                    "Seed search task failed",
+                                    backend=be, label=lbl, query=q,
+                                    error=str(exc))
+                        return (lbl, q, be, [])
+
+            tasks.append(asyncio.wait_for(_do_search(), timeout=10))
 
     # Run all concurrently
     import time as _time
@@ -619,7 +609,7 @@ async def _run_seed_searches(sub_claim: str) -> list[dict]:
                         error=str(result), error_type=type(result).__name__)
             continue
 
-        source_type_label, query, items = result
+        label, query, source_type_label, items = result
 
         for item in items:
             url = item.get("url")
@@ -648,7 +638,8 @@ async def _run_seed_searches(sub_claim: str) -> list[dict]:
                 })
 
     log.info(logger, MODULE, "seed_done", "Seed searches complete",
-             sub_claim=sub_claim, total_results=len(evidence),
+             sub_claim=sub_claim, categories=categories,
+             total_results=len(evidence),
              unique_urls=len(seen_urls), latency_ms=elapsed_ms)
     return evidence
 
@@ -730,6 +721,9 @@ async def research_claim(
     interested_parties_context: str = "",
     max_steps: int = 38,
     timeout_secs: int = 120,
+    structure: str | None = None,
+    categories: list[str] | None = None,
+    seed_queries: list[str] | None = None,
 ) -> list[dict]:
     """Run the research agent to gather evidence for a sub-claim.
 
@@ -751,6 +745,15 @@ async def research_claim(
         timeout_secs: Soft timeout in seconds. If the agent exceeds this,
                       we return whatever evidence was gathered so far.
                       Default 120s (2 min).
+        structure: Claim structure from decompose (e.g. "causal", "superlative",
+                   "negation", "parallel_comparison", "ranking"). Used to add
+                   structure-specific seed queries. None if not available.
+        categories: Evidence-need categories from decompose (e.g. ["QUANTITATIVE",
+                    "LEGISLATIVE"]). Determines SearXNG category routing for
+                    seed queries. None defaults to ["GENERAL"].
+        seed_queries: LLM-written search queries from decompose. These are
+                      human-quality queries tailored to the specific evidence
+                      this fact needs. None if decompose didn't produce them.
 
     Returns:
         List of evidence dicts (deduplicated by URL), each with:
@@ -770,7 +773,10 @@ async def research_claim(
     # The agent sees these as prior searches and spends its budget on
     # deep-dive fetching and targeted follow-up instead of initial discovery.
     try:
-        seed_results = await _run_seed_searches(sub_claim)
+        seed_results = await _run_seed_searches(
+            sub_claim, structure=structure, categories=categories,
+            seed_queries=seed_queries,
+        )
     except Exception as e:
         log.warning(logger, MODULE, "seed_failed",
                     "Seed searches failed, agent will search from scratch",

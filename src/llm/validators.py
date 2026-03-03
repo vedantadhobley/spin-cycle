@@ -71,8 +71,9 @@ def validate_decompose(output: DecomposeOutput) -> tuple[bool, str]:
         return False, "Decomposition produced no facts"
 
     # Check 2: Facts are non-trivial
-    non_empty_facts = [f for f in output.facts if f and f.strip()]
-    if not non_empty_facts:
+    # Facts are AtomicFact objects with .text attribute
+    fact_texts = [f.text for f in output.facts if f and f.text and f.text.strip()]
+    if not fact_texts:
         return False, "All facts are empty or whitespace"
 
     # Check 3: Near-duplicate facts (independence)
@@ -80,16 +81,16 @@ def validate_decompose(output: DecomposeOutput) -> tuple[bool, str]:
     # This catches true duplicates ("X happened" vs "X happened in 2024")
     # but allows legitimate splits that share a subject prefix
     # ("AIPAC's FARA exemption" vs "AIPAC's FARA exemption differs from...").
-    normalized = [f.strip().lower() for f in non_empty_facts]
+    normalized = [f.strip().lower() for f in fact_texts]
     for i, a in enumerate(normalized):
         for j, b in enumerate(normalized):
             if i < j:
                 shorter, longer = (a, b) if len(a) <= len(b) else (b, a)
                 if shorter in longer and len(shorter) / len(longer) > 0.8:
-                    return False, f"Facts {i+1} and {j+1} appear redundant: '{non_empty_facts[i]}' vs '{non_empty_facts[j]}'"
+                    return False, f"Facts {i+1} and {j+1} appear redundant: '{fact_texts[i]}' vs '{fact_texts[j]}'"
 
     # Check 4: Minimum fact length (decontextualization quality signal)
-    for i, f in enumerate(non_empty_facts):
+    for i, f in enumerate(fact_texts):
         if len(f.strip()) < 15:
             return False, f"Fact {i+1} is too short to be self-contained: '{f}'"
 

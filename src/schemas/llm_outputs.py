@@ -94,9 +94,46 @@ class InterestedParties(BaseModel):
         return cls()
 
 
+class AtomicFact(BaseModel):
+    """A single atomic verifiable fact with evidence-need categories and seed queries.
+
+    Categories tell the research agent what KIND of evidence to seek:
+    - QUANTITATIVE: data portals, official statistics
+    - ATTRIBUTION: exact quotes, transcripts, original statements
+    - LEGISLATIVE: bill text, roll call votes, legislative records
+    - CAUSAL: mechanism evidence, alternative explanations
+    - COMPARATIVE: each comparison target separately, rankings
+    - CURRENT_EVENTS: news sources, recent reporting
+    - SCIENTIFIC: peer-reviewed sources, meta-analyses
+    - GENERAL: standard web search (default)
+
+    Seed queries are LLM-written search queries tailored to find the
+    specific evidence this fact needs. They're fired in the seed phase
+    before the research agent starts, so the agent begins with relevant
+    evidence already in hand.
+    """
+    text: str = Field(..., description="The atomic fact text")
+    categories: list[str] = Field(
+        default_factory=lambda: ["GENERAL"],
+        description="Evidence-need categories for this fact",
+    )
+    seed_queries: list[str] = Field(
+        default_factory=list,
+        description="2-4 targeted search queries to find evidence for this fact",
+    )
+
+    @field_validator("categories", mode="before")
+    @classmethod
+    def ensure_categories(cls, v):
+        """Default to GENERAL if empty or missing."""
+        if not v:
+            return ["GENERAL"]
+        return v
+
+
 class DecomposeOutput(BaseModel):
     """Output from the decompose_claim activity.
-    
+
     Contains a flat list of atomic verifiable facts plus metadata for synthesis.
     This simplified format matches standard fact-checking approaches (SAFE, FActScore).
     """
@@ -116,10 +153,27 @@ class DecomposeOutput(BaseModel):
         default_factory=InterestedParties,
         description="Entities with potential conflicts of interest"
     )
-    facts: list[str] = Field(
+    facts: list[AtomicFact] = Field(
         default_factory=list,
-        description="Flat list of atomic verifiable facts"
+        description="Flat list of atomic verifiable facts with categories"
     )
+
+    @field_validator("facts", mode="before")
+    @classmethod
+    def normalize_facts(cls, v):
+        """Handle both plain strings and fact objects from LLM output."""
+        if not v:
+            return v
+        normalized = []
+        for item in v:
+            if isinstance(item, str):
+                normalized.append({"text": item, "categories": ["GENERAL"]})
+            elif isinstance(item, dict) and "text" not in item:
+                # Shouldn't happen, but guard against it
+                normalized.append({"text": str(item), "categories": ["GENERAL"]})
+            else:
+                normalized.append(item)
+        return normalized
 
     @model_validator(mode="before")
     @classmethod

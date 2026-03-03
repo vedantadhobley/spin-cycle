@@ -158,7 +158,15 @@ async def decompose_claim(claim_text: str) -> dict:
 
         # Clean up LLM output text using LanguageTool
         # Catches grammar oddities from quantized model (e.g., "priming" → "primary")
-        facts = [{"text": cleanup_text(f.strip()) or f.strip()} for f in output.facts if f and f.strip()]
+        # Facts are AtomicFact objects with .text, .categories, and .seed_queries
+        facts = [
+            {
+                "text": cleanup_text(f.text.strip()) or f.text.strip(),
+                "categories": f.categories,
+                "seed_queries": f.seed_queries,
+            }
+            for f in output.facts if f and f.text and f.text.strip()
+        ]
         if output.thesis:
             output.thesis = cleanup_text(output.thesis) or output.thesis
 
@@ -359,7 +367,13 @@ def _check_publisher_ownership(url: str, all_parties: list[str]) -> str | None:
 
 
 @activity.defn
-async def research_subclaim(sub_claim: str, interested_parties_context: str = "") -> list[dict]:
+async def research_subclaim(
+    sub_claim: str,
+    interested_parties_context: str = "",
+    structure: str | None = None,
+    categories: list[str] | None = None,
+    seed_queries: list[str] | None = None,
+) -> list[dict]:
     """Research evidence for a sub-claim using the LangGraph ReAct agent.
 
     This is where the "agentic AI" happens. Instead of a single LLM call,
@@ -375,13 +389,29 @@ async def research_subclaim(sub_claim: str, interested_parties_context: str = ""
     (from Wikidata expansion at decompose time). This lets the agent make
     informed source choices without burning tool calls on lookups.
 
+    Args:
+        sub_claim: The specific sub-claim to research.
+        interested_parties_context: Pre-formatted Wikidata context string.
+        structure: Claim structure from decompose (e.g. "causal", "superlative").
+            Used for structure-specific seed queries.
+        categories: Evidence-need categories from decompose (e.g. ["QUANTITATIVE",
+            "LEGISLATIVE"]). Determines SearXNG category routing.
+        seed_queries: LLM-written search queries from decompose. These are
+            human-quality queries tailored to the specific evidence this
+            fact needs, fired before the agent starts.
+
     Returns a list of evidence dicts for the judge step.
     """
     log.info(activity.logger, "research", "start", "Researching sub-claim",
-             sub_claim=sub_claim)
+             sub_claim=sub_claim, structure=structure, categories=categories,
+             seed_query_count=len(seed_queries) if seed_queries else 0)
 
     from src.agent.research import research_claim
-    evidence = await research_claim(sub_claim, interested_parties_context)
+    evidence = await research_claim(
+        sub_claim, interested_parties_context,
+        structure=structure, categories=categories,
+        seed_queries=seed_queries,
+    )
 
     log.info(activity.logger, "research", "done", "Research complete",
              sub_claim=sub_claim, evidence_count=len(evidence))

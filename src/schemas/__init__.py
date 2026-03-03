@@ -14,6 +14,7 @@ from src.schemas.llm_outputs import (
     NormalizeOutput,
     # Decompose
     InterestedParties,
+    AtomicFact,
     DecomposeOutput,
     # Judge
     Verdict,
@@ -36,6 +37,7 @@ __all__ = [
     # LLM outputs
     "NormalizeOutput",
     "InterestedParties",
+    "AtomicFact",
     "DecomposeOutput",
     "Verdict",
     "JudgeOutput",

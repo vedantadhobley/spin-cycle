@@ -127,14 +127,22 @@ class VerifyClaimWorkflow:
         # Then judge all facts (thinking=on, slow)
         # This prevents slow judge calls from starving faster research agents.
 
-        async def _research(fact_text: str) -> tuple[str, list]:
+        claim_structure = thesis_info.get("structure")
+
+        async def _research(fact: dict) -> tuple[str, list]:
             """Research a single fact, return (fact_text, evidence)."""
+            fact_text = fact["text"]
+            fact_categories = fact.get("categories", ["GENERAL"])
+            fact_seed_queries = fact.get("seed_queries", [])
             log.info(workflow.logger, MODULE, "research_start",
                      "Researching fact",
-                     claim_id=claim_id, fact=fact_text)
+                     claim_id=claim_id, fact=fact_text,
+                     categories=fact_categories,
+                     seed_query_count=len(fact_seed_queries))
             evidence = await workflow.execute_activity(
                 research_subclaim,
-                args=[fact_text, wikidata_context],
+                args=[fact_text, wikidata_context, claim_structure,
+                      fact_categories, fact_seed_queries],
                 start_to_close_timeout=timedelta(seconds=180),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
@@ -154,9 +162,9 @@ class VerifyClaimWorkflow:
         # As soon as one finishes, the next starts immediately (no batch waiting).
         research_semaphore = asyncio.Semaphore(MAX_CONCURRENT)
 
-        async def _research_with_limit(fact_text: str) -> tuple[str, list]:
+        async def _research_with_limit(fact: dict) -> tuple[str, list]:
             async with research_semaphore:
-                return await _research(fact_text)
+                return await _research(fact)
 
         log.info(workflow.logger, MODULE, "research_phase_start",
                  "Starting research phase with sliding window",
@@ -165,7 +173,7 @@ class VerifyClaimWorkflow:
 
         _t0 = workflow.time()
         research_results = await asyncio.gather(
-            *[_research_with_limit(fact["text"]) for fact in atomic_facts],
+            *[_research_with_limit(fact) for fact in atomic_facts],
             return_exceptions=True
         )
 

@@ -144,6 +144,22 @@ HARD_BLOCKED_DOMAINS = {
     "support.google.com",
     "support.apple.com",
 
+    # Gaming forums — SearXNG matches "EU" subdomain to EU-related queries
+    "blizzard.com",
+    "forums.blizzard.com",
+    "eu.forums.blizzard.com",
+
+    # App stores — not evidence sources
+    "apps.apple.com",
+    "play.google.com",
+
+    # Corporate homepages / PR blogs — not independent sources
+    "about.google",
+    "about.fb.com",
+    "blog.google",
+    "search.google",
+    "newsroom.fb.com",
+
     # Generic search engines — not primary sources
     "google.com",
     "bing.com",

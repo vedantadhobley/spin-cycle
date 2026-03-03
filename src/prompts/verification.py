@@ -554,6 +554,59 @@ SIMPLICITY GUIDANCE:
 - Complex claims with multiple entities/actions get multiple facts
 - Comparisons and rankings are usually 1-2 facts, not algebraic decompositions
 
+EVIDENCE-NEED CATEGORIES:
+Each fact gets one or more categories that describe what KIND of evidence \
+the researcher should look for. This determines search strategy — a budget \
+fact needs data portals, an attribution fact needs transcripts, etc.
+
+Assign ALL categories that apply (a fact can have multiple):
+- QUANTITATIVE: Fact involves specific numbers, dollar amounts, percentages, \
+rates, budgets, statistics, or measurable quantities. Researcher needs: \
+official data sources, government portals, statistical databases.
+- ATTRIBUTION: Fact is about what someone said, claimed, announced, testified, \
+or admitted. Includes quoted text or "according to" references. Researcher \
+needs: transcripts, press conferences, official statements, direct quotes.
+- LEGISLATIVE: Fact involves legislation, bills, votes, laws being passed or \
+signed, legislative bodies (Congress, Senate, Parliament), or named acts. \
+Researcher needs: bill text, roll call votes, legislative records.
+- CAUSAL: Fact asserts a cause-effect relationship ("X caused Y", "because of", \
+"led to", "resulted in"). Researcher needs: mechanism evidence AND alternative \
+explanations to check if other factors contributed.
+- COMPARATIVE: Fact compares entities ("more than", "highest", "worst among", \
+"ranks first"). Researcher needs: data on EACH comparison target separately.
+- CURRENT_EVENTS: Fact references recent events (2025+), ongoing situations, or \
+things happening "currently" / "this year". Researcher needs: news sources.
+- SCIENTIFIC: Fact references studies, research findings, peer-reviewed work, \
+or scientific agencies (WHO, CDC, FDA, NIH, EPA). Researcher needs: journal \
+articles, meta-analyses, agency reports.
+- GENERAL: None of the above apply. Standard web search is sufficient.
+
+If unsure, use GENERAL. Multiple categories are encouraged when they fit — \
+"Every Republican voted against capping insulin at $35" is both LEGISLATIVE \
+and QUANTITATIVE.
+
+SEED QUERIES:
+For each fact, write 2-4 search queries that a researcher would type into \
+a search engine to find evidence. These queries are fired BEFORE the \
+research agent starts, so they determine the starting evidence pool.
+
+Rules for seed queries:
+1. Write queries a HUMAN would type — natural phrases, not keyword soup.
+2. Keep queries SHORT (under 80 characters). Long queries return garbage.
+3. Target the PRIMARY SOURCE, not news about it:
+   - Budget claim → "US defense spending 2024 official data" (not "article about defense spending")
+   - Attribution → "ExxonMobil internal climate research 1970s" (the original documents)
+   - Legislative → "Inflation Reduction Act insulin cap roll call vote" (the vote record)
+4. Include at least one COUNTER-EVIDENCE query — what would you search for \
+to DISPROVE this fact? A researcher who only searches for confirmation is \
+doing it wrong.
+5. For comparative claims, search EACH side separately:
+   - "Japan elderly care spending per capita"
+   - "European countries elderly care spending per capita"
+6. For causal claims, search for ALTERNATIVE EXPLANATIONS:
+   - "Texas grid failure other causes besides federal grid"
+7. Do NOT repeat the full fact text as a query. Extract the searchable core.
+
 LINGUISTIC PATTERNS:
 The full linguistic pattern taxonomy (presuppositions, quantifiers, modality, \
 causation, negation, etc.) is appended below. Use those patterns to detect \
@@ -593,7 +646,7 @@ Simple claim (KEEP IT SIMPLE):
   "structure": "simple",
   "interested_parties": {{"direct": [], "institutional": [], "affiliated_media": [], "reasoning": "No interested parties — this is established scientific consensus"}},
   "facts": [
-    "The Earth is approximately 4.5 billion years old"
+    {{"text": "The Earth is approximately 4.5 billion years old", "categories": ["SCIENTIFIC"], "seed_queries": ["age of the Earth scientific estimate", "Earth 4.5 billion years radiometric dating"]}}
   ]
 }}
 Note: DO NOT add "The Earth has an age" or "not older than X" or "not younger than X" — these are redundant.
@@ -606,7 +659,7 @@ Another simple claim:
   "structure": "simple",
   "interested_parties": {{"direct": ["NASA"], "institutional": ["US Government"], "affiliated_media": [], "reasoning": "NASA is the subject; US Government is parent organization"}},
   "facts": [
-    "NASA landed on the moon 6 times"
+    {{"text": "NASA landed on the moon 6 times", "categories": ["QUANTITATIVE"], "seed_queries": ["NASA Apollo moon landings complete list", "how many times did NASA land on the moon"]}}
   ]
 }}
 
@@ -618,10 +671,10 @@ Parallel claim:
   "structure": "parallel_comparison",
   "interested_parties": {{"direct": ["Country A", "Country B"], "institutional": [], "affiliated_media": [], "reasoning": "Both countries are subjects of the claim"}},
   "facts": [
-    "Country A is increasing its military spending",
-    "Country B is increasing its military spending",
-    "Country A is cutting its foreign aid budget",
-    "Country B is cutting its foreign aid budget"
+    {{"text": "Country A is increasing its military spending", "categories": ["QUANTITATIVE"], "seed_queries": ["Country A military spending budget increase", "Country A defense budget year over year"]}},
+    {{"text": "Country B is increasing its military spending", "categories": ["QUANTITATIVE"], "seed_queries": ["Country B military spending budget increase", "Country B defense budget year over year"]}},
+    {{"text": "Country A is cutting its foreign aid budget", "categories": ["QUANTITATIVE"], "seed_queries": ["Country A foreign aid budget cuts", "Country A official development assistance spending"]}},
+    {{"text": "Country B is cutting its foreign aid budget", "categories": ["QUANTITATIVE"], "seed_queries": ["Country B foreign aid budget cuts", "Country B official development assistance spending"]}}
   ]
 }}
 
@@ -633,9 +686,9 @@ Temporal/origin claim (CRITICAL — presupposition extraction):
   "structure": "temporal_sequence",
   "interested_parties": {{"direct": ["Country X military"], "institutional": ["Country X Government", "Country X Ministry of Defense"], "affiliated_media": [], "reasoning": "Country X military and government are subjects of the claim"}},
   "facts": [
-    "Country X launched military operations in Region Y after the border attack",
-    "The border attack caused Country X to launch operations in Region Y",
-    "Country X had significant military operations in Region Y before the border attack"
+    {{"text": "Country X launched military operations in Region Y after the border attack", "categories": ["CURRENT_EVENTS"], "seed_queries": ["Country X military operations Region Y timeline", "Country X attack Region Y response"]}},
+    {{"text": "The border attack caused Country X to launch operations in Region Y", "categories": ["CAUSAL"], "seed_queries": ["Country X stated reason for operations Region Y", "Country X Region Y operations other causes"]}},
+    {{"text": "Country X had significant military operations in Region Y before the border attack", "categories": ["CURRENT_EVENTS"], "seed_queries": ["Country X military operations Region Y before border attack", "Country X Region Y history of operations"]}}
   ]
 }}
 Note: The third fact tests the PRESUPPOSITION. "Started" implies nothing before.
@@ -648,9 +701,9 @@ Causal claim:
   "structure": "causal",
   "interested_parties": {{"direct": [], "institutional": [], "affiliated_media": [], "reasoning": "No specific interested parties identified"}},
   "facts": [
-    "Tax cuts were implemented",
-    "Record job growth occurred",
-    "The tax cuts caused the job growth"
+    {{"text": "Tax cuts were implemented", "categories": ["LEGISLATIVE"], "seed_queries": ["tax cuts legislation passed enacted", "recent tax cut bill signed into law"]}},
+    {{"text": "Record job growth occurred", "categories": ["QUANTITATIVE"], "seed_queries": ["job growth statistics record", "BLS employment data monthly jobs added"]}},
+    {{"text": "The tax cuts caused the job growth", "categories": ["CAUSAL", "QUANTITATIVE"], "seed_queries": ["tax cuts effect on employment economic analysis", "job growth causes other factors besides tax cuts"]}}
   ]
 }}
 Note: The causal fact requires evidence of mechanism, not just correlation.
@@ -663,7 +716,7 @@ Comparative/ranking claim (DO NOT use placeholders):
   "structure": "ranking",
   "interested_parties": {{"direct": ["Country A military"], "institutional": ["Country A government"], "affiliated_media": [], "reasoning": "Country A's military and government have interest in defense spending perception"}},
   "facts": [
-    "Country A spends more on its military than the next five highest-spending countries combined"
+    {{"text": "Country A spends more on its military than the next five highest-spending countries combined", "categories": ["QUANTITATIVE", "COMPARATIVE"], "seed_queries": ["global military spending by country ranking", "Country A defense budget vs next five countries", "SIPRI military expenditure data"]}}
   ]
 }}
 Note: The comparison is kept as one searchable fact. The researcher finds the \
@@ -681,8 +734,8 @@ Return a JSON object:
     "reasoning": "Explanation of relationships"
   }},
   "facts": [
-    "Atomic fact 1",
-    "Atomic fact 2",
+    {{"text": "Atomic fact 1", "categories": ["QUANTITATIVE"], "seed_queries": ["specific search query 1", "specific search query 2"]}},
+    {{"text": "Atomic fact 2", "categories": ["LEGISLATIVE"], "seed_queries": ["targeted query for this fact", "counter-evidence query"]}},
     "..."
   ]
 }}
@@ -704,7 +757,8 @@ Extract ALL distinct verifiable assertions, including:
 But DO NOT pad with trivial entailments like "X exists" or "X has a Y".
 Each fact should be independently verifiable and substantively different.
 
-Return JSON with: thesis, key_test, structure, interested_parties, facts\
+Return JSON with: thesis, key_test, structure, interested_parties, facts
+Each fact is an object: {{"text": "...", "categories": ["CATEGORY1", ...], "seed_queries": ["query1", "query2"]}}\
 """
 
 
