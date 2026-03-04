@@ -187,7 +187,8 @@ def _get_cached_mbfc_rating(domain: str) -> Optional[str]:
             return rating.get("factual_reporting")
         return None
     except Exception as e:
-        logger.warning(f"MBFC cache check failed for {domain}: {e}")
+        log.warning(logger, MODULE, "mbfc_cache_check_failed",
+                    "MBFC cache check failed", domain=domain, error=str(e))
         return None
 
 

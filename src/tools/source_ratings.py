@@ -28,7 +28,6 @@ Usage:
 
 import json
 import re
-import logging
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from urllib.parse import urlparse
@@ -41,8 +40,10 @@ from sqlalchemy.dialects.postgresql import insert
 
 from src.db.session import get_sync_session
 from src.db.models import SourceRating
+from src.utils.logging import log, get_logger
 
-logger = logging.getLogger(__name__)
+MODULE = "source_ratings"
+logger = get_logger()
 
 # How long before we consider cached data stale
 CACHE_TTL_DAYS = 30
@@ -222,7 +223,8 @@ async def scrape_mbfc(domain: str) -> Optional[dict]:
                 if resp.status_code == 200:
                     return _parse_mbfc_page(resp.text, url)
             except httpx.RequestError as e:
-                logger.warning(f"MBFC request failed for {url}: {e}")
+                log.warning(logger, MODULE, "scrape_request_failed",
+                            "MBFC request failed", url=url, error=str(e))
                 continue
         
         # Try search as fallback
@@ -238,9 +240,11 @@ async def scrape_mbfc(domain: str) -> Optional[dict]:
                     if page_resp.status_code == 200:
                         return _parse_mbfc_page(page_resp.text, result["href"])
         except httpx.RequestError as e:
-            logger.warning(f"MBFC search failed for {domain}: {e}")
+            log.warning(logger, MODULE, "scrape_search_failed",
+                        "MBFC search fallback failed", domain=domain, error=str(e))
 
-    logger.warning(f"MBFC: all lookup patterns failed for {domain}")
+    log.warning(logger, MODULE, "scrape_all_failed",
+                "MBFC: all lookup patterns failed", domain=domain)
     return None
 
 
@@ -422,7 +426,8 @@ async def get_source_rating(url_or_domain: str, force_refresh: bool = False) -> 
             cached = session.execute(stmt).scalar_one_or_none()
             
             if cached and not _is_stale(cached.scraped_at):
-                logger.debug(f"Cache hit for {domain}")
+                log.debug(logger, MODULE, "cache_hit",
+                         "MBFC cache hit", domain=domain)
                 result = {
                     "domain": cached.domain,
                     "bias": cached.bias,
@@ -441,7 +446,7 @@ async def get_source_rating(url_or_domain: str, force_refresh: bool = False) -> 
                 return result
     
     # Cache miss or stale — scrape MBFC
-    logger.info(f"Scraping MBFC for {domain}")
+    log.info(logger, MODULE, "scrape_start", "Scraping MBFC", domain=domain)
     scraped = await scrape_mbfc(domain)
     
     if scraped:
@@ -452,10 +457,9 @@ async def get_source_rating(url_or_domain: str, force_refresh: bool = False) -> 
         mbfc_is_gov = scraped.get("media_type", "").lower() == "government"
         
         if is_gov_domain and not mbfc_is_gov:
-            logger.warning(
-                f"MBFC returned non-government media type '{scraped.get('media_type')}' "
-                f"for gov domain {domain} — rejecting as mismatched"
-            )
+            log.warning(logger, MODULE, "gov_mismatch",
+                        "MBFC returned non-government media type for gov domain — rejecting",
+                        domain=domain, media_type=scraped.get("media_type"))
             # Fall through to government fallback below
         else:
             # Valid MBFC result — upsert into cache
@@ -512,10 +516,11 @@ async def get_source_rating(url_or_domain: str, force_refresh: bool = False) -> 
     
     # Not found in MBFC — check if it's a government source (return gov-only rating)
     if gov_info:
-        logger.info(f"Domain {domain} is a government source (not in MBFC)")
+        log.info(logger, MODULE, "gov_source",
+                 "Domain is a government source (not in MBFC)", domain=domain)
         return _get_government_rating(domain)
     
-    logger.debug(f"Domain {domain} not found in MBFC")
+    log.debug(logger, MODULE, "not_found", "Domain not found in MBFC", domain=domain)
     return None
 
 
@@ -543,7 +548,8 @@ async def await_ratings_parallel(
                 rating = await get_source_rating(domain)
                 results[domain] = rating
             except Exception as e:
-                logger.warning(f"MBFC lookup failed for {domain}: {e}")
+                log.warning(logger, MODULE, "lookup_failed",
+                            "MBFC lookup failed", domain=domain, error=str(e))
                 results[domain] = None
 
     await asyncio.gather(*[_lookup(d) for d in unique_domains])
@@ -844,7 +850,8 @@ def find_rating_by_name(name: str) -> Optional[dict]:
                     "mbfc_url": cached.mbfc_url,
                 }
     except Exception as e:
-        logger.warning(f"Rating reverse lookup failed for '{name}': {e}")
+        log.warning(logger, MODULE, "reverse_lookup_failed",
+                    "Rating reverse lookup failed", name=name, error=str(e))
 
     return None
 

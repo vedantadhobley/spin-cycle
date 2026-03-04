@@ -10,10 +10,12 @@ that runs on CPU. No API calls, no cloud, no token costs. The small model
 is ~12MB and sits in ~50-100MB of process memory.
 """
 
-import logging
 from typing import Optional
 
-logger = logging.getLogger(__name__)
+from src.utils.logging import log, get_logger
+
+MODULE = "ner"
+logger = get_logger()
 
 # Lazy-loaded SpaCy model (loaded once on first call)
 _nlp = None
@@ -26,12 +28,12 @@ def _get_nlp():
         import spacy
         try:
             _nlp = spacy.load("en_core_web_sm")
-            logger.info("SpaCy model loaded: en_core_web_sm")
+            log.info(logger, MODULE, "model_loaded",
+                     "SpaCy model loaded", model="en_core_web_sm")
         except OSError:
-            logger.warning(
-                "SpaCy model 'en_core_web_sm' not found. "
-                "Run: python -m spacy download en_core_web_sm"
-            )
+            log.warning(logger, MODULE, "model_not_found",
+                        "SpaCy model not found — run: python -m spacy download en_core_web_sm",
+                        model="en_core_web_sm")
             raise
     return _nlp
 

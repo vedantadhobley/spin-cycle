@@ -21,7 +21,6 @@ Caching:
 """
 
 import httpx
-import logging
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 from urllib.parse import quote
@@ -31,8 +30,10 @@ from sqlalchemy.dialects.postgresql import insert
 
 from src.db.session import get_sync_session
 from src.db.models import WikidataCache
+from src.utils.logging import log, get_logger
 
-logger = logging.getLogger(__name__)
+MODULE = "wikidata"
+logger = get_logger()
 
 # Wikidata endpoints
 WIKIDATA_SEARCH = "https://www.wikidata.org/w/api.php"
@@ -112,11 +113,13 @@ def _get_cached_entity(entity_name: str) -> Optional[dict]:
             cached = session.execute(stmt).scalar_one_or_none()
             
             if cached and not _is_cache_stale(cached.scraped_at):
-                logger.debug(f"Wikidata cache hit: {entity_name}")
+                log.debug(logger, MODULE, "cache_hit",
+                         "Wikidata cache hit", entity=entity_name)
                 return cached.relationships
             return None
     except Exception as e:
-        logger.warning(f"Wikidata cache read failed: {e}")
+        log.warning(logger, MODULE, "cache_read_failed",
+                    "Wikidata cache read failed", entity=entity_name, error=str(e))
         return None
 
 
@@ -139,9 +142,11 @@ def _store_cached_entity(entity_name: str, qid: Optional[str], relationships: di
             )
             session.execute(stmt)
             session.commit()
-            logger.debug(f"Wikidata cached: {entity_name} → {qid}")
+            log.debug(logger, MODULE, "cache_write",
+                     "Wikidata cached", entity=entity_name, qid=qid)
     except Exception as e:
-        logger.warning(f"Wikidata cache write failed: {e}")
+        log.warning(logger, MODULE, "cache_write_failed",
+                    "Wikidata cache write failed", entity=entity_name, error=str(e))
 
 
 async def search_entity(name: str) -> Optional[str]:
@@ -186,7 +191,8 @@ async def search_entity(name: str) -> Optional[str]:
                 qid = results[0].get("id")
                 _entity_cache[name] = qid
                 _entity_cache[clean_name] = qid
-                logger.debug(f"Wikidata: '{clean_name}' → {qid}")
+                log.debug(logger, MODULE, "entity_found",
+                         "Wikidata entity resolved", entity=clean_name, qid=qid)
                 return qid
 
             _entity_cache[name] = None
@@ -194,7 +200,8 @@ async def search_entity(name: str) -> Optional[str]:
             return None
             
     except Exception as e:
-        logger.warning(f"Wikidata search failed for '{name}': {e}")
+        log.warning(logger, MODULE, "search_failed",
+                    "Wikidata search failed", entity=name, error=str(e))
         return None
 
 
@@ -248,7 +255,8 @@ async def get_entity_relationships(qid: str) -> dict:
             return results
             
     except Exception as e:
-        logger.warning(f"Wikidata SPARQL failed for {qid}: {e}")
+        log.warning(logger, MODULE, "sparql_failed",
+                    "Wikidata SPARQL query failed", qid=qid, error=str(e))
         return {}
 
 
@@ -297,7 +305,8 @@ async def get_media_owned_by(person_or_org: str) -> list[str]:
             return media
             
     except Exception as e:
-        logger.warning(f"Wikidata media query failed for '{person_or_org}': {e}")
+        log.warning(logger, MODULE, "media_query_failed",
+                    "Wikidata media query failed", entity=person_or_org, error=str(e))
         return []
 
 
@@ -437,9 +446,13 @@ async def get_ownership_chain(entity_name: str) -> dict:
 
             if hop2_family:
                 result["family_expanded"][member_name] = hop2_family
-                logger.debug(f"Wikidata hop-2: {member_name} → {list(hop2_family.keys())}")
+                log.debug(logger, MODULE, "hop2_expanded",
+                         "Wikidata hop-2 expansion", member=member_name,
+                         relationships=list(hop2_family.keys()))
         except Exception as e:
-            logger.warning(f"Wikidata hop-2 failed for {member_name}: {e}")
+            log.warning(logger, MODULE, "hop2_failed",
+                        "Wikidata hop-2 expansion failed",
+                        member=member_name, error=str(e))
             continue
 
     # Deduplicate media holdings
