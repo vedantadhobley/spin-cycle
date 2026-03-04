@@ -21,5 +21,8 @@ build/
 .DS_Store
 Thumbs.db
 
+# Test results
+tests/regression_results/
+
 # Docker
 compute_logs/

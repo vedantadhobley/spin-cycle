@@ -386,6 +386,11 @@ subjective value judgments with no institutional assessor ("is bad", "is wrong")
    Anchor vague references where the claim provides enough context.
    - Expand acronyms: "WHO" → "World Health Organization (WHO)"
    - Ground dates: "the 2011 disaster" → "the March 2011 [specific disaster name]"
+   - Resolve definite descriptions to their named referent: phrases like \
+"the agency responsible for X" or "the company that makes Y" are NOUN PHRASES \
+identifying entities, NOT standalone factual assertions. Replace with the \
+entity name: "the country that hosted the 2024 Olympics" → "France", \
+"the organization that sets interest rates" → "the Federal Reserve".
    - Do NOT add information not present or clearly implied in the original claim
 
 6. SPECULATIVE LANGUAGE HANDLING

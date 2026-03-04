@@ -67,6 +67,7 @@ from src.tools.serper import get_serper_tool, is_available as serper_available, 
 from src.tools.brave import get_brave_tool, is_available as brave_available, search_brave
 from src.tools.searxng import get_searxng_tool, is_available as searxng_available
 from src.tools.legiscan import search_legislation, is_available as legiscan_available
+from src.schemas.interested_parties import InterestedPartiesDict
 from src.utils.evidence_ranker import score_url, tier_label
 from src.utils.logging import log, get_logger
 from src.utils.text_cleanup import cleanup_text
@@ -774,7 +775,10 @@ async def _rank_and_filter_seeds(
             domains.add(extract_domain(url))
     domains.discard("")
 
-    # Step 2: Await MBFC ratings (per-domain 15s httpx timeout, no global cap)
+    # Step 2: Await MBFC ratings — the AUTHORITATIVE blocking layer.
+    # warm_mbfc_cache_background (in search tools) is the opportunistic layer
+    # that fires-and-forgets. This call is the guarantee: we block here until
+    # every domain has a real MBFC lookup before scoring and ranking.
     if domains:
         await await_ratings_parallel(
             list(domains), max_concurrent=8,
@@ -830,7 +834,7 @@ async def _rank_and_filter_seeds(
 
 async def research_claim(
     sub_claim: str,
-    interested_parties: dict | None = None,
+    interested_parties: InterestedPartiesDict | None = None,
     max_steps: int = 38,
     timeout_secs: int = 120,
     categories: list[str] | None = None,

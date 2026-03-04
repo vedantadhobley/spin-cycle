@@ -10,9 +10,9 @@ Two-layer filtering:
    factual rating. Block sources with "mixed" or worse factual reporting.
    This is principled filtering based on accuracy, not political bias.
 
-Also provides populate_mbfc_cache() — background MBFC scraping for domains
-in search results. Fires and forgets so the cache is warm by the time the
-seed ranking phase (await_ratings_parallel) and judge run.
+Also provides warm_mbfc_cache_background() — background MBFC scraping for
+domains in search results. Fires and forgets so the cache is warm by the
+time the seed ranking phase (await_ratings_parallel) and judge run.
 """
 
 from urllib.parse import urlparse
@@ -261,19 +261,19 @@ def filter_results(results: list[dict], url_key: str = "url") -> list[dict]:
     return filtered
 
 
-async def populate_mbfc_cache(results: list[dict], url_key: str = "url") -> None:
-    """Pre-populate MBFC cache for domains in search results.
+async def warm_mbfc_cache_background(results: list[dict], url_key: str = "url") -> None:
+    """Opportunistic background MBFC cache warming for search results.
+
+    This is the FIRE-AND-FORGET layer of the two-layer MBFC strategy:
+      1. warm_mbfc_cache_background (here) — called by search tools on every
+         result set. Non-blocking. Warms the cache so data is ready later.
+      2. await_ratings_parallel (source_ratings.py) — called by seed ranking.
+         BLOCKING. The authoritative layer that guarantees MBFC data is
+         available before scoring and ranking.
 
     Launches MBFC scrapes as a background task so search tools return
-    immediately without blocking on HTTP calls to MBFC. The cache will
-    be populated by the time the judge runs (seconds later).
-
-    filter_results() still works — it uses cached data only, so domains
-    not yet scraped pass through as "unrated" and get filtered at judge time.
-
-    This avoids the main bottleneck: each MBFC scrape can take up to 15s,
-    and blocking on 4-8 concurrent scrapes per search query was consuming
-    the research agent's entire 120s timeout budget.
+    immediately. The cache will be populated by the time the seed ranking
+    phase or judge runs.
     """
     import asyncio
 

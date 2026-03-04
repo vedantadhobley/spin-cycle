@@ -75,7 +75,7 @@ def url_matches_media(url_lower: str, media_outlet: str) -> bool:
 def check_publisher_ownership(url: str, all_parties: list[str]) -> str | None:
     """Check if a source URL's publisher is owned by an interested party.
 
-    Uses the MBFC 'ownership' field (already cached from populate_mbfc_cache)
+    Uses the MBFC 'ownership' field (already cached from warm_mbfc_cache_background)
     to cross-reference against all_parties. Catches cases like:
     - A news outlet owned by Person X when Person X is in all_parties
 

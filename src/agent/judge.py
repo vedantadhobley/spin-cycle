@@ -12,13 +12,15 @@ from urllib.parse import urlparse
 from src.llm import invoke_llm, LLMInvocationError, validate_judge
 from src.prompts.verification import JUDGE_SYSTEM, JUDGE_USER
 from src.schemas.llm_outputs import JudgeOutput
-from src.tools.source_ratings import (
-    get_source_rating_sync, format_source_tag,
-    detect_claim_subject_quotes, extract_quoted_entities, find_rating_by_name,
-)
+from src.db.session import get_sync_session
+from src.db.models import SourceRating
+from src.tools.source_ratings import get_source_rating_sync
 from src.tools.media_matching import url_matches_media, check_publisher_ownership
 from src.tools.wikidata import get_ownership_chain, collect_all_connected_parties
 from src.utils.logging import log, get_logger
+from src.utils.quote_detection import detect_claim_subject_quotes
+from src.utils.ner import extract_quoted_entities
+from src.schemas.interested_parties import InterestedPartiesDict
 from src.utils.text_cleanup import cleanup_text
 
 MODULE = "judge"
@@ -26,11 +28,138 @@ logger = get_logger()
 MAX_JUDGE_EVIDENCE = 20
 
 
+def _format_source_tag(rating: dict | None) -> str:
+    """Format a rating as a readable tag for evidence annotation.
+
+    Examples:
+        "[Center (-0.5) | Very High factual | UK Wire Service]"
+        "[Right (+3.0) | Mixed factual | US Corporate TV]"
+        "[Right | Very Low factual | Russia State-Funded] ⚠️"
+        "[USA Government | FBI] ⚠️ INTERESTED PARTY"
+        "[Right (+7.9) | Mixed factual | USA Government] ⚠️ INTERESTED PARTY"
+    """
+    if not rating:
+        return "[Unrated source]"
+
+    is_gov = rating.get("is_government", False)
+    has_mbfc = rating.get("bias") or rating.get("factual_reporting")
+
+    parts = []
+    warnings = []
+
+    # Add MBFC bias/factual data if present
+    if rating.get("bias"):
+        bias_display = rating["bias"].replace("-", " ").title()
+        if rating.get("bias_score") is not None:
+            score = rating["bias_score"]
+            sign = "+" if score > 0 else ""
+            bias_display += f" ({sign}{score})"
+        parts.append(bias_display)
+
+    if rating.get("factual_reporting"):
+        factual_display = rating["factual_reporting"].replace("-", " ").title()
+        if "factual" not in factual_display.lower():
+            factual_display += " factual"
+        parts.append(factual_display)
+        if rating["factual_reporting"] in ("low", "very-low"):
+            warnings.append("low-factual")
+
+    # Country + Media Type / Agency info
+    if is_gov:
+        country = rating.get("country", "")
+        agency = rating.get("agency_name", "")
+        if has_mbfc:
+            if country:
+                parts.append(f"{country} Government")
+            else:
+                parts.append("Government")
+        else:
+            if country:
+                parts.append(f"{country} Government")
+            else:
+                parts.append("Government")
+            if agency:
+                parts.append(agency)
+    else:
+        location_type = []
+        if rating.get("country"):
+            country_abbrev = {
+                "United States": "US", "United Kingdom": "UK", "Russia": "Russia",
+                "China": "China", "Germany": "Germany", "France": "France", "USA": "USA",
+            }
+            country = country_abbrev.get(rating["country"], rating["country"])
+            location_type.append(country)
+        if rating.get("media_type"):
+            location_type.append(rating["media_type"])
+        if location_type:
+            parts.append(" ".join(location_type))
+
+        # Check for state-funded (ownership contains state indicators)
+        if rating.get("ownership"):
+            ownership_lower = rating["ownership"].lower()
+            if any(x in ownership_lower for x in ["state", "government", "kremlin", "chinese communist", "state-funded"]):
+                warnings.append("state-funded")
+
+    # Build final tag
+    if not parts:
+        return "[Unrated source]"
+
+    tag = f"[{' | '.join(parts)}]"
+
+    # Add warnings
+    if is_gov:
+        tag += " ⚠️ INTERESTED PARTY"
+    elif warnings:
+        tag += " ⚠️"
+
+    return tag
+
+
+def _find_rating_by_name(name: str) -> dict | None:
+    """Find a source rating by outlet name (reverse lookup).
+
+    Searches the source_ratings table for domains matching the outlet name.
+    "Outlet Name" → finds "outletname.com" via normalized substring matching.
+    """
+    if not name or len(name) < 3:
+        return None
+
+    # Normalize: strip "the", remove spaces, lowercase
+    normalized = name.lower().replace("the ", "").replace(" ", "")
+
+    try:
+        with get_sync_session() as session:
+            from sqlalchemy import select
+            stmt = select(SourceRating).where(
+                SourceRating.domain.ilike(f"%{normalized}%")
+            ).limit(1)
+            cached = session.execute(stmt).scalar_one_or_none()
+
+            if cached:
+                return {
+                    "domain": cached.domain,
+                    "bias": cached.bias,
+                    "bias_score": cached.bias_score,
+                    "factual_reporting": cached.factual_reporting,
+                    "credibility": cached.credibility,
+                    "country": cached.country,
+                    "media_type": cached.media_type,
+                    "ownership": cached.ownership,
+                    "traffic": cached.traffic,
+                    "mbfc_url": cached.mbfc_url,
+                }
+    except Exception as e:
+        log.warning(logger, MODULE, "reverse_lookup_failed",
+                    "Rating reverse lookup failed", name=name, error=str(e))
+
+    return None
+
+
 async def judge(
     claim_text: str,
     sub_claim: str,
     evidence: list[dict],
-    interested_parties: dict,
+    interested_parties: InterestedPartiesDict,
 ) -> dict:
     """Evaluate evidence and return a verdict.
 
@@ -83,7 +212,7 @@ async def judge(
               urls=evidence_urls)
 
     # Pre-judge enrichment: entities + source publishers
-    await _enrich_parties_from_evidence(
+    all_parties, affiliated_media = await _enrich_parties_from_evidence(
         source_evidence, all_parties, affiliated_media,
     )
 
@@ -163,15 +292,17 @@ async def _enrich_parties_from_evidence(
     source_evidence: list[dict],
     all_parties: list[str],
     affiliated_media: list[str],
-) -> None:
+) -> tuple[list[str], list[str]]:
     """Two-pass Wikidata enrichment from evidence content.
 
     Pass 1: SpaCy NER extracts people/orgs from evidence text → Wikidata expand.
     Pass 2: Source publisher domains → Wikidata expand ownership chains.
 
-    Both check for connections to existing interested parties. Mutates
-    all_parties and affiliated_media in-place.
+    Both check for connections to existing interested parties.
+    Returns new lists — does NOT mutate the input lists.
     """
+    enriched_parties = list(all_parties)
+    enriched_media = list(affiliated_media)
 
     async def _enrich_entity(entity: str) -> None:
         """Wikidata-expand an entity and add connections to interested parties."""
@@ -186,16 +317,16 @@ async def _enrich_parties_from_evidence(
                 | set(connected["orgs"])
                 | set(connected["media"])
             )
-            overlap = all_connected & set(all_parties)
+            overlap = all_connected & set(enriched_parties)
 
             if overlap:
-                all_parties.append(entity)
+                enriched_parties.append(entity)
                 for person in connected["people"]:
-                    if person not in all_parties:
-                        all_parties.append(person)
+                    if person not in enriched_parties:
+                        enriched_parties.append(person)
                 for media in connected["media"]:
-                    if media not in affiliated_media:
-                        affiliated_media.append(media)
+                    if media not in enriched_media:
+                        enriched_media.append(media)
 
                 log.info(logger, MODULE, "enrichment_found",
                          "Evidence entity connects to interested party",
@@ -205,11 +336,14 @@ async def _enrich_parties_from_evidence(
                        "Entity enrichment failed",
                        entity=entity, error=str(e))
 
-    # Pass 1: Extract entities from evidence content via SpaCy NER
+    # NER PASS 2 (of 2): Extract entities from EVIDENCE TEXT (articles).
+    # Distinct from Pass 1 in decompose.py which runs on claim text.
+    # Evidence mentions people/orgs not in the original claim — those
+    # may connect to known interested parties via Wikidata.
     all_content = " ".join(ev.get("content", "") for ev in source_evidence)
     discovered_entities = extract_quoted_entities(all_content)
 
-    all_parties_lower = {p.lower() for p in all_parties}
+    all_parties_lower = {p.lower() for p in enriched_parties}
     new_entities = [
         e for e in discovered_entities
         if e.lower() not in all_parties_lower
@@ -223,7 +357,7 @@ async def _enrich_parties_from_evidence(
         for entity in new_entities[:8]:  # Cap to avoid too many lookups
             await _enrich_entity(entity)
 
-    # Pass 2: Wikidata-expand source publishers
+    # Pass 2b: Wikidata-expand source publishers
     publisher_domains = set()
     for ev in source_evidence:
         url = ev.get("source_url") or ""
@@ -240,8 +374,8 @@ async def _enrich_parties_from_evidence(
             continue
 
     if publisher_domains:
-        # Refresh after pass 1 may have added entities
-        all_parties_lower = {p.lower() for p in all_parties}
+        # Refresh after NER pass may have added entities
+        all_parties_lower = {p.lower() for p in enriched_parties}
 
         for domain in list(publisher_domains)[:6]:
             if domain in all_parties_lower:
@@ -255,6 +389,8 @@ async def _enrich_parties_from_evidence(
             publisher_name = name.title()
             if publisher_name.lower() not in all_parties_lower:
                 await _enrich_entity(publisher_name)
+
+    return enriched_parties, enriched_media
 
 
 def _annotate_evidence(
@@ -285,7 +421,7 @@ def _annotate_evidence(
 
         # Get source rating (from cache)
         rating = get_source_rating_sync(url) if url != "N/A" else None
-        rating_tag = format_source_tag(rating)
+        rating_tag = _format_source_tag(rating)
 
         interest_warnings = []
 
@@ -349,7 +485,7 @@ def _annotate_evidence(
                     if primary_domain and org_normalized in primary_domain:
                         continue
 
-                    sub_rating = find_rating_by_name(org_name)
+                    sub_rating = _find_rating_by_name(org_name)
                     if sub_rating:
                         sub_bias = sub_rating.get("bias", "unknown")
                         sub_factual = sub_rating.get("factual_reporting", "unknown")

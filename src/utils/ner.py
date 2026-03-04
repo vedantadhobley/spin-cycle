@@ -85,6 +85,24 @@ def extract_entities(text: str, labels: Optional[set[str]] = None) -> list[dict]
     return entities
 
 
+def extract_quoted_entities(content: str) -> list[str]:
+    """Extract all PERSON and ORG entities from evidence text via SpaCy NER.
+
+    Unlike detect_claim_subject_quotes() (in quote_detection.py) which checks
+    known parties against content, this function discovers NEW entities mentioned
+    anywhere in the evidence. These can then be Wikidata-expanded to find
+    connections to known interested parties.
+
+    Uses SpaCy's en_core_web_sm model — a deterministic statistical model
+    that runs on CPU in milliseconds. Not an LLM, no API calls.
+
+    Returns deduplicated list of entity names (people and organizations).
+    """
+    if not content:
+        return []
+    return extract_entity_names(content, labels={"PERSON", "ORG"})
+
+
 def extract_entity_names(text: str, labels: Optional[set[str]] = None) -> list[str]:
     """Extract just the entity name strings (no labels).
 

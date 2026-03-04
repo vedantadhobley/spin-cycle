@@ -31,6 +31,7 @@ from src.prompts.verification import (
 from src.schemas.llm_outputs import NormalizeOutput, DecomposeOutput
 from src.prompts.linguistic_patterns import get_linguistic_patterns
 from src.tools.wikidata import get_ownership_chain, collect_all_connected_parties
+from src.schemas.interested_parties import InterestedPartiesDict
 from src.utils.logging import log, get_logger
 from src.utils.text_cleanup import cleanup_text
 
@@ -78,7 +79,7 @@ def _should_expand(name: str) -> bool:
     return False
 
 
-async def expand_interested_parties(interested_parties: dict) -> dict:
+async def expand_interested_parties(interested_parties: dict) -> InterestedPartiesDict:
     """Expand interested parties via Wikidata.
 
     Takes the raw interested_parties dict from decompose output and
@@ -191,7 +192,7 @@ async def expand_interested_parties(interested_parties: dict) -> dict:
     }
 
 
-def normalize_interested_parties(raw) -> dict:
+def normalize_interested_parties(raw) -> InterestedPartiesDict:
     """Normalize interested_parties to a consistent structure.
 
     The decomposition now returns interested_parties as an object with:
@@ -321,7 +322,9 @@ async def decompose(claim_text: str) -> dict:
         # Normalize interested parties from LLM output
         raw_parties = normalize_interested_parties(output.interested_parties)
 
-        # Augment with SpaCy NER — catches entities the LLM might miss
+        # NER PASS 1 (of 2): Extract entities from the CLAIM TEXT.
+        # Catches people/orgs the LLM missed. Pass 2 in judge.py runs on
+        # EVIDENCE TEXT — articles that don't exist yet at decompose time.
         from src.utils.ner import extract_entities
         try:
             claim_entities = extract_entities(claim_text, labels={"PERSON", "ORG"})

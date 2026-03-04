@@ -561,7 +561,10 @@ async def run_suite(api_url: str, count: int | None = None, timeout: int | None 
     _print_results(results)
 
     # Dump full results to JSON for later analysis
-    output_file = f"tests/regression_results_{time.strftime('%Y%m%d_%H%M%S')}.json"
+    from pathlib import Path
+    results_dir = Path("tests/regression_results")
+    results_dir.mkdir(exist_ok=True)
+    output_file = str(results_dir / f"regression_results_{time.strftime('%Y%m%d_%H%M%S')}.json")
     serializable = []
     for r in results:
         serializable.append({
