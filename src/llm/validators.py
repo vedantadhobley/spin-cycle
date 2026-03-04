@@ -154,10 +154,3 @@ def validate_synthesize(output: SynthesizeOutput) -> tuple[bool, str]:
                    f"Strong verdict '{output.verdict}' with low confidence {output.confidence}")
     
     return True, ""
-
-
-# Export validator functions for use with invoke_llm
-normalize_validator = validate_normalize
-decompose_validator = validate_decompose
-judge_validator = validate_judge
-synthesize_validator = validate_synthesize

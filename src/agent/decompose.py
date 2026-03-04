@@ -1,6 +1,9 @@
-"""Programmatic entity expansion for claim decomposition.
+"""Domain logic for claim decomposition.
 
-After the LLM extracts facts and interested parties from a claim,
+Full pipeline: normalize → LLM extract → NER augment → Wikidata expand.
+
+The LLM extracts atomic verifiable facts (each with categories and seed
+queries for search routing) plus interested parties from the claim. Then
 this module expands those parties via Wikidata to discover:
   - Executives (CEO, founder, chairperson)
   - Family connections (spouse, parent, child, sibling) + 2-hop in-laws
@@ -12,16 +15,24 @@ When a claim is about a person, we need to know that statements from their
 in-laws and relatives are also self-serving. Wikidata provides this mapping
 with 2-hop family expansion (e.g., Person A → Spouse → Father-in-law).
 
-## Why programmatic, not agentic
+Returns a structured dict with:
+  - facts: list of {text, categories, seed_queries} — drives seed search routing
+  - thesis_info: {thesis, structure, key_test, interested_parties} — the
+    interested_parties dict (all_parties, affiliated_media, wikidata_context)
+    flows through to research (conflict detection) and judge (annotation)
 
-Previously this was a ReAct agent that MIGHT call wikidata_lookup, with a
-programmatic fallback that guaranteed expansion anyway. The agent loop added
-latency and LLM calls for no benefit. Now it's just: LLM extracts entities
-→ code calls Wikidata. Deterministic, cached, no wasted tool calls.
+The Temporal activity wrapper in verify_activities.py calls decompose() here.
 """
 
+from src.llm import invoke_llm, LLMInvocationError, validate_normalize, validate_decompose
+from src.prompts.verification import (
+    NORMALIZE_SYSTEM, NORMALIZE_USER, DECOMPOSE_SYSTEM, DECOMPOSE_USER,
+)
+from src.schemas.llm_outputs import NormalizeOutput, DecomposeOutput
+from src.prompts.linguistic_patterns import get_linguistic_patterns
 from src.tools.wikidata import get_ownership_chain, collect_all_connected_parties
 from src.utils.logging import log, get_logger
+from src.utils.text_cleanup import cleanup_text
 
 MODULE = "decompose"
 logger = get_logger()
@@ -178,3 +189,189 @@ async def expand_interested_parties(interested_parties: dict) -> dict:
         "all_parties": all_parties,
         "wikidata_context": wikidata_context,
     }
+
+
+def normalize_interested_parties(raw) -> dict:
+    """Normalize interested_parties to a consistent structure.
+
+    The decomposition now returns interested_parties as an object with:
+    - direct: Organizations immediately involved
+    - institutional: Parent/governing bodies
+    - affiliated_media: News outlets with ownership ties
+    - reasoning: Brief explanation of relationships
+
+    For backward compatibility, also handles legacy list format and
+    InterestedParties pydantic model objects.
+
+    Returns:
+        Dict with keys: all_parties (flat list), direct, institutional,
+        affiliated_media, reasoning
+    """
+    # Handle InterestedParties pydantic model
+    if hasattr(raw, 'model_dump'):
+        raw = raw.model_dump()
+
+    if isinstance(raw, list):
+        # Legacy format: just a flat list of party names
+        return {
+            "all_parties": raw,
+            "direct": raw,
+            "institutional": [],
+            "affiliated_media": [],
+            "reasoning": None,
+        }
+
+    if isinstance(raw, dict):
+        # New format with categorized parties
+        direct = raw.get("direct", [])
+        institutional = raw.get("institutional", [])
+        affiliated_media = raw.get("affiliated_media", [])
+        reasoning = raw.get("reasoning")
+
+        # Combine all for easy lookup
+        all_parties = list(set(direct + institutional + affiliated_media))
+
+        return {
+            "all_parties": all_parties,
+            "direct": direct,
+            "institutional": institutional,
+            "affiliated_media": affiliated_media,
+            "reasoning": reasoning,
+        }
+
+    # Fallback for unexpected format
+    return {
+        "all_parties": [],
+        "direct": [],
+        "institutional": [],
+        "affiliated_media": [],
+        "reasoning": None,
+    }
+
+
+async def decompose(claim_text: str) -> dict:
+    """Full decompose pipeline: normalize → LLM extract → NER augment → Wikidata expand.
+
+    Pipeline:
+    1. LLM normalizes claim (bias neutralization, operationalization, opinion
+       separation, coreference resolution, reference grounding, speculation handling)
+    2. LLM extracts facts, thesis, and interested parties from normalized claim
+    3. Code expands interested parties via Wikidata (programmatic, cached)
+       - Corporate: CEO, founder, chairperson, parent/subsidiary
+       - Family: spouse, parents, children, siblings + 2-hop in-laws
+       - Media: ownership ties to news outlets
+
+    Returns:
+        {"facts": [{"text", "categories", "seed_queries"}, ...],
+         "thesis_info": {"thesis", "normalized_claim", "structure", ...}}
+    """
+    log.info(logger, MODULE, "start", "Decomposing claim", claim=claim_text)
+
+    # Step 1: Normalize claim
+    norm_output = None
+    try:
+        norm_output = await invoke_llm(
+            system_prompt=NORMALIZE_SYSTEM,
+            user_prompt=NORMALIZE_USER.format(claim_text=claim_text),
+            schema=NormalizeOutput,
+            semantic_validator=validate_normalize,
+            max_retries=1,
+            temperature=0,
+            activity_name="normalize",
+        )
+        normalized = cleanup_text(norm_output.normalized_claim) or norm_output.normalized_claim
+        if norm_output.changes:
+            log.info(logger, MODULE, "normalized",
+                     "Claim normalized", original=claim_text,
+                     normalized=normalized, changes=norm_output.changes)
+        else:
+            log.info(logger, MODULE, "no_normalization_needed",
+                     "No normalization needed", claim=claim_text)
+    except LLMInvocationError:
+        normalized = claim_text
+        log.warning(logger, MODULE, "normalization_failed",
+                    "Normalization failed, using raw claim", claim=claim_text)
+
+    # Step 2: Decompose the NORMALIZED claim
+    decompose_system_with_patterns = DECOMPOSE_SYSTEM + "\n\n" + get_linguistic_patterns()
+
+    try:
+        output = await invoke_llm(
+            system_prompt=decompose_system_with_patterns,
+            user_prompt=DECOMPOSE_USER.format(claim_text=normalized),
+            schema=DecomposeOutput,
+            semantic_validator=validate_decompose,
+            max_retries=2,
+            temperature=0,
+            activity_name="decompose",
+        )
+
+        # Clean up LLM output text using LanguageTool
+        facts = [
+            {
+                "text": cleanup_text(f.text.strip()) or f.text.strip(),
+                "categories": f.categories,
+                "seed_queries": f.seed_queries,
+            }
+            for f in output.facts if f and f.text and f.text.strip()
+        ]
+        if output.thesis:
+            output.thesis = cleanup_text(output.thesis) or output.thesis
+
+        # Normalize interested parties from LLM output
+        raw_parties = normalize_interested_parties(output.interested_parties)
+
+        # Augment with SpaCy NER — catches entities the LLM might miss
+        from src.utils.ner import extract_entities
+        try:
+            claim_entities = extract_entities(claim_text, labels={"PERSON", "ORG"})
+            existing = {
+                p.lower()
+                for p in raw_parties.get("direct", []) + raw_parties.get("institutional", [])
+            }
+            for ent in claim_entities:
+                if ent["text"].lower() not in existing and len(ent["text"]) >= 3:
+                    if ent["label"] == "PERSON":
+                        raw_parties["direct"].append(ent["text"])
+                    else:
+                        raw_parties["institutional"].append(ent["text"])
+                    existing.add(ent["text"].lower())
+        except Exception as e:
+            log.warning(logger, MODULE, "ner_fallback",
+                       "SpaCy NER failed, continuing with LLM parties only",
+                       error=str(e))
+
+        # Expand via Wikidata (programmatic — adds executives, family, media)
+        expanded_parties = await expand_interested_parties(raw_parties)
+
+        thesis_info = {
+            "thesis": output.thesis,
+            "normalized_claim": normalized,
+            "normalization_changes": norm_output.changes if norm_output else [],
+            "structure": output.structure,
+            "key_test": output.key_test,
+            "interested_parties": expanded_parties,
+        }
+
+        log.info(logger, MODULE, "facts_extracted",
+                 "Decomposition complete",
+                 interested_parties=expanded_parties.get("all_parties"),
+                 fact_count=len(facts))
+
+    except LLMInvocationError as e:
+        log.warning(logger, MODULE, "invocation_failed",
+                    "LLM invocation failed after retries, using original claim as single fact",
+                    error=str(e), attempts=e.attempts)
+        facts = [{"text": claim_text}]
+        thesis_info = {
+            "thesis": None,
+            "structure": "simple",
+            "key_test": None,
+            "interested_parties": normalize_interested_parties([]),
+        }
+
+    log.info(logger, MODULE, "done", "Claim decomposed",
+             claim=claim_text, sub_count=len(facts),
+             thesis=thesis_info.get("thesis"),
+             structure=thesis_info.get("structure"))
+    return {"facts": facts, "thesis_info": thesis_info}

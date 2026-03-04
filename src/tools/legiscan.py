@@ -32,7 +32,6 @@ Env var gated: no LEGISCAN_API_KEY → search_legislation() returns [].
 """
 
 import base64
-import html as html_module
 import os
 import re
 import time as _time
@@ -181,16 +180,15 @@ async def get_bill_text(doc_id: int) -> str | None:
 # ---------------------------------------------------------------------------
 
 def _extract_text_from_html(html: str) -> str:
-    """Strip HTML tags and clean up whitespace."""
-    # Remove script and style elements
-    text = re.sub(r'<(script|style)[^>]*>.*?</\1>', '', html,
-                  flags=re.DOTALL | re.IGNORECASE)
-    # Remove HTML tags
-    text = re.sub(r'<[^>]+>', ' ', text)
-    # Decode HTML entities
-    text = html_module.unescape(text)
-    # Collapse whitespace but preserve paragraph breaks
+    """Extract text from HTML, removing script/style elements."""
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup(["script", "style"]):
+        tag.decompose()
+    text = soup.get_text(separator=" ")
+    # Collapse horizontal whitespace
     text = re.sub(r'[ \t]+', ' ', text)
+    # Normalize paragraph breaks
     text = re.sub(r'\n\s*\n', '\n\n', text)
     return text.strip()
 

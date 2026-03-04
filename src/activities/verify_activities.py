@@ -1,62 +1,36 @@
-"""Temporal activities for claim verification.
+"""Temporal activities — thin wrappers around domain logic.
 
 Each activity is a single unit of work that the Temporal worker executes.
 Activities can be retried independently if they fail.
 
 The verification pipeline has 7 activities:
   0. create_claim             — creates a claim record in the DB (when started from Temporal UI)
-  1. decompose_claim          — normalize + LLM extracts atomic facts from a claim (one flat pass)
-  2. research_subclaim        — LangGraph agent gathers evidence using tools
-  3. judge_subclaim           — LLM evaluates evidence for/against a sub-claim
-  4. synthesize_verdict       — LLM combines sub-verdicts into a final verdict
-  5. store_result             — writes result to Postgres
+  1. decompose_claim          — normalize + extract facts + Wikidata expansion (2 LLM calls)
+  2. research_subclaim        — seed search + rank + ReAct agent + LegiScan enrichment
+  3. judge_subclaim           — evidence ranking + annotation + LLM verdict
+  4. synthesize_verdict       — LLM combines sub-verdicts into final verdict
+  5. store_result             — writes result tree to Postgres
   6. start_next_queued_claim  — picks up next queued claim and starts its workflow
 
-The pipeline is flat: decompose once → research+judge each fact → synthesize.
-No recursion, no tree — follows the approach used by Google's SAFE and FActScore.
+The pipeline is flat: decompose once → research each fact → judge each fact → synthesize.
+Follows Google's SAFE and FActScore.
+
+Domain logic lives in dedicated modules:
+  - src/agent/decompose.py   — normalize + extract facts + Wikidata expansion
+  - src/agent/research.py    — seed search, ranking, ReAct agent, evidence extraction
+  - src/agent/judge.py       — evidence ranking, annotation, LLM verdict
+  - src/agent/synthesize.py  — verdict synthesis
 """
 
-import json
-import re
-import time
 import uuid
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 from temporalio import activity
 
 from src.db.session import async_session
 from src.db.models import Claim, SubClaim, Evidence, Verdict
-from src.llm import (
-    invoke_llm,
-    LLMInvocationError,
-    validate_normalize,
-    validate_decompose,
-    validate_judge,
-    validate_synthesize,
-)
-from src.prompts.verification import (
-    NORMALIZE_SYSTEM,
-    NORMALIZE_USER,
-    DECOMPOSE_SYSTEM,
-    DECOMPOSE_USER,
-    JUDGE_SYSTEM,
-    JUDGE_USER,
-    SYNTHESIZE_SYSTEM,
-    SYNTHESIZE_USER,
-)
-from src.prompts.linguistic_patterns import get_linguistic_patterns
-from src.schemas.llm_outputs import (
-    NormalizeOutput,
-    DecomposeOutput,
-    JudgeOutput,
-    SynthesizeOutput,
-    InterestedParties,
-)
-from src.tools.source_ratings import get_source_rating_sync, format_source_tag, detect_claim_subject_quotes, extract_quoted_entities, find_rating_by_name
-from src.agent.decompose import expand_interested_parties
 from src.utils.logging import log
-from src.utils.text_cleanup import cleanup_text
 
 
 @activity.defn
@@ -90,326 +64,31 @@ async def create_claim(claim_text: str) -> str:
 async def decompose_claim(claim_text: str) -> dict:
     """Normalize and extract atomic verifiable facts and thesis from a claim.
 
-    Pipeline:
-    1. LLM normalizes claim (bias neutralization, operationalization, opinion
-       separation, coreference resolution, reference grounding, speculation handling)
-    2. LLM extracts facts, thesis, and interested parties from normalized claim
-    3. Code expands interested parties via Wikidata (programmatic, cached)
-       - Corporate: CEO, founder, chairperson, parent/subsidiary
-       - Family: spouse, parents, children, siblings + 2-hop in-laws
-       - Media: ownership ties to news outlets
-
-    The normalization step is critical: loaded language like "special exceptions"
-    produces subclaims that are structurally valid but un-researchable. Normalizing
-    to "exemption from [regulation]" makes the factual question researchable.
-
-    The Wikidata expansion is critical: when a claim is about a person,
-    we need to know that their in-laws (via 2-hop family expansion) are also
-    interested parties whose statements are self-serving.
-
-    Returns a dict with:
-      - "facts": list of {"text": "..."} dicts, each an atomic fact
-      - "thesis_info": {"thesis", "normalized_claim", "normalization_changes",
-                        "structure", "key_test", "interested_parties"}
-      - interested_parties includes "wikidata_context" for research prompt injection
+    Delegates to src/agent/decompose.decompose() for all domain logic.
     """
-    log.info(activity.logger, "decompose", "start", "Decomposing claim",
-             claim=claim_text)
-
-    # Step 1: Normalize claim (bias neutralization, operationalization, opinion separation)
-    norm_output = None
-    try:
-        norm_output = await invoke_llm(
-            system_prompt=NORMALIZE_SYSTEM,
-            user_prompt=NORMALIZE_USER.format(claim_text=claim_text),
-            schema=NormalizeOutput,
-            semantic_validator=validate_normalize,
-            max_retries=1,  # Don't burn time retrying — fall back to raw claim
-            temperature=0,
-            activity_name="normalize",
-        )
-        normalized = cleanup_text(norm_output.normalized_claim) or norm_output.normalized_claim
-        if norm_output.changes:
-            log.info(activity.logger, "decompose", "normalized",
-                     "Claim normalized", original=claim_text,
-                     normalized=normalized, changes=norm_output.changes)
-        else:
-            log.info(activity.logger, "decompose", "no_normalization_needed",
-                     "No normalization needed", claim=claim_text)
-    except LLMInvocationError:
-        normalized = claim_text
-        log.warning(activity.logger, "decompose", "normalization_failed",
-                    "Normalization failed, using raw claim", claim=claim_text)
-
-    # Step 2: Decompose the NORMALIZED claim
-    # Build decompose system prompt with linguistic patterns
-    decompose_system_with_patterns = DECOMPOSE_SYSTEM + "\n\n" + get_linguistic_patterns()
-
-    try:
-        output = await invoke_llm(
-            system_prompt=decompose_system_with_patterns,
-            user_prompt=DECOMPOSE_USER.format(claim_text=normalized),
-            schema=DecomposeOutput,
-            semantic_validator=validate_decompose,
-            max_retries=2,
-            temperature=0,
-            activity_name="decompose",
-        )
-
-        # Clean up LLM output text using LanguageTool
-        # Catches grammar oddities from quantized model (e.g., "priming" → "primary")
-        # Facts are AtomicFact objects with .text, .categories, and .seed_queries
-        facts = [
-            {
-                "text": cleanup_text(f.text.strip()) or f.text.strip(),
-                "categories": f.categories,
-                "seed_queries": f.seed_queries,
-            }
-            for f in output.facts if f and f.text and f.text.strip()
-        ]
-        if output.thesis:
-            output.thesis = cleanup_text(output.thesis) or output.thesis
-
-        # Normalize interested parties from LLM output
-        raw_parties = _normalize_interested_parties(output.interested_parties)
-
-        # Augment with SpaCy NER — catches entities the LLM might miss
-        from src.utils.ner import extract_entities
-        try:
-            claim_entities = extract_entities(claim_text, labels={"PERSON", "ORG"})
-            existing = {p.lower() for p in raw_parties.get("direct", []) + raw_parties.get("institutional", [])}
-            for ent in claim_entities:
-                if ent["text"].lower() not in existing and len(ent["text"]) >= 3:
-                    # People → direct, orgs → institutional
-                    if ent["label"] == "PERSON":
-                        raw_parties["direct"].append(ent["text"])
-                    else:
-                        raw_parties["institutional"].append(ent["text"])
-                    existing.add(ent["text"].lower())
-        except Exception as e:
-            log.debug(activity.logger, "decompose", "ner_fallback",
-                      "SpaCy NER failed, continuing with LLM parties only",
-                      error=str(e))
-
-        # Expand via Wikidata (programmatic — adds executives, family, media)
-        expanded_parties = await expand_interested_parties(raw_parties)
-
-        thesis_info = {
-            "thesis": output.thesis,
-            "normalized_claim": normalized,
-            "normalization_changes": norm_output.changes if norm_output else [],
-            "structure": output.structure,
-            "key_test": output.key_test,
-            "interested_parties": expanded_parties,
-        }
-
-        log.info(activity.logger, "decompose", "facts_extracted",
-                 "Decomposition complete",
-                 interested_parties=expanded_parties.get("all_parties"),
-                 fact_count=len(facts))
-
-    except LLMInvocationError as e:
-        log.warning(activity.logger, "decompose", "invocation_failed",
-                    "LLM invocation failed after retries, using original claim as single fact",
-                    error=str(e), attempts=e.attempts)
-        facts = [{"text": claim_text}]
-        thesis_info = {
-            "thesis": None,
-            "structure": "simple",
-            "key_test": None,
-            "interested_parties": _normalize_interested_parties([]),
-        }
-
-    log.info(activity.logger, "decompose", "done", "Claim decomposed",
-             claim=claim_text, sub_count=len(facts),
-             thesis=thesis_info.get("thesis"),
-             structure=thesis_info.get("structure"))
-    return {"facts": facts, "thesis_info": thesis_info}
-
-
-def _normalize_interested_parties(raw) -> dict:
-    """Normalize interested_parties to a consistent structure.
-    
-    The decomposition now returns interested_parties as an object with:
-    - direct: Organizations immediately involved
-    - institutional: Parent/governing bodies
-    - affiliated_media: News outlets with ownership ties
-    - reasoning: Brief explanation of relationships
-    
-    For backward compatibility, also handles legacy list format and InterestedParties objects.
-    
-    Returns:
-        Dict with keys: all_parties (flat list), direct, institutional,
-        affiliated_media, reasoning
-    """
-    # Handle InterestedParties pydantic model
-    if hasattr(raw, 'model_dump'):
-        raw = raw.model_dump()
-    
-    if isinstance(raw, list):
-        # Legacy format: just a flat list of party names
-        return {
-            "all_parties": raw,
-            "direct": raw,
-            "institutional": [],
-            "affiliated_media": [],
-            "reasoning": None,
-        }
-    
-    if isinstance(raw, dict):
-        # New format with categorized parties
-        direct = raw.get("direct", [])
-        institutional = raw.get("institutional", [])
-        affiliated_media = raw.get("affiliated_media", [])
-        reasoning = raw.get("reasoning")
-        
-        # Combine all for easy lookup
-        all_parties = list(set(direct + institutional + affiliated_media))
-        
-        return {
-            "all_parties": all_parties,
-            "direct": direct,
-            "institutional": institutional,
-            "affiliated_media": affiliated_media,
-            "reasoning": reasoning,
-        }
-    
-    # Fallback for unexpected format
-    return {
-        "all_parties": [],
-        "direct": [],
-        "institutional": [],
-        "affiliated_media": [],
-        "reasoning": None,
-    }
-
-
-# Common media outlet domain aliases for better URL matching
-# Maps common name variations to their likely domain patterns
-_MEDIA_DOMAIN_ALIASES = {
-    "washington post": ["washingtonpost", "wapo"],
-    "new york times": ["nytimes", "nyt"],
-    "wall street journal": ["wsj"],
-    "fox news": ["foxnews", "fox"],
-    "los angeles times": ["latimes"],
-    "chicago tribune": ["chicagotribune"],
-    "new york post": ["nypost"],
-    "huffington post": ["huffpost", "huffingtonpost"],
-    "daily mail": ["dailymail"],
-    "the guardian": ["theguardian", "guardian"],
-    "the atlantic": ["theatlantic", "atlantic"],
-    "financial times": ["ft.com"],
-    "daily beast": ["thedailybeast", "dailybeast"],
-}
-
-
-def _url_matches_media(url_lower: str, media_outlet: str) -> bool:
-    """Check if a URL matches a media outlet name, handling common variations.
-    
-    This handles cases like multi-word outlet names matching their
-    concatenated domain (e.g., "Some Outlet" matching someoutlet.com).
-
-    Args:
-        url_lower: Lowercase URL to check
-        media_outlet: Name of media outlet
-    
-    Returns:
-        True if URL appears to be from this media outlet
-    """
-    media_lower = media_outlet.lower()
-    
-    # Check known aliases first
-    for name, aliases in _MEDIA_DOMAIN_ALIASES.items():
-        if name in media_lower or media_lower in name:
-            for alias in aliases:
-                if alias in url_lower:
-                    return True
-    
-    # Fall back to generic normalization: strip spaces, remove "the"
-    normalized = media_lower.replace(" ", "").replace("the", "")
-    if normalized and len(normalized) > 3 and normalized in url_lower:
-        return True
-    
-    # Also try hyphenated: "washington-post"
-    hyphenated = media_lower.replace(" ", "-")
-    if hyphenated in url_lower:
-        return True
-    
-    return False
-
-
-def _check_publisher_ownership(url: str, all_parties: list[str]) -> str | None:
-    """Check if a source URL's publisher is owned by an interested party.
-
-    Uses the MBFC 'ownership' field (already cached from populate_mbfc_cache)
-    to cross-reference against all_parties. Catches cases like:
-    - A news outlet owned by Person X when Person X is in all_parties
-
-    Returns the matching party name if found, None otherwise.
-    """
-    if not url or url == "N/A" or not all_parties:
-        return None
-
-    rating = get_source_rating_sync(url)
-    if not rating or not rating.get("ownership"):
-        return None
-
-    ownership_lower = rating["ownership"].lower()
-
-    for party in all_parties:
-        party_lower = party.lower()
-        if len(party_lower) < 4:
-            continue  # Skip very short names to avoid false matches
-        if party_lower in ownership_lower:
-            return party
-
-    return None
+    from src.agent.decompose import decompose
+    return await decompose(claim_text)
 
 
 @activity.defn
 async def research_subclaim(
     sub_claim: str,
-    interested_parties_context: str = "",
-    structure: str | None = None,
+    interested_parties: dict | None = None,
     categories: list[str] | None = None,
     seed_queries: list[str] | None = None,
 ) -> list[dict]:
     """Research evidence for a sub-claim using the LangGraph ReAct agent.
 
-    This is where the "agentic AI" happens. Instead of a single LLM call,
-    we run a research agent that:
-      1. Decides what to search for (based on the claim)
-      2. Calls web search and Wikipedia tools
-      3. Reads the results
-      4. Decides if it needs to search more
-      5. Loops until it has enough evidence or gives up
-
-    The agent's system prompt includes interested_parties_context — a
-    pre-formatted summary of who the players are and how they're connected
-    (from Wikidata expansion at decompose time). This lets the agent make
-    informed source choices without burning tool calls on lookups.
-
-    Args:
-        sub_claim: The specific sub-claim to research.
-        interested_parties_context: Pre-formatted Wikidata context string.
-        structure: Claim structure from decompose (e.g. "causal", "superlative").
-            Used for structure-specific seed queries.
-        categories: Evidence-need categories from decompose (e.g. ["QUANTITATIVE",
-            "LEGISLATIVE"]). Determines SearXNG category routing.
-        seed_queries: LLM-written search queries from decompose. These are
-            human-quality queries tailored to the specific evidence this
-            fact needs, fired before the agent starts.
-
-    Returns a list of evidence dicts for the judge step.
+    Delegates to src/agent/research.research_claim() for all domain logic.
     """
     log.info(activity.logger, "research", "start", "Researching sub-claim",
-             sub_claim=sub_claim, structure=structure, categories=categories,
+             sub_claim=sub_claim, categories=categories,
              seed_query_count=len(seed_queries) if seed_queries else 0)
 
     from src.agent.research import research_claim
     evidence = await research_claim(
-        sub_claim, interested_parties_context,
-        structure=structure, categories=categories,
+        sub_claim, interested_parties,
+        categories=categories,
         seed_queries=seed_queries,
     )
 
@@ -427,514 +106,44 @@ async def judge_subclaim(
 ) -> dict:
     """Judge a sub-claim based on collected evidence.
 
-    This is the critical evaluation step. The LLM looks at the evidence
-    gathered by the research agent and determines:
-      - Does the evidence SUPPORT the claim? → "true" or "mostly_true"
-      - Does the evidence CONTRADICT the claim? → "false" or "mostly_false"
-      - Is the picture mixed? → "mixed"
-      - Is there not enough evidence to decide? → "unverifiable"
-
-    The key constraint: the LLM must reason ONLY from the provided evidence,
-    NOT from its own training data. This is what makes the verdict trustworthy
-    — it's grounded in real, citable sources.
-
-    The original claim_text is passed for context so the judge can interpret
-    the sub-claim naturally (e.g., "has not been audited" in the context of
-    a claim about promised audits means the promised audit hasn't happened).
-
-    interested_parties: A dict containing:
-      - all_parties: flat list of all interested orgs
-      - direct: orgs immediately involved
-      - institutional: parent/governing bodies
-      - affiliated_media: news outlets with ownership ties
-      - reasoning: explanation of relationships
-    
-    Evidence from interested parties (or their affiliated media) is flagged
-    as self-serving and cannot independently verify or refute claims about them.
-
-    If there's no evidence at all, we short-circuit to "unverifiable" without
-    bothering the LLM.
+    Normalizes interested_parties for backward compatibility, then
+    delegates to src/agent/judge.judge() for all domain logic.
     """
-    # Normalize interested_parties to new structure
+    from src.agent.decompose import normalize_interested_parties
+    from src.agent.judge import judge
+
     if interested_parties is None:
-        interested_parties = _normalize_interested_parties([])
+        interested_parties = normalize_interested_parties([])
     elif isinstance(interested_parties, list):
-        interested_parties = _normalize_interested_parties(interested_parties)
-    
-    # Parties arrive pre-expanded from decompose (Wikidata already ran)
-    all_parties = interested_parties.get("all_parties", [])
-    affiliated_media = interested_parties.get("affiliated_media", [])
+        interested_parties = normalize_interested_parties(interested_parties)
 
-    log.info(activity.logger, "judge", "start", "Judging sub-claim",
-             sub_claim=sub_claim, evidence_count=len(evidence),
-             interested_parties=interested_parties)
-
-    # No evidence → unverifiable (no point asking the LLM)
-    if not evidence:
-        log.info(activity.logger, "judge", "no_evidence", "No evidence found, returning unverifiable",
-                 sub_claim=sub_claim)
-        return {
-            "sub_claim": sub_claim,
-            "verdict": "unverifiable",
-            "confidence": 0.0,
-            "reasoning": "No evidence was found for this claim.",
-            "evidence": [],
-        }
-
-    # Filter out agent_summary — it's the research agent's interpretation,
-    # not primary evidence. The judge should reason from sources only.
-    source_evidence = [
-        ev for ev in evidence
-        if ev.get("source_type") != "agent_summary"
-    ]
-
-    # Cap evidence to keep the judge prompt manageable.
-    # The thinking model's chain-of-thought scales super-linearly with
-    # evidence count — 34 items can take >180s while 20 takes ~60s.
-    # 20 unique items is plenty for a well-grounded verdict.
-    # Ranked by quality (MBFC, source type, TLD, content richness) rather
-    # than discovery order — prevents high-quality late-discovered sources
-    # from being dropped.
-    MAX_JUDGE_EVIDENCE = 20
-    if len(source_evidence) > MAX_JUDGE_EVIDENCE:
-        from src.utils.evidence_ranker import rank_and_select, format_ranking_log
-        original_count = len(source_evidence)
-        source_evidence, dropped = rank_and_select(
-            source_evidence, max_items=MAX_JUDGE_EVIDENCE,
-        )
-        log.info(activity.logger, "judge", "evidence_ranked",
-                 "Ranked and selected evidence for judge prompt",
-                 original=original_count, selected=len(source_evidence))
-        log.debug(activity.logger, "judge", "evidence_ranking_detail",
-                  "Evidence ranking breakdown",
-                  **format_ranking_log(source_evidence, dropped))
-
-    # Log which URLs the judge will see — critical for debugging verdicts
-    evidence_urls = [
-        ev.get("source_url") or "N/A"
-        for ev in source_evidence
-    ]
-    source_types = {}
-    for ev in source_evidence:
-        st = ev.get("source_type", "unknown")
-        source_types[st] = source_types.get(st, 0) + 1
-    log.debug(activity.logger, "judge", "evidence_summary",
-              "Evidence prepared for judge",
-              sub_claim=sub_claim,
-              evidence_count=len(source_evidence),
-              source_types=source_types,
-              urls=evidence_urls)
-
-    # --- Pre-judge enrichment: entities + source publishers ---
-    # Two enrichment passes before the judge sees evidence:
-    # 1. SpaCy NER extracts people/orgs from evidence text → Wikidata expand
-    # 2. Source publisher domains → Wikidata expand ownership chains
-    # Both check for connections to existing interested parties.
-    from src.tools.wikidata import get_ownership_chain, collect_all_connected_parties
-    from urllib.parse import urlparse
-
-    async def _enrich_entity(entity: str) -> None:
-        """Wikidata-expand an entity and add connections to interested parties."""
-        try:
-            result = await get_ownership_chain(entity)
-            if result.get("error"):
-                return
-
-            connected = collect_all_connected_parties(result)
-            all_connected = set(connected["people"]) | set(connected["orgs"]) | set(connected["media"])
-            overlap = all_connected & set(all_parties)
-
-            if overlap:
-                all_parties.append(entity)
-                for person in connected["people"]:
-                    if person not in all_parties:
-                        all_parties.append(person)
-                for media in connected["media"]:
-                    if media not in affiliated_media:
-                        affiliated_media.append(media)
-
-                log.info(activity.logger, "judge", "enrichment_found",
-                         "Evidence entity connects to interested party",
-                         entity=entity, overlap=list(overlap)[:5])
-        except Exception as e:
-            log.debug(activity.logger, "judge", "enrichment_error",
-                      "Entity enrichment failed",
-                      entity=entity, error=str(e))
-
-    # Pass 1: Extract entities from evidence content via SpaCy NER
-    all_content = " ".join(ev.get("content", "") for ev in source_evidence)
-    discovered_entities = extract_quoted_entities(all_content)
-
-    all_parties_lower = {p.lower() for p in all_parties}
-    new_entities = [
-        e for e in discovered_entities
-        if e.lower() not in all_parties_lower
-    ]
-
-    if new_entities:
-        log.debug(activity.logger, "judge", "ner_entities",
-                  "SpaCy NER extracted new entities from evidence",
-                  new_entities=new_entities[:15])
-
-        for entity in new_entities[:8]:  # Cap to avoid too many lookups
-            await _enrich_entity(entity)
-
-    # Pass 2: Wikidata-expand source publishers
-    # Extract unique domains, look up publisher ownership chains
-    publisher_domains = set()
-    for ev in source_evidence:
-        url = ev.get("source_url") or ""
-        if not url or url == "N/A":
-            continue
-        try:
-            hostname = urlparse(url).hostname or ""
-            hostname = hostname.lower()
-            if hostname.startswith("www."):
-                hostname = hostname[4:]
-            if hostname:
-                publisher_domains.add(hostname)
-        except Exception:
-            continue
-
-    if publisher_domains:
-        # Refresh after pass 1 may have added entities
-        all_parties_lower = {p.lower() for p in all_parties}
-
-        for domain in list(publisher_domains)[:6]:
-            if domain in all_parties_lower:
-                continue
-
-            # Normalize domain to a searchable publisher name
-            # "dailywire.com" → "Dailywire", "foxnews.com" → "Foxnews"
-            # Wikidata search is fuzzy enough to handle these
-            name = domain.split(".")[0]
-            if len(name) < 3:
-                continue
-
-            publisher_name = name.title()
-            if publisher_name.lower() not in all_parties_lower:
-                await _enrich_entity(publisher_name)
-
-    # Format evidence for the LLM prompt with source bias/credibility ratings
-    evidence_parts = []
-    bias_distribution = {"left": 0, "center": 0, "right": 0, "unrated": 0}
-    interested_party_count = 0  # Track evidence from interested parties
-    
-    for i, ev in enumerate(source_evidence, 1):
-        source = ev.get("source_type", "unknown")
-        title = ev.get("title", "")
-        content = ev.get("content", "")
-        url = ev.get("source_url") or "N/A"
-        
-        # Get source rating (from cache)
-        rating = get_source_rating_sync(url) if url != "N/A" else None
-        rating_tag = format_source_tag(rating)
-        
-        interest_warnings = []
-        
-        # Check 1: Is the source URL from affiliated media?
-        # e.g., a news outlet owned by the same person/org as the claim subject
-        if affiliated_media and url != "N/A":
-            url_lower = url.lower()
-            for media_outlet in affiliated_media:
-                if _url_matches_media(url_lower, media_outlet):
-                    interest_warnings.append(
-                        f"⚠️ AFFILIATED MEDIA: Source is {media_outlet}, which has ownership ties to claim subject."
-                    )
-                    interested_party_count += 1
-                    log.debug(activity.logger, "judge", "affiliated_media_detected",
-                              "Source URL matches affiliated media",
-                              media=media_outlet, url=url)
-                    break
-        
-        # Check 2: Does the content quote statements from interested parties?
-        # e.g., "FBI stated that..." when claim is about FBI conduct
-        if all_parties:
-            quoted_entities = detect_claim_subject_quotes(content, all_parties)
-            if quoted_entities:
-                interested_party_count += 1
-                entities_str = ", ".join(quoted_entities)
-                interest_warnings.append(
-                    f"⚠️ QUOTES INTERESTED PARTY: {entities_str} — Self-serving statement, NOT independent verification."
-                )
-                log.debug(activity.logger, "judge", "interested_party_quoted",
-                          "Evidence quotes interested party",
-                          entities=quoted_entities, url=url)
-
-        # Check 3: Is the source publisher owned by an interested party?
-        # e.g., a news outlet owned by someone in all_parties
-        if not interest_warnings and all_parties and url != "N/A":
-            owner_match = _check_publisher_ownership(url, all_parties)
-            if owner_match:
-                interested_party_count += 1
-                interest_warnings.append(
-                    f"⚠️ PUBLISHER OWNED BY INTERESTED PARTY: Source publisher is owned by {owner_match}."
-                )
-                log.debug(activity.logger, "judge", "publisher_ownership_detected",
-                          "Source publisher owned by interested party",
-                          owner=owner_match, url=url)
-
-        # Check 4: Does the evidence reference other publications as sub-sources?
-        # e.g., "according to a [outlet] report" — check that outlet's MBFC rating
-        # Only warn for sub-sources with poor factual reporting or extreme bias
-        if content:
-            try:
-                from src.utils.ner import extract_entities
-                # Extract the primary source domain to avoid self-matching
-                primary_domain = ""
-                if url != "N/A":
-                    from urllib.parse import urlparse
-                    primary_domain = urlparse(url).netloc.lower().replace("www.", "")
-
-                content_orgs = extract_entities(content, labels={"ORG"})
-                for org in content_orgs:
-                    org_name = org["text"]
-
-                    # Skip if org name matches the primary source domain
-                    org_normalized = org_name.lower().replace(" ", "")
-                    if primary_domain and org_normalized in primary_domain:
-                        continue
-
-                    sub_rating = find_rating_by_name(org_name)
-                    if sub_rating:
-                        sub_bias = sub_rating.get("bias", "unknown")
-                        sub_factual = sub_rating.get("factual_reporting", "unknown")
-
-                        # Only warn for concerning sub-sources
-                        low_factual = sub_factual.lower() in ("low", "very low", "mixed") if sub_factual else False
-                        extreme_bias = sub_bias.lower() in ("extreme-left", "extreme-right") if sub_bias else False
-                        if not low_factual and not extreme_bias:
-                            continue
-
-                        interest_warnings.append(
-                            f"⚠️ SUB-SOURCE: References {org_name} [{sub_bias} | {sub_factual} factual reporting]"
-                        )
-                        log.debug(activity.logger, "judge", "sub_source_detected",
-                                  "Evidence references another publication",
-                                  sub_source=org_name, bias=sub_bias,
-                                  factual=sub_factual, url=url)
-            except Exception:
-                pass  # NER failure is non-fatal
-
-        # Track bias distribution for judge context
-        if rating and rating.get("bias"):
-            bias = rating["bias"]
-            if bias in ("left", "extreme-left"):
-                bias_distribution["left"] += 1
-            elif bias in ("right", "extreme-right"):
-                bias_distribution["right"] += 1
-            elif bias in ("center", "left-center", "right-center"):
-                bias_distribution["center"] += 1
-            else:
-                bias_distribution["unrated"] += 1
-        else:
-            bias_distribution["unrated"] += 1
-        
-        header = f"[{i}] {rating_tag} Source: {source}"
-        if title:
-            header += f" | {title}"
-        header += f" | URL: {url}"
-        
-        # Add interest warnings
-        for warning in interest_warnings:
-            header += f"\n    {warning}"
-        
-        evidence_parts.append(f"{header}\n{content}")
-    evidence_text = "\n\n".join(evidence_parts)
-    
-    # Add bias distribution warning if evidence is skewed
-    bias_warning = ""
-    total_rated = bias_distribution["left"] + bias_distribution["center"] + bias_distribution["right"]
-    if total_rated >= 3:
-        left_pct = bias_distribution["left"] / total_rated
-        right_pct = bias_distribution["right"] / total_rated
-        if left_pct > 0.6:
-            bias_warning = "\n\n⚠️ BIAS WARNING: Evidence skews LEFT ({}% of rated sources). Consider whether right-leaning sources have covered this differently.".format(int(left_pct * 100))
-        elif right_pct > 0.6:
-            bias_warning = "\n\n⚠️ BIAS WARNING: Evidence skews RIGHT ({}% of rated sources). Consider whether left-leaning sources have covered this differently.".format(int(right_pct * 100))
-    
-    if bias_warning:
-        evidence_text += bias_warning
-    
-    # Add warning if significant portion of evidence is from interested parties
-    if interested_party_count > 0 and all_parties:
-        pct_interested = int(100 * interested_party_count / len(source_evidence))
-        if pct_interested >= 30:
-            parties_str = ", ".join(all_parties[:5])  # Limit display
-            if len(all_parties) > 5:
-                parties_str += f" (+{len(all_parties) - 5} more)"
-            reasoning = interested_parties.get("reasoning") or "These parties have institutional or financial stake in the claim's outcome."
-            evidence_text += f"\n\n⚠️ INTERESTED PARTY WARNING: {pct_interested}% of evidence comes from or quotes interested parties ({parties_str}). {reasoning}\n\nThese sources cannot independently verify claims about themselves. Look for truly INDEPENDENT corroboration."
-
-    # Use non-thinking mode for judge - the structured prompt already guides
-    # reasoning, and thinking mode generates 5000-9500 tokens of internal
-    # monologue that takes 3-4 minutes without improving verdict quality.
-    try:
-        output = await invoke_llm(
-            system_prompt=JUDGE_SYSTEM.format(current_date=date.today().isoformat()),
-            user_prompt=JUDGE_USER.format(
-                claim_text=claim_text,
-                sub_claim=sub_claim,
-                evidence_text=evidence_text,
-            ),
-            schema=JudgeOutput,
-            semantic_validator=validate_judge,
-            max_retries=2,
-            temperature=0,
-            activity_name="judge",
-        )
-        
-        verdict = output.verdict
-        confidence = output.confidence
-        reasoning = output.reasoning
-        
-    except LLMInvocationError as e:
-        log.warning(activity.logger, "judge", "invocation_failed",
-                    "LLM invocation failed after retries",
-                    error=str(e), attempts=e.attempts)
-        verdict = "unverifiable"
-        confidence = 0.0
-        reasoning = f"Failed to parse LLM judgment after {e.attempts} attempts"
-
-    # Clean up reasoning text using LanguageTool
-    # This catches grammar oddities from quantized model outputs
-    reasoning = cleanup_text(reasoning)
-
-    log.info(activity.logger, "judge", "done", "Sub-claim judged",
-             sub_claim=sub_claim, verdict=verdict, confidence=confidence)
-
-    return {
-        "sub_claim": sub_claim,
-        "verdict": verdict,
-        "confidence": confidence,
-        "reasoning": reasoning,
-        "evidence": evidence,
-    }
+    return await judge(claim_text, sub_claim, evidence, interested_parties)
 
 
 @activity.defn
 async def synthesize_verdict(
     claim_text: str,
-    node_text: str,
     child_results: list[dict],
-    is_final: bool = True,
     thesis_info: dict | None = None,
 ) -> dict:
-    """Combine child verdicts into a single verdict for a tree node.
+    """Combine child verdicts into a final overall verdict.
 
-    Unified synthesis — works for both intermediate (one aspect of the claim)
-    and final (overall verdict). The prompt adapts via context parameters:
-      - Final: "This is the FINAL OVERALL verdict for the original claim."
-      - Intermediate: "This is an INTERMEDIATE verdict for one aspect..."
-
-    Both use the full 6-level verdict scale.
+    Delegates to src/agent/synthesize.synthesize() for all domain logic.
     """
-    log.info(activity.logger, "synthesize", "start", "Synthesizing verdict",
-             claim=claim_text, node=node_text, is_final=is_final,
-             num_children=len(child_results))
-
-    # Format sub-verdicts for the LLM prompt
-    sub_verdict_parts = []
-    for i, sub in enumerate(child_results, 1):
-        part = (
-            f"[{i}] Sub-claim: {sub['sub_claim']}\n"
-            f"    Verdict: {sub['verdict']}\n"
-            f"    Confidence: {sub['confidence']}\n"
-            f"    Reasoning: {sub['reasoning']}"
-        )
-        sub_verdict_parts.append(part)
-    sub_verdicts_text = "\n\n".join(sub_verdict_parts)
-
-    # Adapt prompt context based on whether this is final or intermediate
-    if is_final:
-        synthesis_context = (
-            "This is the FINAL OVERALL verdict for the original claim. "
-            "Your verdict is the definitive assessment."
-        )
-        # Build thesis context for the synthesizer
-        thesis_block = ""
-        if thesis_info and thesis_info.get("thesis"):
-            thesis_block = (
-                f"\n\nSPEAKER'S THESIS: {thesis_info['thesis']}\n"
-                f"Claim structure: {thesis_info.get('structure', 'simple')}\n"
-                f"Key test: {thesis_info.get('key_test', 'N/A')}\n"
-                f"\nEvaluate whether THIS THESIS survives the sub-verdicts, "
-                f"not just whether a majority of individual facts are true."
-            )
-        synthesis_framing = f"Original claim: {claim_text}{thesis_block}"
-    else:
-        synthesis_context = (
-            f'This is an INTERMEDIATE verdict for one aspect of a larger claim: '
-            f'"{node_text}". This verdict will be combined with other aspect '
-            f'verdicts in a later synthesis step.'
-        )
-        synthesis_framing = (
-            f"Aspect being synthesized: {node_text}\n"
-            f"Original claim (for context): {claim_text}"
-        )
-
-    try:
-        output = await invoke_llm(
-            system_prompt=SYNTHESIZE_SYSTEM.format(
-                current_date=date.today().isoformat(),
-                synthesis_context=synthesis_context,
-            ),
-            user_prompt=SYNTHESIZE_USER.format(
-                synthesis_framing=synthesis_framing,
-                sub_verdicts_text=sub_verdicts_text,
-            ),
-            schema=SynthesizeOutput,
-            semantic_validator=validate_synthesize,
-            max_retries=2,
-            temperature=0,
-            activity_name="synthesize",
-        )
-        
-        verdict = output.verdict
-        confidence = output.confidence
-        reasoning = output.reasoning
-        
-    except LLMInvocationError as e:
-        log.warning(activity.logger, "synthesize", "invocation_failed",
-                    "LLM invocation failed after retries",
-                    error=str(e), attempts=e.attempts)
-        verdict = "unverifiable"
-        confidence = 0.0
-        reasoning = f"Failed to synthesize verdict after {e.attempts} attempts"
-
-    # Clean up reasoning text using LanguageTool
-    # This catches grammar oddities from quantized model outputs
-    reasoning = cleanup_text(reasoning)
-
-    log.info(activity.logger, "synthesize", "done", "Verdict synthesized",
-             node=node_text, is_final=is_final, verdict=verdict,
-             confidence=confidence)
-
-    return {
-        "sub_claim": node_text,
-        "verdict": verdict,
-        "confidence": confidence,
-        "reasoning": reasoning,
-        "evidence": [],
-        "child_results": child_results,
-        "reasoning_chain": (
-            [sub.get("reasoning", "") for sub in child_results]
-            if is_final else None
-        ),
-    }
+    from src.agent.synthesize import synthesize
+    return await synthesize(claim_text, child_results, thesis_info)
 
 
 @activity.defn
 async def store_result(claim_id: str, result: dict) -> None:
-    """Store the full verification result tree in the database.
+    """Store the verification result in the database.
 
-    The result dict is the output of the recursive _process function in the
-    workflow. It's either:
-      - A leaf: {"sub_claim": "...", "verdict": "...", "evidence": [...]}
-      - A synthesis: {"sub_claim": "...", "verdict": "...", "child_results": [...]}
+    The result dict is either:
+      - A single fact verdict: {"sub_claim": ..., "verdict": ..., "evidence": [...]}
+      - A synthesis: {"sub_claim": ..., "verdict": ..., "child_results": [...]}
 
-    The tree is stored recursively — synthesis nodes get is_leaf=False,
-    leaf nodes get is_leaf=True, and parent_id links children to parents.
+    Sub-claims with child_results get is_leaf=False, leaf nodes get
+    is_leaf=True. Evidence is stored for leaf nodes.
     """
     log.info(activity.logger, "store", "start", "Storing verification result",
              claim_id=claim_id, verdict=result.get("verdict"))

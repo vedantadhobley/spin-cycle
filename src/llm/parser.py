@@ -122,7 +122,9 @@ def extract_json(raw: str) -> Any:
                 except json.JSONDecodeError:
                     continue
     
-    # Try 5: Last resort - find anything that looks like JSON
+    # Try 5: Last resort — shallow regex extraction (1 nesting level only).
+    # This fires after the balanced bracket extractor (Try 3) failed to
+    # produce valid JSON. A simpler nested fragment might still be valid.
     last_resort = re.search(r'(\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})', raw)
     if last_resort:
         try:
@@ -178,24 +180,3 @@ def _extract_balanced(text: str, open_char: str, close_char: str) -> Optional[st
                 return text[:i + 1]
     
     return None  # Unbalanced
-
-
-def safe_extract_json(raw: str, fallback: Any = None) -> tuple[Any, Optional[str]]:
-    """Extract JSON with fallback on failure.
-    
-    Args:
-        raw: Raw LLM output
-        fallback: Value to return if extraction fails
-        
-    Returns:
-        Tuple of (parsed_json, error_message)
-        - On success: (parsed_json, None)
-        - On failure: (fallback, error_message)
-    """
-    try:
-        return extract_json(raw), None
-    except JSONExtractionError as e:
-        log.warning(logger, MODULE, "extract_failed",
-                   "Failed to extract JSON from LLM output",
-                   error=str(e), raw_length=len(raw))
-        return fallback, str(e)

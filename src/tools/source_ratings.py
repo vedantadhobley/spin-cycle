@@ -1,16 +1,28 @@
 """Source bias and credibility ratings from Media Bias/Fact Check (MBFC).
 
 This module provides:
-  1. On-demand scraping of MBFC for source ratings
+  1. On-demand scraping of MBFC for source ratings (async + sync)
   2. Caching in PostgreSQL with 30-day freshness
-  3. Lookup function for use in evidence annotation
-  4. Seed data for ~300 common sources
+  3. Parallel MBFC lookups (await_ratings_parallel)
+  4. Government domain detection and synthetic ratings
+  5. Claim-subject quote detection in evidence text
+  6. Source rating formatting for judge annotations
+  7. Seed data for ~300 common sources
+  8. Domain normalization (extract_domain)
+
+Key functions:
+  - get_source_rating(domain): async, scrapes MBFC if not cached
+  - get_source_rating_sync(domain): sync, cache-only (no network)
+  - await_ratings_parallel(domains): parallel MBFC await (no global timeout)
+  - extract_domain(url): canonical domain normalization
+  - detect_claim_subject_quotes(evidence, parties): quote detection
+  - format_source_tag(url, rating, ...): judge annotation formatting
 
 Usage:
     from src.tools.source_ratings import get_source_rating
-    
+
     rating = await get_source_rating("reuters.com")
-    # Returns: {"bias": "center", "factual": "very-high", "credibility": "high"}
+    # Returns: {"bias": "center", "factual_reporting": "very-high", ...}
     # Or None if domain not found in MBFC
 """
 
@@ -53,25 +65,6 @@ BIAS_MAP = {
     "questionable source": "conspiracy-pseudoscience",
     "pro-science": "center",  # MBFC category for science-focused outlets
 }
-
-FACTUAL_MAP = {
-    "very high": "very-high",
-    "high": "high",
-    "mostly factual": "mostly-factual",
-    "mixed": "mixed",
-    "low": "low",
-    "very low": "very-low",
-}
-
-CREDIBILITY_MAP = {
-    "high credibility": "high",
-    "medium credibility": "medium",
-    "low credibility": "low",
-    "high": "high",
-    "medium": "medium",
-    "low": "low",
-}
-
 
 def extract_domain(url_or_domain: str) -> str:
     """Normalize input to a clean domain (no www, no path)."""
@@ -229,7 +222,7 @@ async def scrape_mbfc(domain: str) -> Optional[dict]:
                 if resp.status_code == 200:
                     return _parse_mbfc_page(resp.text, url)
             except httpx.RequestError as e:
-                logger.debug(f"MBFC request failed for {url}: {e}")
+                logger.warning(f"MBFC request failed for {url}: {e}")
                 continue
         
         # Try search as fallback
@@ -245,8 +238,9 @@ async def scrape_mbfc(domain: str) -> Optional[dict]:
                     if page_resp.status_code == 200:
                         return _parse_mbfc_page(page_resp.text, result["href"])
         except httpx.RequestError as e:
-            logger.debug(f"MBFC search failed for {domain}: {e}")
-    
+            logger.warning(f"MBFC search failed for {domain}: {e}")
+
+    logger.warning(f"MBFC: all lookup patterns failed for {domain}")
     return None
 
 
@@ -525,16 +519,35 @@ async def get_source_rating(url_or_domain: str, force_refresh: bool = False) -> 
     return None
 
 
-async def get_ratings_batch(urls_or_domains: list[str]) -> dict[str, Optional[dict]]:
-    """Get ratings for multiple domains, efficiently using cache.
-    
-    Returns dict mapping domain -> rating (or None).
+async def await_ratings_parallel(
+    domains: list[str],
+    max_concurrent: int = 8,
+) -> dict[str, Optional[dict]]:
+    """Parallel MBFC lookups — waits for ALL domains to complete.
+
+    Each domain bounded by 15s httpx timeout in scrape_mbfc().
+    No global timeout — we wait for every domain rather than
+    cancelling in-flight scrapes.
+
+    Returns dict mapping domain -> rating dict (or None).
     """
-    results = {}
-    for item in urls_or_domains:
-        domain = extract_domain(item)
-        if domain not in results:  # Dedupe
-            results[domain] = await get_source_rating(domain)
+    import asyncio
+
+    unique_domains = list(set(domains))
+    results: dict[str, Optional[dict]] = {}
+    sem = asyncio.Semaphore(max_concurrent)
+
+    async def _lookup(domain: str) -> None:
+        async with sem:
+            try:
+                rating = await get_source_rating(domain)
+                results[domain] = rating
+            except Exception as e:
+                logger.warning(f"MBFC lookup failed for {domain}: {e}")
+                results[domain] = None
+
+    await asyncio.gather(*[_lookup(d) for d in unique_domains])
+
     return results
 
 
@@ -763,43 +776,6 @@ def format_source_tag(rating: Optional[dict]) -> str:
     return tag
 
 
-def seed_source_ratings() -> int:
-    """Load seed data from JSON into the database.
-    
-    Returns the number of sources loaded.
-    """
-    seed_file = Path(__file__).parent.parent / "data" / "source_ratings_seed.json"
-    
-    if not seed_file.exists():
-        logger.warning(f"Seed file not found: {seed_file}")
-        return 0
-    
-    with open(seed_file) as f:
-        data = json.load(f)
-    
-    sources = data.get("sources", [])
-    if not sources:
-        logger.warning("No sources in seed file")
-        return 0
-    
-    with get_sync_session() as session:
-        for source in sources:
-            stmt = insert(SourceRating).values(
-                domain=source["domain"],
-                bias=source.get("bias"),
-                factual_reporting=source.get("factual_reporting"),
-                credibility=source.get("credibility"),
-                mbfc_url=None,
-                raw_data={"seeded": True},
-                scraped_at=datetime.now(timezone.utc),
-            ).on_conflict_do_nothing()  # Don't overwrite existing/fresher data
-            session.execute(stmt)
-        
-        session.commit()
-    
-    logger.info(f"Seeded {len(sources)} source ratings")
-    return len(sources)
-
 
 def get_source_rating_sync(url_or_domain: str) -> Optional[dict]:
     """Synchronous version of get_source_rating (cache only, no scrape).
@@ -868,7 +844,7 @@ def find_rating_by_name(name: str) -> Optional[dict]:
                     "mbfc_url": cached.mbfc_url,
                 }
     except Exception as e:
-        logger.debug(f"Rating reverse lookup failed for '{name}': {e}")
+        logger.warning(f"Rating reverse lookup failed for '{name}': {e}")
 
     return None
 

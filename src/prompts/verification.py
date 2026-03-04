@@ -594,18 +594,24 @@ Rules for seed queries:
 1. Write queries a HUMAN would type — natural phrases, not keyword soup.
 2. Keep queries SHORT (under 80 characters). Long queries return garbage.
 3. Target the PRIMARY SOURCE, not news about it:
-   - Budget claim → "US defense spending 2024 official data" (not "article about defense spending")
-   - Attribution → "ExxonMobil internal climate research 1970s" (the original documents)
-   - Legislative → "Inflation Reduction Act insulin cap roll call vote" (the vote record)
+   - Budget claim → "[entity] spending [year] official data" (not "article about spending")
+   - Attribution → "[entity] internal [topic] documents" (the original documents)
+   - Legislative → "[bill name] roll call vote" (the vote record)
 4. Include at least one COUNTER-EVIDENCE query — what would you search for \
 to DISPROVE this fact? A researcher who only searches for confirmation is \
 doing it wrong.
 5. For comparative claims, search EACH side separately:
-   - "Japan elderly care spending per capita"
-   - "European countries elderly care spending per capita"
+   - "[Country A] elderly care spending per capita"
+   - "[Country B] elderly care spending per capita"
 6. For causal claims, search for ALTERNATIVE EXPLANATIONS:
-   - "Texas grid failure other causes besides federal grid"
+   - "[topic] failure other causes besides [claimed cause]"
 7. Do NOT repeat the full fact text as a query. Extract the searchable core.
+8. Rephrase using synonyms and alternative wordings to improve search results, \
+but do NOT introduce specific entity names, dataset names, program names, \
+acronyms, or organization names from your training knowledge that aren't in \
+the claim. Your knowledge may be outdated. Entity and data source discovery \
+is handled programmatically — your job is to rephrase what's in the claim, \
+not to inject names you happen to know.
 
 LINGUISTIC PATTERNS:
 The full linguistic pattern taxonomy (presuppositions, quantifiers, modality, \
@@ -646,7 +652,7 @@ Simple claim (KEEP IT SIMPLE):
   "structure": "simple",
   "interested_parties": {{"direct": [], "institutional": [], "affiliated_media": [], "reasoning": "No interested parties — this is established scientific consensus"}},
   "facts": [
-    {{"text": "The Earth is approximately 4.5 billion years old", "categories": ["SCIENTIFIC"], "seed_queries": ["age of the Earth scientific estimate", "Earth 4.5 billion years radiometric dating"]}}
+    {{"text": "The Earth is approximately 4.5 billion years old", "categories": ["SCIENTIFIC"], "seed_queries": ["age of the Earth scientific estimate", "Earth 4.5 billion years evidence"]}}
   ]
 }}
 Note: DO NOT add "The Earth has an age" or "not older than X" or "not younger than X" — these are redundant.
@@ -659,7 +665,7 @@ Another simple claim:
   "structure": "simple",
   "interested_parties": {{"direct": ["NASA"], "institutional": ["US Government"], "affiliated_media": [], "reasoning": "NASA is the subject; US Government is parent organization"}},
   "facts": [
-    {{"text": "NASA landed on the moon 6 times", "categories": ["QUANTITATIVE"], "seed_queries": ["NASA Apollo moon landings complete list", "how many times did NASA land on the moon"]}}
+    {{"text": "NASA landed on the moon 6 times", "categories": ["QUANTITATIVE"], "seed_queries": ["NASA moon landings complete list", "how many times did NASA land on the moon"]}}
   ]
 }}
 
@@ -673,8 +679,8 @@ Parallel claim:
   "facts": [
     {{"text": "Country A is increasing its military spending", "categories": ["QUANTITATIVE"], "seed_queries": ["Country A military spending budget increase", "Country A defense budget year over year"]}},
     {{"text": "Country B is increasing its military spending", "categories": ["QUANTITATIVE"], "seed_queries": ["Country B military spending budget increase", "Country B defense budget year over year"]}},
-    {{"text": "Country A is cutting its foreign aid budget", "categories": ["QUANTITATIVE"], "seed_queries": ["Country A foreign aid budget cuts", "Country A official development assistance spending"]}},
-    {{"text": "Country B is cutting its foreign aid budget", "categories": ["QUANTITATIVE"], "seed_queries": ["Country B foreign aid budget cuts", "Country B official development assistance spending"]}}
+    {{"text": "Country A is cutting its foreign aid budget", "categories": ["QUANTITATIVE"], "seed_queries": ["Country A foreign aid budget cuts", "Country A foreign aid spending data"]}},
+    {{"text": "Country B is cutting its foreign aid budget", "categories": ["QUANTITATIVE"], "seed_queries": ["Country B foreign aid budget cuts", "Country B foreign aid spending data"]}}
   ]
 }}
 
@@ -702,7 +708,7 @@ Causal claim:
   "interested_parties": {{"direct": [], "institutional": [], "affiliated_media": [], "reasoning": "No specific interested parties identified"}},
   "facts": [
     {{"text": "Tax cuts were implemented", "categories": ["LEGISLATIVE"], "seed_queries": ["tax cuts legislation passed enacted", "recent tax cut bill signed into law"]}},
-    {{"text": "Record job growth occurred", "categories": ["QUANTITATIVE"], "seed_queries": ["job growth statistics record", "BLS employment data monthly jobs added"]}},
+    {{"text": "Record job growth occurred", "categories": ["QUANTITATIVE"], "seed_queries": ["job growth statistics record", "employment data monthly jobs record"]}},
     {{"text": "The tax cuts caused the job growth", "categories": ["CAUSAL", "QUANTITATIVE"], "seed_queries": ["tax cuts effect on employment economic analysis", "job growth causes other factors besides tax cuts"]}}
   ]
 }}
@@ -716,7 +722,7 @@ Comparative/ranking claim (DO NOT use placeholders):
   "structure": "ranking",
   "interested_parties": {{"direct": ["Country A military"], "institutional": ["Country A government"], "affiliated_media": [], "reasoning": "Country A's military and government have interest in defense spending perception"}},
   "facts": [
-    {{"text": "Country A spends more on its military than the next five highest-spending countries combined", "categories": ["QUANTITATIVE", "COMPARATIVE"], "seed_queries": ["global military spending by country ranking", "Country A defense budget vs next five countries", "SIPRI military expenditure data"]}}
+    {{"text": "Country A spends more on its military than the next five highest-spending countries combined", "categories": ["QUANTITATIVE", "COMPARATIVE"], "seed_queries": ["global military spending by country ranking", "Country A defense budget vs next five countries"]}}
   ]
 }}
 Note: The comparison is kept as one searchable fact. The researcher finds the \
@@ -900,12 +906,18 @@ Do NOT rely on third-party fact-check sites (Snopes, PolitiFact, etc.). \
 We are building independent verification — find the PRIMARY sources yourself.
 
 IMPORTANT — you have a budget of 8-12 tool calls total. Seed searches have \
-already gathered initial results. Be efficient:
-1. Review seed results — you already have 20-30 URLs from multiple queries
-2. Use fetch_page_content on the 2-3 BEST seed URLs (most relevant titles/snippets)
-3. If seed results lean one direction, counter-search for the OPPOSITE view
-4. If seed results are thin on a specific detail, do a targeted search
-5. Stop and summarize. Do NOT re-search what the seeds already found.
+already gathered ~30 curated URLs ranked by source quality. Be efficient:
+1. Review seed results — they are ranked by quality with annotations:
+   - "Source tier: TIER 1/2" indicates source credibility
+   - "Conflict:" flags sources with ownership ties to interested parties
+2. FETCH ORDER MATTERS — use fetch_page_content in this priority:
+   a. FIRST: Fetch the highest-tier NON-CONFLICTED source (look for "TIER 1" \
+without "Conflict:" — .gov, .edu, official data, wire services, academic sources)
+   b. SECOND: Fetch the most relevant TIER 2 non-conflicted source
+   c. THIRD: If evidence leans one direction, counter-search for the OPPOSITE
+   d. LAST: Fetch a conflicted source only if independent sources are insufficient
+3. Do NOT re-search what seeds already found — use a DIFFERENT query angle
+4. Stop once you have primary-source evidence from both directions
 
 A [RESEARCH PROGRESS] note may appear in your conversation showing what \
 you have gathered so far — unique sources, domains, search engines used. \
@@ -928,10 +940,13 @@ Find evidence about this claim:
 "{sub_claim}"
 
 Seed searches have already been run — you can see their results in the \
-conversation above. Review the seed results, then:
-1. Use fetch_page_content on the 2-3 most promising URLs from the seed results
-2. If the seed results are one-sided, search for the OPPOSITE perspective
-3. If the seed results are thin, try different search terms
+conversation above. Results are ranked by source quality:
+- "Source tier: TIER 1/2" indicates credibility level
+- "Conflict:" flags sources with ownership ties to interested parties — deprioritize these
+1. FIRST: Use fetch_page_content on the highest-tier NON-CONFLICTED URL
+2. SECOND: Fetch the most claim-relevant TIER 2 non-conflicted source
+3. If seed evidence leans one direction, counter-search for the OPPOSITE
+4. If seed results are thin, try different search terms
 
 Identify the KEY DETAIL that makes this claim specific and verifiable, then \
 search for THAT. Don't just search for the people or topic in general — \
@@ -953,11 +968,9 @@ search for the specific event, action, number, or object mentioned.\
 #   ("I found one source saying it's true, done!"). We want it to keep
 #   searching for contradicting evidence too.
 #
-# Why limit to 3-4 searches?
-#   Each search costs time and LLM tokens. More searches ≠ better evidence.
-#   3-4 well-targeted searches usually find what's out there. If nothing
-#   comes up in 4 searches, more won't help — the claim is likely too
-#   obscure to verify.
+# Budget: 8-12 tool calls. The agent gets pre-gathered seed results
+# (~30 ranked URLs) so it spends its budget on deep-dive fetching and
+# targeted follow-up rather than initial broad discovery.
 
 
 # =============================================================================
@@ -1130,6 +1143,17 @@ Example with tag:
 
 The News Outlet rating is irrelevant here — they're just accurately quoting \
 what Agency A said about Agency A. This is circular evidence.
+
+Additional conflict-of-interest tags may appear:
+  ⚠️ AFFILIATED MEDIA: Source is [outlet], which has ownership ties to claim subject.
+  ⚠️ PUBLISHER OWNED BY INTERESTED PARTY: Source publisher is owned by [entity].
+
+These tags flag a STRUCTURAL conflict of interest — the publisher has a financial \
+or organizational stake in how this claim is perceived. The evidence is not \
+necessarily wrong, but editorial decisions at owned media serve the owner's \
+interests. Treat it like testimony from a business partner of the accused — \
+note what it says, but require independent corroboration from sources with no \
+ownership ties.
 
 A summary warning may also appear at the end if many sources quote the subject:
   ⚠️ SELF-SERVING SOURCE WARNING: X% of evidence items quote statements from \
@@ -1496,20 +1520,8 @@ Sub-claim verdicts:
 Return a JSON object with "verdict", "confidence", and "reasoning".\
 """
 
-# Why a unified synthesis prompt?
-#   The same operation happens at every level of the tree: "here are child
-#   verdicts, combine them." The only difference is context framing:
-#   - Final: "This is the overall verdict for the claim."
-#   - Intermediate: "This is a verdict for one aspect. It will be combined
-#     with other aspects later."
-#
-#   The activity formats {synthesis_context} and {synthesis_framing} based
-#   on whether it's a final or intermediate synthesis. The core reasoning
-#   (importance weighting, confidence scoring, contextual explanation) is identical.
-#
-# Why the full 6-level scale at every level?
-#   The old approach used 4 levels (true/false/partially_true/unverifiable)
-#   for intermediate nodes and 6 for final. This lost expressiveness — an
-#   intermediate node couldn't distinguish "mostly true with minor issues"
-#   from "genuinely mixed." Now every level uses the same scale, so context
-#   is preserved as it flows up the tree.
+# Synthesis combines all sub-verdicts into a final overall verdict.
+# The activity formats {synthesis_context} and {synthesis_framing} with
+# thesis context from decompose (thesis statement, structure, key test).
+# When a single fact is verified, synthesis is skipped entirely —
+# the judge verdict is used directly.

@@ -93,19 +93,23 @@ decompose_claim       Normalize → Decompose (2 LLM calls, 1 activity)
                         operationalization, opinion separation, coreference,
                         reference grounding, speculation, rhetorical framing)
                       Decompose: flat atomic facts + thesis extraction
+                      Each fact gets categories + LLM-written seed queries
                       Guided by 15-category linguistic pattern taxonomy
                         + 9 extraction rules (decontextualize, entity disambig.,
                           operationalize comparisons)
                       SpaCy NER augments entity extraction
                       Wikidata expands parties → ownership, media, family
     ↓
-For each batch of 2 facts (parallel):
-    research_subclaim   LangGraph ReAct agent (with progress awareness)
-       ↓                SearXNG + DuckDuckGo + Serper +
-       ↓                Brave + Wikipedia + page_fetcher
-       ↓                (source quality filtered, MBFC cached in background)
-       ↓                + LegiScan enrichment (bills, votes, bill text)
+RESEARCH PHASE (all facts, 2 concurrent):
+    research_subclaim   Phase 1: Programmatic seed search (~80-100 URLs)
+       ↓                Phase 1b: Await MBFC ratings → score → conflict detect
+       ↓                  → rank → keep top 30 (annotated with tier + conflicts)
+       ↓                Phase 2: LangGraph ReAct agent (fetches, follow-up)
+       ↓                Phase 3: LegiScan enrichment (bills, votes, bill text)
+    ↓
+JUDGE PHASE (all facts, 2 concurrent):
     judge_subclaim      Pre-judge: SpaCy NER + Wikidata enrichment
+       ↓                Evidence ranking + MBFC annotation
        ↓                4 conflict-of-interest checks per evidence item
        ↓                LLM evaluates evidence (6-level verdict scale)
     ↓
@@ -274,7 +278,7 @@ docker logs -f spin-cycle-dev-worker
 # I [RESEARCH  ] start: Starting research agent | sub_claim=...
 # I [RESEARCH  ] done: Research complete | evidence_count=16
 # I [JUDGE     ] done: Sub-claim judged | verdict=true confidence=0.95
-# I [SYNTHESIZE] done: Verdict synthesized | is_final=True verdict=mostly_true confidence=0.85
+# I [SYNTHESIZE] done: Verdict synthesized | verdict=mostly_true confidence=0.85
 # I [STORE     ] done: Result stored in database | claim_id=... verdict=mostly_true
 
 # With LOG_FORMAT=json (default in prod), output is JSON for Grafana Loki
@@ -331,13 +335,18 @@ spin-cycle/
 │
 ├── src/
 │   ├── worker.py                   # Temporal worker entrypoint
-│   ├── llm.py                      # Shared LLM client (instruct + thinking)
+│   │
+│   ├── llm/                        # LLM client layer
+│   │   ├── client.py               # ChatOpenAI client setup
+│   │   ├── invoker.py              # invoke_llm() — structured output + retries
+│   │   ├── parser.py               # Response parsing helpers
+│   │   └── validators.py           # Semantic validators (normalize, decompose, synthesize)
 │   │
 │   ├── utils/                      # Shared utilities
 │   │   ├── logging.py              # Structured logging (JSON for Loki, pretty for dev)
 │   │   ├── ner.py                  # SpaCy NER — entity extraction (PERSON/ORG)
 │   │   ├── text_cleanup.py         # Grammar/spell check for LLM output
-│   │   └── evidence_ranker.py      # Quality-ranked evidence selection (top 20 by score)
+│   │   └── evidence_ranker.py      # Source + evidence quality scoring, seed ranking, judge capping
 │   │
 │   ├── api/                        # FastAPI backend
 │   │   ├── app.py                  # App + lifespan
@@ -345,13 +354,17 @@ spin-cycle/
 │   │       ├── health.py           # Health check
 │   │       └── claims.py           # Claim CRUD
 │   │
-│   ├── agent/                      # LangGraph agents
-│   │   ├── research.py             # ReAct agent (multi-source search)
-│   │   └── decompose.py            # Wikidata expansion for interested parties
+│   ├── agent/                      # Domain logic (called by Temporal activities)
+│   │   ├── decompose.py            # Normalize + extract facts + Wikidata expansion
+│   │   ├── research.py             # Seed search + rank + ReAct agent + evidence extraction
+│   │   ├── judge.py                # Evidence ranking, annotation, LLM verdict
+│   │   ├── synthesize.py           # Verdict synthesis
+│   │   └── claim_category.py       # Seed query routing (SearXNG category selection)
 │   │
-│   ├── tools/                      # Evidence gathering tools
+│   ├── tools/                      # Evidence gathering + data sources
+│   │   ├── source_ratings.py       # MBFC ratings (scrape + cache + parallel await)
 │   │   ├── source_filter.py        # Domain blocklist + MBFC cache population
-│   │   ├── source_ratings.py       # MBFC bias/factual ratings (scrape + cache)
+│   │   ├── media_matching.py       # URL↔media outlet matching, publisher ownership detection
 │   │   ├── wikidata.py             # Wikidata SPARQL — ownership chains, relationships
 │   │   ├── legiscan.py             # LegiScan API — US legislation, votes, bill text
 │   │   ├── searxng.py              # SearXNG meta-search (self-hosted)
@@ -365,18 +378,19 @@ spin-cycle/
 │   │   ├── verification.py         # Decompose, Research, Judge, Synthesize
 │   │   └── linguistic_patterns.py  # 15-category linguistic pattern taxonomy
 │   │
+│   ├── schemas/                    # Data schemas
+│   │   ├── api.py                  # Pydantic schemas for API
+│   │   └── llm_outputs.py          # Pydantic schemas for LLM structured output
+│   │
 │   ├── workflows/
 │   │   └── verify.py               # VerifyClaimWorkflow
 │   │
 │   ├── activities/
-│   │   └── verify_activities.py    # Temporal activities (decompose, research, judge, synthesize, store)
+│   │   └── verify_activities.py    # Temporal activities (7 activities)
 │   │
-│   ├── db/
-│   │   ├── models.py               # SQLAlchemy models
-│   │   └── session.py              # Async DB sessions
-│   │
-│   └── data/
-│       └── schemas.py              # Pydantic schemas
+│   └── db/
+│       ├── models.py               # SQLAlchemy models
+│       └── session.py              # Async DB sessions
 │
 └── tests/
     ├── test_health.py
@@ -387,8 +401,7 @@ spin-cycle/
 
 1. **Alembic migrations** — proper database schema versioning (currently using raw SQL ALTER TABLE)
 2. **Extraction pipeline** — automated claim ingestion from RSS feeds via scheduled Temporal workflows
-3. **Adaptive research depth** — scale research effort based on sub-claim complexity
-4. **Calibration test suite** — benchmark against known claims to measure accuracy
-5. **LangFuse** — self-hosted LLM observability for prompt debugging
+3. **Calibration test suite** — benchmark against known claims to measure accuracy
+4. **LangFuse** — self-hosted LLM observability for prompt debugging
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full technical deep dive, including the extraction pipeline design, database schema details, and how LangChain/LangGraph/Temporal fit together.

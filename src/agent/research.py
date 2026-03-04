@@ -1,11 +1,18 @@
-"""LangGraph research agent for evidence gathering.
+"""Two-phase evidence gathering: programmatic seed search + LangGraph ReAct agent.
 
-This module implements the core agentic AI pattern: a ReAct (Reason + Act)
-agent that autonomously searches for evidence using web tools.
+## Architecture
 
-## How it works
+Phase 1 — Programmatic seed search (~3-20s):
+  1. _run_seed_searches(): Fire LLM-written queries + base queries (raw claim,
+     Wikipedia) to SearXNG/Serper/Brave concurrently. Yields ~80-100 raw URLs.
+  2. _rank_and_filter_seeds(): Await MBFC ratings in parallel (per-domain
+     15s httpx timeout), score URLs with score_url(), detect interested-party conflicts
+     (affiliated media + publisher ownership), apply CONFLICT_PENALTY (-15)
+     to conflicted sources, sort by adjusted score, keep top 30.
+  3. _build_seed_messages(): Package ranked seeds as synthetic AIMessage +
+     ToolMessage pairs so the agent sees them as prior searches.
 
-LangGraph's create_react_agent builds a StateGraph with a pre-model hook:
+Phase 2 — LangGraph ReAct agent (~60-90s):
 
     ┌────────────┐     ┌──────────┐     ┌───────┐
     │ pre_model  │────▶│  agent   │────▶│ tools │
@@ -15,65 +22,37 @@ LangGraph's create_react_agent builds a StateGraph with a pre-model hook:
                             ▼
                            END
 
-1. The "pre_model" hook analyzes the conversation so far — counting tool
-   calls, unique URLs, search queries used, engines tried — and injects
-   a progress summary into the LLM's input (without modifying state).
+  The agent starts with seed results already in its history. It spends its
+  8-12 tool call budget on deep-dive fetching (full article reads) and
+  targeted follow-up searches rather than initial broad discovery.
 
-2. The "agent" node calls the LLM with tool definitions + progress note.
-   The LLM reads the conversation history and progress, then decides:
-     (a) Call a tool — returns an AIMessage with tool_calls
-     (b) Respond — returns an AIMessage with text content (no tool_calls)
+  The pre_model hook injects a progress note each iteration: tool call count,
+  unique URLs/domains, seed tier/conflict coverage, and queries used.
 
-3. If the LLM chose (a), the "tools" node executes the tool calls and
-   appends ToolMessage results to the conversation.
+Phase 3 — Programmatic enrichment:
+  - _enrich_with_legislation(): LegiScan search for matching legislation,
+    bill text, roll call votes, sponsors. Appended to agent evidence.
 
-4. Loop back to pre_model → agent. The progress note updates each
-   iteration, giving the agent real-time awareness of what it has.
+## Agent tools
 
-5. When the LLM chooses (b), the graph ends.
-
-This is the ReAct pattern with progress awareness — the agent knows what
-it's already searched, how many unique sources it has, and which engines
-it hasn't tried, so it can make strategic decisions about next steps.
-
-## Why this is "agentic"
-
-Unlike a simple prompt→response, this agent:
-  - Decides what to search for (based on the claim)
-  - Executes real web searches (Serper/Google, Brave, DuckDuckGo, Wikipedia)
-  - Reads actual page content when search snippets aren't enough
-  - Decides if it needs more information and adapts its strategy
-  - Stops when it has enough evidence (or gives up)
-
-The LLM is making autonomous decisions at each step — that's what makes
-it an agent rather than just a chatbot.
-
-## Tool selection
-
-Tools are dynamically registered based on which API keys are configured:
-  - searxng_search: Self-hosted meta-search aggregating many engines (needs SEARXNG_URL)
+Dynamically registered based on API keys:
+  - searxng_search: Self-hosted meta-search (needs SEARXNG_URL)
   - serper_search: Google results via Serper API (needs SERPER_API_KEY)
-  - brave_search: Brave Search independent index (needs BRAVE_API_KEY)
-  - web_search: DuckDuckGo fallback (always available, no key needed)
-  - wikipedia_search: Wikipedia API (always available, no key needed)
+  - brave_search: Brave Search index (needs BRAVE_API_KEY)
+  - web_search: DuckDuckGo fallback (always available)
+  - wikipedia_search: Wikipedia API (always available)
   - fetch_page_content: Read full page text from URLs (always available)
-
-Set API keys in .env to enable/disable tools. No key = tool not loaded.
-
-Programmatic enrichment (runs after the agent, not as agent tools):
-  - LegiScan: US legislation, bill text, votes, sponsors (needs LEGISCAN_API_KEY)
 
 ## Integration with Temporal
 
-This agent runs INSIDE the research_subclaim Temporal activity. This gives us:
-  - Durable execution: if the container crashes mid-search, Temporal retries
-  - Timeouts: if the agent loops forever, the activity timeout kills it
-  - Retries: if the agent errors, Temporal retries the whole activity
-  - Observability: activity status visible in Temporal UI
+Runs inside the research_subclaim Temporal activity. Temporal provides
+durable execution, timeouts, retries, and observability.
 """
 
 import re as _re
+import time as _time
 import uuid as _uuid
+from datetime import date
 from urllib.parse import urlparse
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -88,6 +67,7 @@ from src.tools.serper import get_serper_tool, is_available as serper_available, 
 from src.tools.brave import get_brave_tool, is_available as brave_available, search_brave
 from src.tools.searxng import get_searxng_tool, is_available as searxng_available
 from src.tools.legiscan import search_legislation, is_available as legiscan_available
+from src.utils.evidence_ranker import score_url, tier_label
 from src.utils.logging import log, get_logger
 from src.utils.text_cleanup import cleanup_text
 
@@ -153,7 +133,39 @@ def _build_progress_note(messages: list) -> str | None:
     if tool_calls == 0:
         return None
 
+    # Count seed tier + conflict coverage from seed messages
+    seed_urls = 0
+    tier1_count = 0
+    tier2_count = 0
+    conflict_count = 0
+    for msg in messages:
+        if isinstance(msg, ToolMessage):
+            tool_call_id = getattr(msg, "tool_call_id", "") or ""
+            if tool_call_id.startswith("seed_"):
+                content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                for line in content.split("\n"):
+                    if line.startswith("URL: "):
+                        seed_urls += 1
+                    elif line.startswith("Source tier: TIER 1"):
+                        tier1_count += 1
+                    elif line.startswith("Source tier: TIER 2"):
+                        tier2_count += 1
+                    elif line.startswith("Conflict:"):
+                        conflict_count += 1
+
     lines = [f"[RESEARCH PROGRESS — {tool_calls} tool calls completed]"]
+
+    # Seed coverage
+    if seed_urls > 0:
+        tier_parts = []
+        if tier1_count:
+            tier_parts.append(f"{tier1_count} TIER 1")
+        if tier2_count:
+            tier_parts.append(f"{tier2_count} TIER 2")
+        if conflict_count:
+            tier_parts.append(f"{conflict_count} conflicted")
+        tier_str = f", {' + '.join(tier_parts)} sources" if tier_parts else ""
+        lines.append(f"Seed coverage: {seed_urls} URLs pre-gathered{tier_str}")
 
     # Evidence inventory
     lines.append(
@@ -332,7 +344,6 @@ def build_research_agent(interested_parties_context: str = ""):
     llm = get_llm(temperature=0)
     tools = _build_tool_list()
 
-    from datetime import date
     prompt = RESEARCH_SYSTEM.format(current_date=date.today().isoformat())
 
     # Inject interested parties context into the prompt
@@ -390,9 +401,8 @@ def _parse_tool_output(content: str, tool_name: str) -> list[dict]:
         url = None
         body = stripped
         # Format: "Page: ...\nURL: ...\n\n<content>"
-        title_m = _re.match(r"Page:\s*(.+)", stripped)
-        if title_m:
-            title = title_m.group(1).strip()
+        if stripped.startswith("Page:"):
+            title = stripped[len("Page:"):].strip()
         url_m = _re.search(r"URL:\s*(https?://\S+)", stripped)
         if url_m:
             url = url_m.group(1).strip()
@@ -414,7 +424,7 @@ def _parse_tool_output(content: str, tool_name: str) -> list[dict]:
 
     # Multi-result tools (SearXNG, Serper, Brave, Wikipedia, DDG)
     # Split on '---' separator used by all our tool wrappers
-    blocks = _re.split(r"\n\n---\n\n", stripped)
+    blocks = stripped.split("\n\n---\n\n")
 
     items = []
     for block in blocks:
@@ -427,9 +437,11 @@ def _parse_tool_output(content: str, tool_name: str) -> list[dict]:
         snippet = block  # fallback: use the whole block as content
 
         # Parse structured fields
-        title_m = _re.match(r"(?:Title|Page):\s*(.+)", block)
-        if title_m:
-            title = title_m.group(1).strip()
+        first_line = block.split("\n", 1)[0]
+        for prefix in ("Title: ", "Page: "):
+            if first_line.startswith(prefix):
+                title = first_line[len(prefix):].strip()
+                break
 
         url_m = _re.search(r"URL:\s*(https?://\S+)", block)
         if url_m:
@@ -514,7 +526,6 @@ def extract_evidence(messages: list) -> list[dict]:
 
 async def _run_seed_searches(
     sub_claim: str,
-    structure: str | None = None,
     categories: list[str] | None = None,
     seed_queries: list[str] | None = None,
 ) -> list[dict]:
@@ -538,11 +549,11 @@ async def _run_seed_searches(
 
     if not categories:
         categories = ["GENERAL"]
-    query_specs = generate_seed_queries(sub_claim, categories, structure, seed_queries)
+    query_specs = generate_seed_queries(sub_claim, categories, seed_queries)
 
     log.info(logger, MODULE, "seed_plan", "Seed search plan",
              sub_claim=sub_claim, categories=categories,
-             structure=structure, query_count=len(query_specs),
+             query_count=len(query_specs),
              labels=[s["label"] for s in query_specs])
 
     sem = asyncio.Semaphore(8)
@@ -593,7 +604,6 @@ async def _run_seed_searches(
             tasks.append(asyncio.wait_for(_do_search(), timeout=10))
 
     # Run all concurrently
-    import time as _time
     _t0 = _time.monotonic()
     raw_results = await asyncio.gather(*tasks, return_exceptions=True)
     elapsed_ms = int((_time.monotonic() - _t0) * 1000)
@@ -644,7 +654,7 @@ async def _run_seed_searches(
     return evidence
 
 
-def _format_seed_results(results: list[dict], source: str) -> str:
+def _format_seed_results(results: list[dict]) -> str:
     """Format seed results into the same text format search tools return.
 
     Uses Title/URL/Snippet blocks separated by '---' — the same format
@@ -658,9 +668,21 @@ def _format_seed_results(results: list[dict], source: str) -> str:
         title = r.get("title", "")
         url = r.get("source_url", "")
         snippet = r.get("content", "")
+
+        # Use pre-computed tier if available (from _rank_and_filter_seeds),
+        # else compute on the fly
+        tier = r.get("_tier") or tier_label(url)
+        tier_line = f"Source tier: {tier}\n" if tier else ""
+
+        # Conflict annotation
+        conflict_flags = r.get("_conflict_flags", [])
+        conflict_line = f"Conflict: {'; '.join(conflict_flags)}\n" if conflict_flags else ""
+
         parts.append(
             f"Title: {title}\n"
             f"URL: {url}\n"
+            f"{tier_line}"
+            f"{conflict_line}"
             f"Snippet: {snippet}"
         )
     return "\n\n---\n\n".join(parts)
@@ -703,7 +725,7 @@ def _build_seed_messages(seed_results: list[dict]) -> list:
         )
 
         # ToolMessage with formatted results
-        formatted = _format_seed_results(results, tool_name)
+        formatted = _format_seed_results(results)
         tool_msg = ToolMessage(
             content=formatted,
             tool_call_id=tool_call_id,
@@ -716,12 +738,101 @@ def _build_seed_messages(seed_results: list[dict]) -> list:
     return messages
 
 
+# Conflict penalty applied to seeds from sources affiliated with interested parties.
+# -15 pushes a mostly-factual conflicted source (score ~22) below most non-conflicted
+# sources, but a gov-affiliated source (score ~37) still ranks respectably at ~22.
+CONFLICT_PENALTY = -15
+
+
+async def _rank_and_filter_seeds(
+    seed_results: list[dict],
+    affiliated_media: list[str],
+    all_parties: list[str],
+    max_seeds: int = 30,
+) -> list[dict]:
+    """Rank seeds by quality + conflict detection, keep top N.
+
+    1. Collect unique domains from all seeds
+    2. Await MBFC ratings in parallel (per-domain 15s httpx timeout)
+    3. Score each seed with score_url() (now has real MBFC data)
+    4. Detect conflicts: affiliated media URL match + publisher ownership
+    5. Annotate each seed with _tier and _conflict_flags metadata
+    6. Apply CONFLICT_PENALTY to conflicted sources
+    7. Sort by adjusted score DESC, keep top max_seeds
+    """
+    if not seed_results:
+        return []
+
+    from src.tools.source_ratings import await_ratings_parallel, extract_domain
+    from src.tools.media_matching import url_matches_media, check_publisher_ownership
+
+    # Step 1: Collect unique domains
+    domains = set()
+    for r in seed_results:
+        url = r.get("source_url", "")
+        if url:
+            domains.add(extract_domain(url))
+    domains.discard("")
+
+    # Step 2: Await MBFC ratings (per-domain 15s httpx timeout, no global cap)
+    if domains:
+        await await_ratings_parallel(
+            list(domains), max_concurrent=8,
+        )
+
+    # Step 3-4: Score and detect conflicts
+    scored: list[tuple[int, dict]] = []
+    for r in seed_results:
+        url = r.get("source_url", "")
+        quality_score, _ = score_url(url)
+        tier = tier_label(url)
+
+        # Conflict detection
+        conflict_flags = []
+        if url and affiliated_media:
+            url_lower = url.lower()
+            for media in affiliated_media:
+                if url_matches_media(url_lower, media):
+                    conflict_flags.append(f"affiliated: {media}")
+                    break
+
+        if url and all_parties and not conflict_flags:
+            owner_match = check_publisher_ownership(url, all_parties)
+            if owner_match:
+                conflict_flags.append(f"owned by: {owner_match}")
+
+        # Apply conflict penalty
+        adjusted_score = quality_score
+        if conflict_flags:
+            adjusted_score += CONFLICT_PENALTY
+
+        # Annotate seed with metadata for _format_seed_results
+        r["_tier"] = tier
+        r["_conflict_flags"] = conflict_flags
+
+        scored.append((adjusted_score, r))
+
+    # Step 5: Sort by adjusted score DESC (stable sort preserves discovery order for ties)
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    # Step 6: Keep top N
+    ranked = [r for _, r in scored[:max_seeds]]
+
+    conflict_count = sum(1 for _, r in scored[:max_seeds] if r.get("_conflict_flags"))
+    log.info(logger, MODULE, "seed_ranked",
+             "Seeds ranked and filtered",
+             total_seeds=len(seed_results),
+             kept=len(ranked),
+             conflicted=conflict_count)
+
+    return ranked
+
+
 async def research_claim(
     sub_claim: str,
-    interested_parties_context: str = "",
+    interested_parties: dict | None = None,
     max_steps: int = 38,
     timeout_secs: int = 120,
-    structure: str | None = None,
     categories: list[str] | None = None,
     seed_queries: list[str] | None = None,
 ) -> list[dict]:
@@ -735,9 +846,11 @@ async def research_claim(
 
     Args:
         sub_claim: The specific sub-claim to find evidence for.
-        interested_parties_context: Pre-formatted text about interested
-            parties and their Wikidata connections, injected into the
-            agent's system prompt as context.
+        interested_parties: Structured dict from decompose with
+            all_parties, affiliated_media, wikidata_context, etc.
+            Used for programmatic conflict detection at seed ranking
+            time, and wikidata_context is injected into the agent
+            prompt.
         max_steps: Maximum number of graph steps (the agent's budget).
                    Each tool call costs ~3 steps (pre_model + agent + tools).
                    38 steps allows ~12 tool calls. The final stop costs 2
@@ -745,9 +858,6 @@ async def research_claim(
         timeout_secs: Soft timeout in seconds. If the agent exceeds this,
                       we return whatever evidence was gathered so far.
                       Default 120s (2 min).
-        structure: Claim structure from decompose (e.g. "causal", "superlative",
-                   "negation", "parallel_comparison", "ranking"). Used to add
-                   structure-specific seed queries. None if not available.
         categories: Evidence-need categories from decompose (e.g. ["QUANTITATIVE",
                     "LEGISLATIVE"]). Determines SearXNG category routing for
                     seed queries. None defaults to ["GENERAL"].
@@ -765,16 +875,23 @@ async def research_claim(
     """
     import asyncio
 
+    # Extract structured data from interested_parties dict
+    if interested_parties is None:
+        interested_parties = {}
+    wikidata_context = interested_parties.get("wikidata_context", "")
+    affiliated_media = interested_parties.get("affiliated_media", [])
+    all_parties = interested_parties.get("all_parties", [])
+
     log.info(logger, MODULE, "start", "Starting research agent",
              sub_claim=sub_claim)
 
-    # Phase 1: Programmatic seed searches (no LLM, ~2-5 seconds)
+    # Phase 1: Programmatic seed searches (no LLM, ~3-8 seconds)
     # Gathers a broad, deterministic evidence pool before the agent starts.
     # The agent sees these as prior searches and spends its budget on
     # deep-dive fetching and targeted follow-up instead of initial discovery.
     try:
         seed_results = await _run_seed_searches(
-            sub_claim, structure=structure, categories=categories,
+            sub_claim, categories=categories,
             seed_queries=seed_queries,
         )
     except Exception as e:
@@ -782,6 +899,15 @@ async def research_claim(
                     "Seed searches failed, agent will search from scratch",
                     error=str(e), error_type=type(e).__name__)
         seed_results = []
+
+    # Phase 1b: Rank seeds by quality + conflict detection
+    # Awaits MBFC lookups, scores URLs, detects interested party conflicts,
+    # sorts by adjusted score, keeps top 30.
+    seed_results = await _rank_and_filter_seeds(
+        seed_results,
+        affiliated_media=affiliated_media,
+        all_parties=all_parties,
+    )
 
     seed_messages = _build_seed_messages(seed_results)
 
@@ -796,7 +922,7 @@ async def research_claim(
     collected_messages: list = list(seed_messages)
 
     try:
-        agent = build_research_agent(interested_parties_context)
+        agent = build_research_agent(wikidata_context)
         input_msg = HumanMessage(
             content=RESEARCH_USER.format(sub_claim=sub_claim)
         )
@@ -826,7 +952,7 @@ async def research_claim(
 
         return evidence
 
-    except (asyncio.TimeoutError, Exception) as e:
+    except Exception as e:
         from langgraph.errors import GraphRecursionError
 
         # Extract whatever evidence was gathered before the interruption
@@ -928,7 +1054,8 @@ async def _research_fallback(sub_claim: str) -> list[dict]:
                 evidence.append({
                     "source_type": "web",
                     "source_url": r.get("url"),
-                    "content": f"{r['title']}: {r['snippet']}",
+                    "title": r.get("title", ""),
+                    "content": r.get("snippet", ""),
                     "supports_claim": None,
                 })
         except Exception as e:
@@ -939,13 +1066,13 @@ async def _research_fallback(sub_claim: str) -> list[dict]:
     # Try Serper (best paid results)
     if serper_available():
         try:
-            from src.tools.serper import search_serper
             results = await search_serper(sub_claim, max_results=5)
             for r in results:
                 evidence.append({
                     "source_type": "web",
                     "source_url": r.get("url"),
-                    "content": f"{r['title']}: {r['snippet']}",
+                    "title": r.get("title", ""),
+                    "content": r.get("snippet", ""),
                     "supports_claim": None,
                 })
         except Exception as e:
@@ -956,13 +1083,13 @@ async def _research_fallback(sub_claim: str) -> list[dict]:
     # Try Brave (different index = different results)
     if brave_available():
         try:
-            from src.tools.brave import search_brave
             results = await search_brave(sub_claim, max_results=5)
             for r in results:
                 evidence.append({
                     "source_type": "web",
                     "source_url": r.get("url"),
-                    "content": f"{r['title']}: {r['snippet']}",
+                    "title": r.get("title", ""),
+                    "content": r.get("snippet", ""),
                     "supports_claim": None,
                 })
         except Exception as e:
@@ -995,7 +1122,8 @@ async def _research_fallback(sub_claim: str) -> list[dict]:
             evidence.append({
                 "source_type": "wikipedia",
                 "source_url": r.get("url"),
-                "content": f"{r['title']}: {r['summary']}",
+                "title": r.get("title", ""),
+                "content": r.get("summary", ""),
                 "supports_claim": None,
             })
     except Exception as e:
@@ -1010,6 +1138,9 @@ async def _research_fallback(sub_claim: str) -> list[dict]:
                  "Capping fallback evidence",
                  original=len(evidence), capped=6)
         evidence = evidence[:6]
+
+    # Programmatic enrichment: LegiScan
+    evidence = await _enrich_with_legislation(evidence, sub_claim)
 
     log.info(logger, MODULE, "fallback_done", "Fallback search complete",
              sub_claim=sub_claim, evidence_count=len(evidence))

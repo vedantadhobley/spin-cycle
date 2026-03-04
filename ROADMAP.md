@@ -15,11 +15,13 @@ A working end-to-end claim verification pipeline with **flat fact extraction + t
 - **Unified 6-level verdict scale**: `true | mostly_true | mixed | mostly_false | false | unverifiable` with spirit-vs-substance guidance
 - **Single `reasoning` field** — consolidated from separate reasoning/nuance fields for clearer output
 - **Single synthesis activity** uses the thesis as primary rubric when available
+- **LLM-driven seed queries** — decompose outputs per-fact `categories` (for SearXNG routing) and `seed_queries` (targeted search queries). Seed queries use synonyms/rephrasing but NOT entity names from training knowledge.
 - LangGraph ReAct research agent gathers evidence with dynamically loaded tools (38 max steps, ~12 tool calls per fact)
-- **Progress-aware research agent** — pre-model hook injects real-time progress (tool call count, unique URLs, queries used, engines tried, strategic suggestions) before each LLM call, so the agent knows what it's already searched and which engines it hasn't tried
+- **Progress-aware research agent** — pre-model hook injects real-time progress (tool call count, unique URLs, queries used, engines tried, seed tier/conflict coverage) before each LLM call
 - **Streaming evidence collection** — agent uses `astream()` instead of `ainvoke()`. If the agent hits its step limit or times out, we keep ALL evidence gathered so far instead of losing everything
 - **LegiScan legislative evidence** — after the research agent finishes, subclaims are programmatically searched against US legislation (bill details, roll call votes with individual member positions, bill text for poison pill detection). Env-var gated via `LEGISCAN_API_KEY`
 - **Source quality filtering** — domain blocklist (~70 domains) silently drops Reddit, Quora, social media, content farms from all search results
+- **"Gather Wide, Rank Tight" seed pipeline** — research gathers ~80-100 seed URLs → awaits MBFC ratings in parallel (20s timeout) → scores with `score_url()` → detects interested-party conflicts (affiliated media + publisher ownership) → applies CONFLICT_PENALTY (-15) → keeps top 30 ranked seeds → annotates with "Source tier:" and "Conflict:" labels. Agent sees curated, deterministic seed set.
 - **3-tier source hierarchy** in prompts — primary documents (charters, legislation, data) > independent reporting (Reuters, BBC) > interested-party statements (government websites, politician claims). Government sites explicitly classified as political actor communications, not neutral sources
 - **All pipeline steps use thinking=off** — llama.cpp lacks thinking token limits, so thinking mode generates excessive internal monologue (5000-9500 tokens) without improving output quality
 - **ROCm backend** for AMD GPU optimization (~38 tok/s sustained throughput)
@@ -124,11 +126,20 @@ Switched from `ainvoke()` to `astream()` with `stream_mode="updates"`. Messages 
 
 **Effort:** Small. Straightforward API integration + tool registration.
 
-### 1.3 — Source Credibility Scoring
+### 1.3 — Source Credibility Scoring (DONE)
 
-**Why:** Right now sources are filtered (junk domains blocked) but all remaining sources are weighted equally. A Reuters article and a lesser-known outlet both count as "web" evidence. The judge prompt says "reliable sources count more" but the model has to infer credibility from the URL alone.
+**Status:** ✅ Implemented
 
-**Status:** Partially done — domain blocklist filtering is implemented in `src/tools/source_filter.py`, wired into all search tools and the page fetcher. The RESEARCH_SYSTEM and JUDGE_SYSTEM prompts now include a **3-tier source hierarchy**:
+Full programmatic source quality scoring pipeline:
+
+1. **`score_url(url)`** in `evidence_ranker.py` — scores any URL using cached MBFC data + TLD heuristics (gov/edu/mil). Zero network calls. Max score: 55.
+2. **`tier_label(url)`** — human-readable "TIER 1 (government)", "TIER 2 (mostly factual)", etc.
+3. **Seed ranking** — `_rank_and_filter_seeds()` in `research.py` gathers ~80-100 seed URLs, awaits MBFC ratings in parallel (`await_ratings_parallel` with 20s timeout), scores and ranks them, keeps top 30. Seeds are annotated with "Source tier:" labels in the agent's conversation.
+4. **Conflict detection** — `url_matches_media()` and `check_publisher_ownership()` in `media_matching.py` detect when sources are affiliated with interested parties. Conflicted sources get a -15 penalty (soft, not hard block).
+5. **Judge-time capping** — `rank_and_select()` in `evidence_ranker.py` caps evidence by quality when the judge has too many items.
+6. **Judge annotations** — MBFC ratings, affiliated media warnings, publisher ownership warnings on each evidence item.
+
+Prompt-level 3-tier source hierarchy is unchanged:
 
 | Tier | Sources | Weight |
 |------|---------|--------|
@@ -136,26 +147,15 @@ Switched from `ainvoke()` to `astream()` with `stream_mode="updates"`. Messages 
 | **2 — Independent reporting** | Reuters, AP, BBC, NYT, Wikipedia, think tanks | Strong |
 | **3 — Interested-party statements** | Government websites, press releases, politician statements | Weakest — treated as claims, not facts |
 
-Government websites (whitehouse.gov, state.gov, etc.) are explicitly classified as Tier 3 — political actor communications, not neutral sources. The judge is instructed that when Tier 1 (e.g., the actual charter text) conflicts with Tier 3 (e.g., a White House denial), Tier 1 wins.
+### 1.4 — Claim-Specific Search Strategy (DONE)
 
-**What's still missing:** Domain → tier mapping at the **code level** (currently prompt-only, the LLM applies the hierarchy but there's no programmatic scoring). Adding `credibility_tier` to the Evidence model and a scored domain list (~200 domains) would let the judge see explicit tier tags per evidence item.
+**Status:** ✅ Implemented via per-fact categories + LLM-written seed queries
 
-### 1.4 — Claim-Specific Search Strategy
+Handled by the decompose step — each atomic fact gets:
+- **`categories`**: Evidence-need categories (QUANTITATIVE, LEGISLATIVE, SCIENTIFIC, CURRENT_EVENTS, GENERAL) that determine SearXNG routing (news, science, general).
+- **`seed_queries`**: LLM-written search queries tailored to the specific evidence each fact needs. The LLM rephrases using synonyms but does NOT inject entity names from training knowledge (Wikidata handles entity discovery).
 
-**Why:** Different claims need different research approaches. A claim about GDP needs official statistics. A claim about what someone said needs the original transcript. A claim about a scientific finding needs the paper.
-
-**What:** Add a pre-research step where the thinking model classifies the claim type and recommends search strategies:
-
-| Claim Type | Strategy |
-|-----------|----------|
-| Statistical | Search for official reports, government data |
-| Quote/attribution | Search for transcript, video, original speech |
-| Scientific | Search for paper, peer review, scientific consensus |
-| Historical | Wikipedia + academic sources |
-| Current event | News API with date filters |
-| Policy/legislation | Government websites, legislative records |
-
-**Effort:** Medium. New activity `classify_claim` before research, adds ~5s per claim.
+Categories + seed queries are passed through the workflow to `claim_category.py` which wraps them in backend routing specs. No separate classification activity needed — integrated into decompose.
 
 ---
 
@@ -269,18 +269,16 @@ Plus a comparative claims research strategy in `RESEARCH_SYSTEM`: teaches the ag
 
 **Effort:** Medium. New citation extraction logic + additional research steps.
 
-### 1.5.0f — Interested Party Evidence Weighting
+### 1.5.0f — Interested Party Evidence Weighting (DONE)
 
-**Why:** We extract `interested_parties` during decomposition but don't actually USE this data to weight evidence. A government's statement about its own actions should count less than independent wire service reporting.
+**Status:** ✅ Fully implemented
 
-**What:**
-- Pass `interested_parties` to judge activity (DONE)
-- In judge prompt, explicitly instruct: "Evidence from organizations in the `direct` or `institutional` interested parties list should be treated as CLAIMS, not FACTS. They may be true but require corroboration from independent sources."
-- Consider scoring: Tier 1 (independent) > Tier 2 (institutional but not direct party) > Tier 3 (direct interested party)
+The full `interested_parties` dict (all_parties, affiliated_media, wikidata_context) flows from decompose → workflow → research → judge:
 
-**Status:** Partially implemented — we extract and pass the data, but judge prompt needs strengthening.
-
-**Effort:** Small. Prompt update.
+1. **Seed ranking** (research phase): `_rank_and_filter_seeds()` detects conflicts via `url_matches_media()` (affiliated media) and `check_publisher_ownership()` (MBFC ownership field). Conflicted sources get CONFLICT_PENALTY (-15) in quality ranking.
+2. **Agent prompt**: Seeds annotated with "Conflict: affiliated: X" or "Conflict: owned by: X". Agent is instructed to deprioritize conflicted sources.
+3. **Judge annotations**: 4 conflict-of-interest checks per evidence item (affiliated media, publisher ownership, claim subject quotes, bias distribution). Evidence from conflicted sources explicitly flagged as requiring independent corroboration.
+4. **Judge prompt**: Publisher ownership treated as conflict of interest ("treat it like testimony from a business partner of the accused").
 
 ### 1.5.1 — Confidence-Weighted Synthesis
 
@@ -325,17 +323,19 @@ Plus a comparative claims research strategy in `RESEARCH_SYSTEM`: teaches the ag
 
 ~~The flat pipeline has no recursion or depth. Decompose produces all atomic facts in one pass. This item is no longer applicable.~~
 
-### 1.5.6 — Evidence Quality Signals for Judges
+### 1.5.6 — Evidence Quality Signals for Judges (DONE)
 
-**Why:** The judge currently receives raw evidence text and has to infer source reliability from URLs embedded in the content. Making source quality explicit would help the judge weigh evidence more accurately — especially when evidence from different sources conflicts.
+**Status:** ✅ Implemented
 
-**What:**
-- Tag each evidence item with metadata before passing to the judge: `source_domain`, `credibility_tier` (from 1.3), `freshness` (how recent)
-- Format evidence in the judge prompt with explicit quality signals: "[Tier 1 — Reuters, 2026-02-24] ..."
-- The judge can then explicitly reason about source quality in its verdict
-- Pairs well with 1.3 (Source Credibility Scoring) — the tiers become actionable in the judge prompt
+Evidence items are annotated with quality signals before the judge sees them:
 
-**Effort:** Small (once 1.3 is done). Mostly prompt formatting changes.
+- **MBFC ratings**: `format_source_tag()` in `source_ratings.py` adds factual reporting, bias, and credibility tags per evidence item
+- **Conflict flags**: `⚠️ AFFILIATED MEDIA` and `⚠️ PUBLISHER OWNED BY` annotations from `_annotate_evidence()` in `judge.py`
+- **Claim subject quotes**: `detect_claim_subject_quotes()` identifies when interested parties are quoted in evidence
+- **Bias distribution**: Summary of evidence bias balance (left-leaning vs right-leaning sources)
+- **Tier labels**: "Source tier: TIER 1 (government)" etc. in seed results seen by the research agent
+
+The judge prompt explicitly instructs how to weigh these signals (publisher ownership = conflict of interest, affiliated media = requires corroboration).
 
 ### ~~1.5.7 — Decomposition Quality Feedback Loop~~ (Partially Addressed)
 
@@ -468,13 +468,12 @@ For this to be legitimate, people need to trust the verdicts. Trust comes from t
 
 **Status:** ✅ Implemented
 
-Sub-claims are processed in parallel batches using `asyncio.gather`:
+Two-phase sliding window concurrency with `asyncio.gather` + `asyncio.Semaphore`:
 
-- The workflow decomposes claims into atomic facts in one flat pass (with thesis extraction)
-- Facts are processed in batches of MAX_CONCURRENT=2 (matched to GPU `--parallel 2`)
-- Each fact goes through research → judge sequentially within its slot
-- Two facts are researched/judged simultaneously per batch
-- A single `synthesize_verdict` activity combines all judgments using the speaker's thesis as primary rubric
+- Decompose produces atomic facts in one flat pass (with thesis extraction, categories, seed queries)
+- **Research phase**: All facts researched with sliding window (MAX_CONCURRENT=2). As one finishes, the next starts immediately — no batch waiting.
+- **Judge phase**: All facts judged with same sliding window (MAX_CONCURRENT=2). Runs AFTER all research completes to prevent slow judge calls (thinking=on) from starving faster research agents (thinking=off).
+- Single `synthesize_verdict` combines all judgments using the speaker's thesis as primary rubric
 - Temporal handles per-activity retries and timeouts (research: 180s, judge: 300s, synthesis: 60s)
 
 ### 4.3 — LangFuse Observability
@@ -571,14 +570,14 @@ What to build next, in order of impact:
 | **2** | Alembic migrations | Unblocks all future schema changes |
 | **3** | Checkability filter (1.5.0b) | Stop wasting cycles on uncheckable claims |
 | **4** | Confidence-weighted synthesis (1.5.1) | Low effort, immediately improves verdict quality |
-| **5** | Interested party weighting (1.5.0f) | We have the data, just need to use it |
-| **6** | Source credibility scoring (1.3) | Tiered weighting (basic filtering already done) |
+| ~~**5**~~ | ~~Interested party weighting (1.5.0f)~~ | ✅ Done |
+| ~~**6**~~ | ~~Source credibility scoring (1.3)~~ | ✅ Done |
 | ~~**7**~~ | ~~Claim normalization (1.5.0c)~~ | ✅ Done |
 | **8** | Adaptive research depth (1.5.2) | Cuts pipeline time in half for simple claims |
 | **9** | Calibration test suite (3.1) | Can't improve without measuring |
 | **10** | Domain-specific research (1.5.0d) | Right sources for right claims |
 | **11** | Citation chasing (1.5.0e) | Get primary sources, not secondary |
-| **12** | Evidence quality signals for judges (1.5.6) | Makes source tiers actionable in verdicts |
+| ~~**12**~~ | ~~Evidence quality signals for judges (1.5.6)~~ | ✅ Done |
 | **13** | RSS feed monitoring (2.1) | First step toward automated intake |
 | **14** | Claim extraction from articles (2.2) | Enables fully automated pipeline |
 | **15** | Sub-claim dedup & caching (1.5.4) | Reduces redundant work at scale |

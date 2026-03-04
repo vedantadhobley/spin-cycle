@@ -1,25 +1,24 @@
-"""Source quality filter for search results.
+"""Source quality filter and MBFC cache warming for search results.
 
-Filters out low-quality, user-generated, or non-citable sources from
-search results before the research agent ever sees them. This is a
-hard filter — if a domain is blocked, the result is silently dropped.
+Hard filter — if a domain is blocked, the result is silently dropped.
 
 Two-layer filtering:
 1. HARD BLOCKLIST — Non-news sources that should never be used: social media,
    forums, video platforms, content farms, AI aggregators, fact-check sites.
-   These aren't news sources at all.
 
 2. MBFC FACTUAL CHECK — For potential news sources, check the cached MBFC
    factual rating. Block sources with "mixed" or worse factual reporting.
    This is principled filtering based on accuracy, not political bias.
 
-The agent prompt also instructs the LLM to prefer authoritative sources,
-but this filter catches what the LLM might miss.
+Also provides populate_mbfc_cache() — background MBFC scraping for domains
+in search results. Fires and forgets so the cache is warm by the time the
+seed ranking phase (await_ratings_parallel) and judge run.
 """
 
 from urllib.parse import urlparse
 from typing import Optional
 
+from src.tools.source_ratings import extract_domain
 from src.utils.logging import log, get_logger
 
 MODULE = "tools"
@@ -188,20 +187,8 @@ def _get_cached_mbfc_rating(domain: str) -> Optional[str]:
             return rating.get("factual_reporting")
         return None
     except Exception as e:
-        logger.debug(f"MBFC cache check failed for {domain}: {e}")
+        logger.warning(f"MBFC cache check failed for {domain}: {e}")
         return None
-
-
-def _extract_domain(url: str) -> str:
-    """Extract clean domain from URL."""
-    try:
-        hostname = urlparse(url).hostname or ""
-        hostname = hostname.lower()
-        if hostname.startswith("www."):
-            hostname = hostname[4:]
-        return hostname
-    except Exception:
-        return ""
 
 
 def is_blocked(url: str) -> bool:
@@ -230,7 +217,7 @@ def is_blocked(url: str) -> bool:
                 return True
 
         # Not hard blocked — check MBFC factual rating
-        clean_domain = _extract_domain(url)
+        clean_domain = extract_domain(url)
         if clean_domain:
             factual = _get_cached_mbfc_rating(clean_domain)
             if factual and factual in BLOCKED_FACTUAL_RATINGS:
@@ -239,7 +226,10 @@ def is_blocked(url: str) -> bool:
                 return True
 
         return False
-    except Exception:
+    except Exception as e:
+        log.warning(logger, MODULE, "is_blocked_error",
+                    "is_blocked check failed, allowing domain through",
+                    url=url, error=str(e))
         return False
 
 
@@ -293,7 +283,7 @@ async def populate_mbfc_cache(results: list[dict], url_key: str = "url") -> None
         if not url:
             continue
 
-        domain = _extract_domain(url)
+        domain = extract_domain(url)
         if not domain:
             continue
 
@@ -338,8 +328,10 @@ async def populate_mbfc_cache(results: list[dict], url_key: str = "url") -> None
         async with sem:
             try:
                 await get_source_rating(domain)
-            except Exception:
-                pass  # Failures are fine — domain will be "unrated"
+            except Exception as e:
+                log.warning(logger, MODULE, "mbfc_populate_failed",
+                            "MBFC cache population failed for domain",
+                            domain=domain, error=str(e))
             finally:
                 _mbfc_pending.discard(domain)
 

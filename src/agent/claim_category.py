@@ -3,12 +3,11 @@
 The decompose LLM writes targeted seed queries per fact — human-quality
 search queries tailored to the specific evidence each fact needs. This
 module wraps those LLM-provided queries in backend routing specs based
-on the fact's categories, and adds a few mechanical base queries (the
-raw sub-claim, Wikipedia, counter-evidence).
+on the fact's categories, and adds mechanical base queries (raw sub-claim
+to SearXNG, Wikipedia search).
 
-Categories (also from the decompose LLM) determine:
-- Which SearXNG category to use (general, news, science)
-- Whether to also route through Serper/Brave when available
+Categories (also from the decompose LLM) determine which SearXNG category
+to use: CURRENT_EVENTS → news, SCIENTIFIC → science, everything else → general.
 
 The query specs are consumed by _run_seed_searches() in research.py,
 which dispatches them to backends with availability fallback.
@@ -26,7 +25,6 @@ _CATEGORY_TO_SEARXNG = {
 def generate_seed_queries(
     sub_claim: str,
     categories: list[str],
-    structure: str | None,
     seed_queries: list[str] | None = None,
 ) -> list[dict]:
     """Build seed query specs from LLM-provided queries + mechanical base queries.
@@ -60,7 +58,7 @@ def generate_seed_queries(
         "query": sub_claim[:120],
         "backends": ["searxng"],
         "searxng_category": searxng_cat,
-        "max_results": 15,
+        "max_results": 30,
         "label": "primary",
     })
 
@@ -83,7 +81,7 @@ def generate_seed_queries(
                 "query": query[:120],
                 "backends": ["searxng"],
                 "searxng_category": searxng_cat,
-                "max_results": 10,
+                "max_results": 20,
                 "label": f"seed_{i}",
             })
 

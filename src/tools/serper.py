@@ -21,10 +21,15 @@ logger = get_logger()
 SERPER_API_KEY = os.getenv("SERPER_API_KEY", "")
 SERPER_URL = "https://google.serper.dev/search"
 
+# Circuit breaker: once Serper returns a 400 (e.g. "Not enough credits"),
+# disable it for the rest of the process lifetime to avoid wasting agent
+# tool budget on a dead API.
+_disabled = False
+
 
 def is_available() -> bool:
-    """Check if the Serper API key is configured."""
-    return bool(SERPER_API_KEY)
+    """Check if the Serper API key is configured and not circuit-broken."""
+    return bool(SERPER_API_KEY) and not _disabled
 
 
 async def search_serper(query: str, max_results: int = 5) -> list[dict]:
@@ -32,7 +37,8 @@ async def search_serper(query: str, max_results: int = 5) -> list[dict]:
 
     Returns a list of {title, snippet, url} dicts.
     """
-    if not SERPER_API_KEY:
+    global _disabled
+    if not SERPER_API_KEY or _disabled:
         return []
 
     import time as _time
@@ -81,6 +87,18 @@ async def search_serper(query: str, max_results: int = 5) -> list[dict]:
                       latency_ms=int((_time.monotonic() - _t0) * 1000))
             return results
 
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 400:
+                _disabled = True
+                log.warning(logger, MODULE, "serper_disabled",
+                            "Serper returned 400, disabling for this process",
+                            error=str(e), query=query)
+            else:
+                log.warning(logger, MODULE, "serper_failed",
+                            "Serper search failed",
+                            error=str(e), error_type=type(e).__name__,
+                            query=query)
+            return []
         except Exception as e:
             log.warning(logger, MODULE, "serper_failed", "Serper search failed",
                         error=str(e), error_type=type(e).__name__,
@@ -103,6 +121,9 @@ def get_serper_tool():
         This searches the full Google index — the most comprehensive
         web search available.
         """
+        if _disabled:
+            return "Google/Serper is unavailable (out of credits). Use SearXNG or DuckDuckGo instead."
+
         log.debug(logger, MODULE, "serper_query", "Serper search",
                   query=query)
         try:
@@ -115,6 +136,8 @@ def get_serper_tool():
             return "Google search failed. Try another search tool."
 
         if not results:
+            if _disabled:
+                return "Google/Serper is unavailable (out of credits). Use SearXNG or DuckDuckGo instead."
             return "No Google results found."
 
         parts = []

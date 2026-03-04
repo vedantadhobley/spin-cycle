@@ -1,23 +1,25 @@
 """Temporal workflow for claim verification.
 
 Flat pipeline — no recursion:
-  1. Decompose the claim into atomic verifiable facts (one LLM call)
-  2. Research all facts (batched, thinking=off — fast)
-  3. Judge all facts (batched, thinking=on — slow but separate phase)
+  0. Create claim record (if not already in DB)
+  1. Decompose claim into atomic facts (2 LLM calls: normalize + extract)
+     — each fact gets categories, seed_queries from the LLM
+     — interested parties expanded via Wikidata (programmatic)
+  2. Research all facts (separate phase, thinking=off — fast)
+     — full interested_parties dict passed for conflict detection
+  3. Judge all facts (separate phase, thinking=on — slow)
   4. Synthesize all verdicts into a final result
-  5. Store the result
+  5. Store result + start next queued claim
 
 Research and judge are SEPARATE PHASES to prevent slow judge calls
 (thinking=on, generating thousands of tokens) from starving the
-faster research agents (thinking=off). This was causing research
-timeouts when judge and research overlapped.
+faster research agents (thinking=off).
 
-This follows the approach used by Google's SAFE (NeurIPS 2024) and FActScore:
+Follows Google's SAFE (NeurIPS 2024) and FActScore:
 extract all facts in one pass, verify each independently, aggregate.
 
-Concurrency is tuned for the local LLM server. With --parallel set on the unified
-Qwen3.5 model, MAX_CONCURRENT=2 gives each research agent a dedicated slot — no
-interleaving overhead.
+Concurrency is tuned for the local LLM server. MAX_CONCURRENT=2 gives
+each research agent a dedicated inference slot.
 """
 
 import asyncio
@@ -52,11 +54,12 @@ MAX_CONCURRENT = 2
 class VerifyClaimWorkflow:
     """Orchestrates the full claim verification pipeline.
 
-    Flat pipeline:
-    1. Decompose claim into atomic facts (1 LLM call, thinking=off)
-    2. For each fact: research with ReAct agent + judge (thinking=on)
-    3. Synthesize all sub-verdicts into final verdict (thinking=off)
-    4. Store result in database
+    Flat pipeline with separate research and judge phases:
+    1. Decompose claim into atomic facts (2 LLM calls + Wikidata expansion)
+    2. Research all facts (Phase 1: seed search + rank, Phase 2: ReAct agent)
+    3. Judge all facts (thinking=on, evidence annotation + LLM verdict)
+    4. Synthesize all sub-verdicts into final verdict
+    5. Store result in database + start next queued claim
     """
 
     @workflow.run
@@ -120,14 +123,9 @@ class VerifyClaimWorkflow:
                  structure=thesis_info.get("structure"),
                  interested_parties=interested_parties)
 
-        # Wikidata context for research agent prompt injection
-        wikidata_context = interested_parties.get("wikidata_context", "")
-
         # Step 2: Research all facts first (thinking=off, fast)
         # Then judge all facts (thinking=on, slow)
         # This prevents slow judge calls from starving faster research agents.
-
-        claim_structure = thesis_info.get("structure")
 
         async def _research(fact: dict) -> tuple[str, list]:
             """Research a single fact, return (fact_text, evidence)."""
@@ -141,9 +139,9 @@ class VerifyClaimWorkflow:
                      seed_query_count=len(fact_seed_queries))
             evidence = await workflow.execute_activity(
                 research_subclaim,
-                args=[fact_text, wikidata_context, claim_structure,
+                args=[fact_text, interested_parties,
                       fact_categories, fact_seed_queries],
-                start_to_close_timeout=timedelta(seconds=180),
+                start_to_close_timeout=timedelta(seconds=300),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
             return (fact_text, evidence)
@@ -241,7 +239,7 @@ class VerifyClaimWorkflow:
         else:
             result = await workflow.execute_activity(
                 synthesize_verdict,
-                args=[claim_text, claim_text, sub_results, True, thesis_info],
+                args=[claim_text, sub_results, thesis_info],
                 start_to_close_timeout=timedelta(seconds=60),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )

@@ -3,7 +3,7 @@
 This package provides a unified interface for all LLM calls:
 
   from src.llm import invoke_llm, get_llm
-  
+
   # Validated invocation (preferred)
   result = await invoke_llm(
       system_prompt=DECOMPOSE_SYSTEM,
@@ -11,7 +11,7 @@ This package provides a unified interface for all LLM calls:
       schema=DecomposeOutput,
       semantic_validator=validate_decompose,
   )
-  
+
   # Raw client access (for custom use cases like agents)
   llm = get_llm()
   response = await llm.ainvoke([...])
@@ -31,13 +31,12 @@ The invoker implements defense-in-depth:
 """
 
 # Client access
-from src.llm.client import get_llm, get_reasoning_llm
+from src.llm.client import get_llm
 
 # Unified invocation
 from src.llm.invoker import (
     invoke_llm,
     invoke_llm_raw,
-    create_fallback,
     LLMInvocationError,
     InvocationResult,
 )
@@ -45,7 +44,6 @@ from src.llm.invoker import (
 # Parsing utilities
 from src.llm.parser import (
     extract_json,
-    safe_extract_json,
     JSONExtractionError,
 )
 
@@ -55,33 +53,22 @@ from src.llm.validators import (
     validate_decompose,
     validate_judge,
     validate_synthesize,
-    normalize_validator,
-    decompose_validator,
-    judge_validator,
-    synthesize_validator,
 )
 
 __all__ = [
     # Client
     "get_llm",
-    "get_reasoning_llm",
     # Invoker
     "invoke_llm",
     "invoke_llm_raw",
-    "create_fallback",
     "LLMInvocationError",
     "InvocationResult",
     # Parser
     "extract_json",
-    "safe_extract_json",
     "JSONExtractionError",
     # Validators
     "validate_normalize",
     "validate_decompose",
     "validate_judge",
     "validate_synthesize",
-    "normalize_validator",
-    "decompose_validator",
-    "judge_validator",
-    "synthesize_validator",
 ]

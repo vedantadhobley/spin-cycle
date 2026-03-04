@@ -32,10 +32,11 @@ LangChain is the **toolbox**. It provides:
 LangChain does NOT handle orchestration, retries, scheduling, or state persistence. It's the building blocks.
 
 **Where it's used:**
-- `src/llm.py` — shared `ChatOpenAI` client configuration
+- `src/llm/` — LLM client package: `client.py` (ChatOpenAI config), `invoker.py` (invoke + parse + validate + retry), `parser.py` (JSON extraction), `validators.py` (semantic validators per step)
 - `src/tools/web_search.py` — `DuckDuckGoSearchResults` tool
 - `src/tools/wikipedia.py` — custom `@tool`-decorated async function
-- `src/activities/verify_activities.py` — all LLM calls via `invoke_llm()` with structured output schemas
+- `src/agent/decompose.py`, `src/agent/judge.py`, `src/agent/synthesize.py` — domain logic calling `invoke_llm()` with Pydantic schemas from `src/schemas/llm_outputs.py`
+- `src/activities/verify_activities.py` — thin Temporal wrappers delegating to agent modules
 
 ### LangGraph (agent framework)
 
@@ -84,17 +85,21 @@ The key insight: **LangGraph runs inside Temporal activities, not instead of the
 ```
 Temporal Workflow
 └── Activity: research_subclaim (retryable, timeout: 180s)
-    ├── LangGraph ReAct Agent (cycles between LLM and tools)
-    │   ├── pre_model_hook (injects progress: queries used, URLs found, engines tried)
-    │   ├── LLM call (via LangChain ChatOpenAI + progress awareness)
-    │   ├── SearXNG search (via LangChain tool, filtered by source_filter)
-    │   ├── DuckDuckGo search (via LangChain tool, filtered by source_filter)
-    │   ├── Serper / Brave search (via LangChain tool, filtered by source_filter)
-    │   ├── Wikipedia search (via LangChain tool)
-    │   ├── Page fetcher (URL → text extraction, blocked URLs rejected)
-    │   ├── LLM call (sees results + progress, decides next action)
-    │   └── ... (until LLM decides it has enough)
-    └── Programmatic enrichment
+    ├── Phase 1: Programmatic seed search (no LLM, ~3-20s)
+    │   ├── claim_category.py routes LLM-written queries + base queries
+    │   ├── Fire to SearXNG/Serper/Brave/Wikipedia concurrently (~80-100 URLs)
+    │   ├── await_ratings_parallel() — bounded MBFC lookups (20s timeout)
+    │   ├── score_url() — quality scoring with real MBFC data
+    │   ├── media_matching.py — conflict detection (affiliated media + ownership)
+    │   ├── CONFLICT_PENALTY (-15) for conflicted sources
+    │   └── Sort → keep top 30 → annotate with tier + conflict labels
+    ├── Phase 2: LangGraph ReAct Agent (seeds pre-loaded as prior searches)
+    │   ├── pre_model_hook (progress: tool calls, URLs, tier/conflict coverage)
+    │   ├── LLM call (sees seed results + progress, decides what to fetch/follow-up)
+    │   ├── SearXNG/Serper/Brave search (filtered by source_filter)
+    │   ├── Wikipedia search, Page fetcher (full article reads)
+    │   └── ... (8-12 tool calls, then agent stops)
+    └── Phase 3: Programmatic enrichment
         └── LegiScan (US legislation: bill details, roll call votes, bill text)
 ```
 
@@ -102,7 +107,7 @@ Temporal handles the **macro orchestration** (decompose → research → judge �
 
 **Where it's used:**
 - `src/workflows/verify.py` — `VerifyClaimWorkflow` definition
-- `src/activities/verify_activities.py` — all 6 Temporal activities
+- `src/activities/verify_activities.py` — all 7 Temporal activities
 - `src/worker.py` — worker entrypoint that registers workflows + activities
 - `docker-compose.dev.yml` — Temporal server + Temporal UI containers
 
@@ -325,17 +330,29 @@ The LLM evaluates evidence for a single sub-claim. This is NOT agentic — it's 
 
 The critical constraint: **"Do NOT use your own knowledge."** The LLM must reason only from the evidence provided. This is what makes verdicts trustworthy — they're grounded in real, citable sources.
 
-**Evidence quality ranking** (`src/utils/evidence_ranker.py`) runs when the research agent returns more than 20 evidence items. Instead of naively taking the first 20 (discovery order), evidence is scored 0-100 on quality signals and sorted before capping:
+**Evidence and source quality scoring** (`src/utils/evidence_ranker.py`) serves two purposes:
+
+1. **Seed ranking** (research phase): `score_url()` scores ~80-100 raw seed URLs by MBFC + TLD heuristics. `tier_label()` produces human-readable labels ("TIER 1 (government)", "TIER 2 (mostly factual)"). Used by `_rank_and_filter_seeds()` to select top 30 seeds.
+
+2. **Judge capping** (judge phase): `score_evidence()` scores full evidence items (URL quality + source type + content richness). `rank_and_select()` caps to 20 items with domain diversity.
+
+URL-only scoring (`score_url` — used for seeds, max 55):
 
 | Component | Range | Signals |
 |-----------|-------|---------|
-| Source type | 0-30 | Wikipedia=30, LegiScan=28, web=10 |
-| MBFC factual | 0-30 | very-high=30, high=24, mostly-factual=16, unrated=12 |
+| MBFC factual | 0-30 | very-high=30, high=24, mostly-factual=16, unrated=4, unrated-gov=20 |
 | Gov/institutional TLD | 0-15 | .gov/.mil=15, .edu=10 |
-| Content richness | 0-15 | >2000 chars=15, >800=10, >200=5 |
-| MBFC credibility | 0-10 | high=10, medium=5, unrated=4 |
+| MBFC credibility | 0-10 | high=10, medium=5, unrated=2 |
 
-A domain diversity cap (max 3 items per domain) ensures at least 7 unique source domains in the final 20. Political bias is deliberately NOT a scoring signal — factual quality matters, political lean doesn't. Unrated sources get generous defaults (12/30 factual) because they include .gov data portals, academic papers, and international sources outside MBFC coverage. Scoring uses `get_source_rating_sync()` — cache-only, zero network calls.
+Full evidence scoring (`score_evidence` — used for judge, adds source_type + content):
+
+| Component | Range | Signals |
+|-----------|-------|---------|
+| Source type | 0-30 | Wikipedia=30, LegiScan=28 (by URL), web=10 |
+| Content richness | 0-15 | >2000 chars=15, >800=10, >200=5 |
+| + URL quality | 0-55 | (from score_url above) |
+
+Domain diversity cap (max 3 items per domain) ensures at least 7 unique source domains. Political bias is deliberately NOT a scoring signal. Unrated sources get low defaults (4/30) — unrated government domains get 20/30. All scoring uses `get_source_rating_sync()` — cache-only, zero network calls.
 
 **Pre-judge enrichment** runs before the LLM sees any evidence, in two passes:
 
@@ -417,47 +434,54 @@ Takes the result dict and writes it to Postgres:
 - One `Verdict` row (overall verdict, confidence, reasoning)
 - Updates `Claim.status` to "verified"
 
-Evidence records with `source_type` not in the DB enum (`web`, `wikipedia`, `news_api`) are filtered out — the agent_summary doesn't get stored.
+Evidence records with `source_type` not in the DB enum (`web`, `wikipedia`, `news_api`) are filtered out.
 
 ### Workflow Orchestration (flat pipeline)
 
-The workflow processes claims in a flat pipeline — one decompose call (with thesis extraction), then research+judge in parallel batches, then thesis-aware synthesis.
+The workflow processes claims in a flat pipeline — decompose once, then research ALL facts (Phase 1), then judge ALL facts (Phase 2), then synthesize. Research and judge are separate phases to prevent slow judge calls (thinking=on) from starving faster research agents (thinking=off).
 
 ```
 VerifyClaimWorkflow
 ├── create_claim (if needed)
-├── decompose_claim (90s timeout) → {facts: [...], thesis_info: {thesis, normalized_claim, normalization_changes, structure, key_test}}
-│   ├── normalize (internal LLM call, max_retries=1, graceful fallback)
+├── decompose_claim (90s timeout)
+│   ├── normalize (LLM call, graceful fallback if fails)
+│   └── extract (LLM call) → {facts: [{text, categories, seed_queries}, ...], thesis_info: {...}}
+│       └── Wikidata expansion → interested_parties dict (all_parties, affiliated_media, ...)
 │
-├── For each batch of MAX_CONCURRENT=2 facts:
-│   └── asyncio.gather(
-│       ├── research_subclaim (180s timeout)
-│       │   ├── ReAct agent (streaming evidence collection)
-│       │   └── LegiScan enrichment (programmatic, after agent)
-│       │   → judge_subclaim (300s timeout)
-│       └── research_subclaim (180s timeout)
-│           ├── ReAct agent (streaming evidence collection)
-│           └── LegiScan enrichment (programmatic, after agent)
-│           → judge_subclaim (300s timeout)
-│       )
+├── RESEARCH PHASE — sliding window, MAX_CONCURRENT=2
+│   └── asyncio.gather(research_subclaim × N facts, semaphore=2)
+│       Each research_subclaim:
+│       ├── Phase 1: Seed search + MBFC await + rank/filter → top 30 seeds
+│       ├── Phase 2: ReAct agent (seeds pre-loaded, 8-12 tool calls)
+│       └── Phase 3: LegiScan enrichment
+│
+├── JUDGE PHASE — sliding window, MAX_CONCURRENT=2
+│   └── asyncio.gather(judge_subclaim × N facts, semaphore=2)
+│       Each judge_subclaim:
+│       ├── Rank + cap evidence (score_evidence + rank_and_select)
+│       ├── NER enrichment (SpaCy entities → Wikidata → augment parties)
+│       ├── Annotate evidence (MBFC, conflict flags, bias distribution)
+│       └── LLM verdict (6-level scale)
 │
 ├── IF 1 fact: skip synthesis, use judgment directly
-├── IF 2+ facts: synthesize_verdict (60s timeout, is_final=True, thesis_info passed)
+├── IF 2+ facts: synthesize_verdict (60s timeout, thesis_info passed)
 │
-└── store_result (30s timeout)
+├── store_result (30s timeout)
+└── start_next_queued_claim (30s timeout)
 ```
 
 Key properties:
-- **Flat, not recursive** — no tree, no recursion, no MAX_DEPTH. One decompose call produces flat facts + thesis.
-- **Direct fact extraction** — LLM outputs facts directly as strings, guided by linguistic patterns taxonomy. No template expansion.
-- **Thesis-aware** — the decompose step extracts the speaker's intent (thesis, structure, key_test) and passes it to synthesis. The synthesizer evaluates whether the argument survives the evidence, not just whether a majority of facts are true.
-- **No hard fact limit** — fact count is driven by claim complexity, not an arbitrary cap. Complex claims get full coverage.
-- **MAX_CONCURRENT = 2** — limits parallel research+judge pipelines to match GPU bandwidth. Two research agents run simultaneously.
+- **Flat, not recursive** — one decompose call produces flat facts + thesis. Follows SAFE/FActScore.
+- **Separate research + judge phases** — research all facts first (thinking=off, fast), then judge all (thinking=on, slow). Prevents mutual starvation.
+- **Sliding window concurrency** — semaphore-based, not batch-based. As one task finishes, the next starts immediately.
+- **MAX_FACTS = 10** — caps decomposition output to prevent runaway processing.
+- **MAX_CONCURRENT = 2** — matched to GPU `--parallel 2`. Each agent gets a dedicated inference slot.
+- **Thesis-aware** — decompose extracts speaker's intent (thesis, structure, key_test). Synthesis evaluates whether the argument survives the evidence.
 - **Streaming evidence** — agent uses `astream()` to collect evidence incrementally. Timeout or step limit preserves all evidence gathered so far.
-- **Programmatic enrichment** — after the agent finishes, LegiScan searches for matching legislation and appends structured evidence (bill details, roll call votes, bill text).
+- **Programmatic enrichment** — LegiScan, Wikidata, and MBFC all run deterministically (not as agent tools).
 - **Single synthesis** — `synthesize_verdict` combines all fact-level judgments into one final verdict. Single-fact claims skip synthesis entirely.
 - **Temporal retries per activity** — if one research call fails, only that activity retries (max 3 attempts).
-- **Date-aware** — all prompts include `Today's date: {current_date}` so the LLM references current data, not training cutoff data.
+- **Date-aware** — all prompts include `Today's date: {current_date}`.
 
 ### GPU Compute Constraints
 
@@ -744,25 +768,28 @@ The `LLAMA_URL` env var points to the LLM server's Tailscale FQDN (e.g. `http://
 
 ### Configuration
 
-All LLM calls go through `src/llm.py`:
+All LLM calls go through `src/llm/`:
+- `client.py` — `get_llm()` returns a configured ChatOpenAI instance
+- `invoker.py` — `invoke_llm()` handles structured output parsing, Pydantic schema validation, semantic validation, and retry logic
+- `parser.py` — JSON extraction from raw LLM output (handles markdown fences, partial JSON)
+- `validators.py` — semantic validators per step (normalize, decompose, synthesize)
 
 ```python
+# src/llm/client.py
 from langchain_openai import ChatOpenAI
 
-def get_llm(temperature=0.1):           # thinking=off — used for ALL pipeline steps
+def get_llm(temperature=0):            # temperature=0 for deterministic fact-checking
     return ChatOpenAI(
         base_url=f"{LLAMA_URL}/v1",     # :3101
         model="Qwen3.5-35B-A3B",
         temperature=temperature,
-        max_tokens=2048,
-        model_kwargs={"chat_template_kwargs": {"enable_thinking": False}},
+        max_tokens=8192,
+        api_key="not-needed",
+        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
     )
-
-# get_reasoning_llm() also exists (thinking=on) but is UNUSED — kept for experiments.
-# llama.cpp lacks max_thinking_tokens support, so thinking mode is impractical.
 ```
 
-`max_tokens` is set explicitly to prevent llama.cpp's default `n_predict` from cutting off LLM output mid-JSON.
+Pipeline steps (decompose, judge, synthesize) call `invoke_llm()` with Pydantic schemas from `src/schemas/llm_outputs.py`. The research agent calls `get_llm()` directly (LangGraph manages the conversation loop).
 
 ### Prompt Design
 
@@ -772,11 +799,12 @@ All prompts live in `src/prompts/verification.py` with extensive inline document
 - Example inputs and outputs
 - Design constraints (e.g., "Do NOT use your own knowledge")
 
-Four prompt pairs (system + user):
-1. `DECOMPOSE_SYSTEM` / `DECOMPOSE_USER` — flat fact extraction with linguistic patterns taxonomy
-2. `RESEARCH_SYSTEM` / `RESEARCH_USER` — guide the research agent (includes source quality rules)
-3. `JUDGE_SYSTEM` / `JUDGE_USER` — evaluate evidence for a sub-claim
-4. `SYNTHESIZE_SYSTEM` / `SYNTHESIZE_USER` — combine child verdicts (importance-weighted, adapts via `is_final` parameter)
+Five prompt pairs (system + user):
+1. `NORMALIZE_SYSTEM` / `NORMALIZE_USER` — 7 bias-neutralization transformations
+2. `DECOMPOSE_SYSTEM` / `DECOMPOSE_USER` — flat fact extraction with categories + seed queries, guided by linguistic patterns taxonomy
+3. `RESEARCH_SYSTEM` / `RESEARCH_USER` — guide the research agent (tier awareness, conflict flags, fetch budget)
+4. `JUDGE_SYSTEM` / `JUDGE_USER` — evaluate evidence for a sub-claim (conflict-of-interest guidance)
+5. `SYNTHESIZE_SYSTEM` / `SYNTHESIZE_USER` — combine child verdicts (importance-weighted, thesis-aware)
 
 Plus the linguistic patterns module (`src/prompts/linguistic_patterns.py`) which is appended to `DECOMPOSE_SYSTEM` at runtime.
 
@@ -1156,45 +1184,62 @@ spin-cycle/
 ├── src/
 │   ├── __init__.py
 │   ├── worker.py                   # Temporal worker entrypoint
-│   ├── llm.py                      # Shared LLM client (ChatOpenAI → LLM server)
+│   │
+│   ├── llm/                        # LLM client layer
+│   │   ├── client.py               # ChatOpenAI config (get_llm)
+│   │   ├── invoker.py              # invoke_llm() — parse + validate + retry
+│   │   ├── parser.py               # JSON extraction from raw LLM output
+│   │   └── validators.py           # Semantic validators (normalize, decompose, synthesize)
 │   │
 │   ├── utils/                      # Shared utilities
-│   │   └── logging.py              # Structured logging (JSON for Loki, pretty for dev)
+│   │   ├── logging.py              # Structured logging (JSON for Loki, pretty for dev)
+│   │   ├── ner.py                  # SpaCy NER — entity extraction (PERSON/ORG)
+│   │   ├── text_cleanup.py         # Grammar/spell check for LLM output (LanguageTool)
+│   │   └── evidence_ranker.py      # Source + evidence scoring, seed ranking, judge capping
 │   │
 │   ├── api/                        # FastAPI backend
 │   │   ├── app.py                  # App + lifespan (DB + Temporal init)
 │   │   └── routes/
 │   │       ├── health.py           # GET / and GET /health
-│   │       └── claims.py          # POST + GET claims
+│   │       └── claims.py           # POST + GET claims
 │   │
-│   ├── agent/                      # LangGraph agents
-│   │   └── research.py             # ReAct research agent (multi-source search)
+│   ├── agent/                      # Domain logic (called by Temporal activities)
+│   │   ├── decompose.py            # Normalize + extract facts + Wikidata expansion
+│   │   ├── research.py             # Seed search + rank + ReAct agent + evidence extraction
+│   │   ├── judge.py                # Evidence ranking, annotation, LLM verdict
+│   │   ├── synthesize.py           # Verdict synthesis
+│   │   └── claim_category.py       # Seed query routing (SearXNG category selection)
 │   │
-│   ├── tools/                      # LangChain tools for the agent
-│   │   ├── source_filter.py        # Domain blocklist — filters junk sources from all tools
+│   ├── tools/                      # Evidence gathering + data sources
+│   │   ├── source_ratings.py       # MBFC ratings (scrape + cache + parallel await)
+│   │   ├── source_filter.py        # Domain blocklist + MBFC cache population
+│   │   ├── media_matching.py       # URL↔media outlet matching, publisher ownership
+│   │   ├── wikidata.py             # Wikidata SPARQL — ownership chains, relationships
+│   │   ├── legiscan.py             # LegiScan API — US legislation, votes, bill text
 │   │   ├── searxng.py              # SearXNG meta-search (self-hosted)
 │   │   ├── serper.py               # Serper (Google Search API)
 │   │   ├── brave.py                # Brave Search API
 │   │   ├── web_search.py           # DuckDuckGo search wrapper
-│   │   ├── wikipedia.py            # Wikipedia API with @tool decorator
+│   │   ├── wikipedia.py            # Wikipedia API
 │   │   └── page_fetcher.py         # URL → text extraction (respects blocklist)
 │   │
+│   ├── schemas/                    # Data schemas
+│   │   ├── api.py                  # Pydantic API request/response models
+│   │   └── llm_outputs.py          # Pydantic schemas for LLM structured output
+│   │
 │   ├── prompts/                    # All LLM prompts with documentation
-│   │   ├── verification.py         # Decompose, Research, Judge, Synthesize
+│   │   ├── verification.py         # Normalize, Decompose, Research, Judge, Synthesize
 │   │   └── linguistic_patterns.py  # 15-category linguistic pattern taxonomy
 │   │
 │   ├── workflows/                  # Temporal workflow definitions
 │   │   └── verify.py               # VerifyClaimWorkflow
 │   │
 │   ├── activities/                 # Temporal activity implementations
-│   │   └── verify_activities.py    # All 6 verification activities
+│   │   └── verify_activities.py    # All 7 verification activities
 │   │
-│   ├── db/                         # Database layer
-│   │   ├── models.py               # SQLAlchemy models (Claim, SubClaim, Evidence, Verdict)
-│   │   └── session.py              # Async engine + session factory
-│   │
-│   └── data/                       # Data schemas
-│       └── schemas.py              # Pydantic request/response models
+│   └── db/                         # Database layer
+│       ├── models.py               # SQLAlchemy models (Claim, SubClaim, Evidence, Verdict)
+│       └── session.py              # Async engine + session factory
 │
 ├── scripts/
 │   └── init_db.py                  # Database initialisation script

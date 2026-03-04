@@ -1,21 +1,19 @@
-"""Evidence quality ranking for judge prompt capping.
+"""Evidence and source quality scoring.
 
-When the research agent returns more evidence than the judge can handle
-(MAX_JUDGE_EVIDENCE), we rank by quality signals rather than discovery order.
-This prevents high-quality sources (government data portals, highly-rated
-outlets) from being dropped just because they were discovered late.
+Two use cases:
+  1. Seed ranking (research phase): score_url() and tier_label() rank
+     ~80-100 seed URLs by quality so the agent sees curated top-30 seeds.
+  2. Judge prompt capping: score_evidence() and rank_and_select() rank
+     evidence by quality when the research agent returns more than
+     MAX_JUDGE_EVIDENCE items.
 
 Scoring uses only cached MBFC data + URL heuristics — zero network calls.
 Political bias is deliberately NOT a scoring signal.
 """
 
-import logging
 from collections import Counter
-from typing import Optional
 
 from src.tools.source_ratings import extract_domain, get_source_rating_sync
-
-logger = logging.getLogger(__name__)
 
 # --- Source type scoring (0-30) ---
 SOURCE_TYPE_SCORES = {
@@ -90,49 +88,88 @@ def _content_score(content: str) -> int:
     return 0
 
 
+def score_url(url: str) -> tuple[int, dict]:
+    """Score a URL on source quality signals (no content needed).
+
+    Uses MBFC cache + domain heuristics. Zero network calls.
+    Returns (score, breakdown) — same shape as score_evidence
+    but without content_richness and source_type components.
+
+    Max score: 55 (factual=30 + gov_tld=15 + credibility=10)
+    """
+    domain = extract_domain(url) if url else ""
+    rating = get_source_rating_sync(url) if url else None
+    breakdown = {}
+
+    # MBFC factual (0-30)
+    factual = rating.get("factual_reporting") if rating else None
+    if factual and factual in FACTUAL_SCORES:
+        breakdown["factual"] = FACTUAL_SCORES[factual]
+    elif _tld_score(domain) > 0:
+        breakdown["factual"] = FACTUAL_UNRATED_GOV
+    else:
+        breakdown["factual"] = FACTUAL_UNRATED
+
+    # Gov/edu TLD (0-15)
+    breakdown["gov_tld"] = _tld_score(domain)
+
+    # MBFC credibility (0-10)
+    credibility = rating.get("credibility") if rating else None
+    if credibility and credibility in CREDIBILITY_SCORES:
+        breakdown["credibility"] = CREDIBILITY_SCORES[credibility]
+    else:
+        breakdown["credibility"] = CREDIBILITY_UNRATED
+
+    return sum(breakdown.values()), breakdown
+
+
+def tier_label(url: str) -> str:
+    """Human-readable tier label for a URL. Used in seed annotations.
+
+    TIER 1: gov/edu/mil TLD, or MBFC very-high/high factual
+    TIER 2: MBFC mostly-factual
+    Empty string for unknown/low-quality sources.
+    """
+    _, breakdown = score_url(url)
+    tld = breakdown.get("gov_tld", 0)
+    factual = breakdown.get("factual", 0)
+
+    if tld >= GOV_TLD_SCORE:
+        return "TIER 1 (government)"
+    if tld >= EDU_TLD_SCORE:
+        return "TIER 1 (academic)"
+    if factual >= 30:  # very-high
+        return "TIER 1 (very high factual)"
+    if factual >= 24:  # high
+        return "TIER 2 (high factual)"
+    if factual >= 16:  # mostly-factual
+        return "TIER 2 (mostly factual)"
+    if factual >= FACTUAL_UNRATED_GOV:  # unrated but gov-like
+        return "TIER 1 (institutional)"
+    return ""
+
+
 def score_evidence(ev: dict) -> tuple[float, dict]:
     """Score a single evidence item on quality signals.
 
     Returns (score, breakdown) where breakdown maps component names
     to their individual scores for debugging.
     """
-    breakdown = {}
     url = ev.get("source_url", "") or ""
     source_type = ev.get("source_type", "web")
     content = ev.get("content", "") or ""
 
-    # 1. Source type (0-30)
+    # URL-based components (factual, gov_tld, credibility)
+    total, breakdown = score_url(url)
+
+    # Source type (0-30)
     if _is_legiscan_url(url):
         breakdown["source_type"] = 28
     else:
         breakdown["source_type"] = SOURCE_TYPE_SCORES.get(source_type, 10)
 
-    # 2. MBFC factual reporting (0-30)
-    domain = extract_domain(url) if url else ""
-    rating = get_source_rating_sync(url) if url else None
-
-    factual = rating.get("factual_reporting") if rating else None
-    if factual and factual in FACTUAL_SCORES:
-        breakdown["factual"] = FACTUAL_SCORES[factual]
-    elif _tld_score(domain) > 0:
-        # Government/edu domains are trustworthy even without MBFC rating
-        breakdown["factual"] = FACTUAL_UNRATED_GOV
-    else:
-        # Unknown domains get low default — MBFC-rated sources should win
-        breakdown["factual"] = FACTUAL_UNRATED
-
-    # 3. Government/institutional TLD (0-15)
-    breakdown["gov_tld"] = _tld_score(domain)
-
-    # 4. Content richness (0-15)
+    # Content richness (0-15)
     breakdown["content"] = _content_score(content)
-
-    # 5. MBFC credibility (0-10)
-    credibility = rating.get("credibility") if rating else None
-    if credibility and credibility in CREDIBILITY_SCORES:
-        breakdown["credibility"] = CREDIBILITY_SCORES[credibility]
-    else:
-        breakdown["credibility"] = CREDIBILITY_UNRATED
 
     total = sum(breakdown.values())
     return total, breakdown

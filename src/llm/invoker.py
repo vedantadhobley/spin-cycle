@@ -219,24 +219,3 @@ async def invoke_llm_raw(
     return raw, latency_ms
 
 
-def create_fallback(
-    schema: Type[T],
-    fallback_data: dict,
-    reason: str,
-) -> T:
-    """Create a fallback instance when LLM invocation fails.
-    
-    Use this to provide graceful degradation instead of crashing.
-    
-    Args:
-        schema: Pydantic model class
-        fallback_data: Data to populate the fallback instance
-        reason: Reason for using fallback (for logging)
-        
-    Returns:
-        Instance of the schema type
-    """
-    log.warning(logger, MODULE, "using_fallback",
-               f"Using fallback for {schema.__name__}",
-               reason=reason)
-    return schema.model_validate(fallback_data)

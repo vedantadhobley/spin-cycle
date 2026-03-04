@@ -1,0 +1,12 @@
+[
+  {
+    "text": "Texas's power grid failed during Winter Storm Uri because they refused to connect to the federal grid",
+    "tests": [
+      "decompose:causal",
+      "judge:oversimplification"
+    ],
+    "notes": "Causal claim with oversimplified mechanism. The grid DID fail, Texas IS independent from federal interconnections, but 'refused to connect' oversimplifies decades of regulatory history. Tests whether judge catches the nuance.",
+    "verdict": "mostly_false",
+    "confidence": 0.75
+  }
+]

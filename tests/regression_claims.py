@@ -434,17 +434,34 @@ def _print_results(results: list[dict]):
 # API interaction
 # ---------------------------------------------------------------------------
 
-async def submit_batch(api_url: str) -> list[dict]:
-    """Submit all claims via batch API. Returns list of {id, text, status}."""
-    import httpx
+def _http_post(url: str, body: dict) -> dict:
+    """POST JSON using stdlib urllib."""
+    import urllib.request
+    data = json.dumps(body).encode()
+    req = urllib.request.Request(
+        url, data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read())
+
+
+def _http_get(url: str) -> dict:
+    """GET JSON using stdlib urllib."""
+    import urllib.request
+    req = urllib.request.Request(url, method="GET")
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read())
+
+
+async def submit_batch(api_url: str, claims: list[dict]) -> list[dict]:
+    """Submit claims via batch API. Returns list of {id, text, status}."""
     payload = {
-        "claims": [{"text": c["text"]} for c in CLAIMS]
+        "claims": [{"text": c["text"]} for c in claims]
     }
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(f"{api_url}/claims/batch", json=payload)
-        resp.raise_for_status()
-        data = resp.json()
+    data = _http_post(f"{api_url}/claims/batch", payload)
 
     submitted = data["claims"]
     print(f"Submitted {len(submitted)} claims via batch API")
@@ -460,63 +477,66 @@ async def poll_until_done(
     timeout: int = 1800,  # 30 min
 ) -> list[dict]:
     """Poll claim statuses until all are verified or timeout."""
-    import httpx
     start = time.monotonic()
     results = {}
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        while time.monotonic() - start < timeout:
-            pending = [cid for cid in claim_ids if cid not in results]
-            if not pending:
-                break
+    while time.monotonic() - start < timeout:
+        pending = [cid for cid in claim_ids if cid not in results]
+        if not pending:
+            break
 
-            for cid in pending:
-                try:
-                    resp = await client.get(f"{api_url}/claims/{cid}")
-                    resp.raise_for_status()
-                    data = resp.json()
+        for cid in pending:
+            try:
+                data = _http_get(f"{api_url}/claims/{cid}")
 
-                    status = data.get("status")
-                    if status in ("verified", "flagged"):
-                        results[cid] = data
-                        elapsed = int(time.monotonic() - start)
-                        verdict = data.get("verdict", {})
-                        v = verdict.get("verdict", "???") if isinstance(verdict, dict) else "???"
-                        text = data.get("text", "")[:60]
-                        print(f"  [{elapsed:4d}s] {cid[:8]}... "
-                              f"{_verdict_color(v)} — {text}...")
-                except Exception as e:
-                    pass  # Retry on next poll
+                status = data.get("status")
+                if status in ("verified", "flagged"):
+                    results[cid] = data
+                    elapsed = int(time.monotonic() - start)
+                    v = data.get("verdict", "???")
+                    text = data.get("text", "")[:60]
+                    print(f"  [{elapsed:4d}s] {cid[:8]}... "
+                          f"{_verdict_color(v)} — {text}...")
+            except Exception:
+                pass  # Retry on next poll
 
-            remaining = len(claim_ids) - len(results)
-            if remaining > 0:
-                elapsed = int(time.monotonic() - start)
-                print(f"  [{elapsed:4d}s] Waiting... "
-                      f"{len(results)}/{len(claim_ids)} done")
-                await asyncio.sleep(poll_interval)
+        remaining = len(claim_ids) - len(results)
+        if remaining > 0:
+            elapsed = int(time.monotonic() - start)
+            print(f"  [{elapsed:4d}s] Waiting... "
+                  f"{len(results)}/{len(claim_ids)} done")
+            await asyncio.sleep(poll_interval)
 
     return results
 
 
-async def run_suite(api_url: str):
-    """Run the full regression suite."""
-    print(f"\nSpin Cycle Regression Suite — {len(CLAIMS)} claims")
+async def run_suite(api_url: str, count: int | None = None, timeout: int | None = None):
+    """Run the regression suite (optionally a subset)."""
+    claims = CLAIMS[:count] if count else CLAIMS
+    n = len(claims)
+
+    # Auto-calculate timeout: 35 min per claim, 40 min minimum
+    if timeout is None:
+        timeout = max(2400, n * 35 * 60)
+
+    print(f"\nSpin Cycle Regression Suite — {n} of {len(CLAIMS)} claims")
     print(f"API: {api_url}")
+    print(f"Timeout: {timeout}s ({timeout // 60} min)")
     print(f"Started: {time.strftime('%Y-%m-%d %H:%M:%S')}")
     print()
 
     # Submit
-    submitted = await submit_batch(api_url)
+    submitted = await submit_batch(api_url, claims)
     claim_ids = [s["id"] for s in submitted]
 
     # Map IDs back to our claim metadata
     id_to_claim = {}
-    for s, c in zip(submitted, CLAIMS):
+    for s, c in zip(submitted, claims):
         id_to_claim[s["id"]] = c
 
     # Poll
-    print(f"\nPolling for results (up to 30 min)...\n")
-    raw_results = await poll_until_done(api_url, claim_ids)
+    print(f"\nPolling for results (up to {timeout // 60} min)...\n")
+    raw_results = await poll_until_done(api_url, claim_ids, timeout=timeout)
 
     # Build results
     results = []
@@ -524,13 +544,8 @@ async def run_suite(api_url: str):
         claim_meta = id_to_claim[cid]
         if cid in raw_results:
             data = raw_results[cid]
-            verdict_data = data.get("verdict", {})
-            if isinstance(verdict_data, dict):
-                verdict = verdict_data.get("verdict", "???")
-                confidence = verdict_data.get("confidence", 0)
-            else:
-                verdict = "???"
-                confidence = 0
+            verdict = data.get("verdict", "???")
+            confidence = data.get("confidence", 0)
         else:
             verdict = "???"
             confidence = 0
@@ -568,6 +583,8 @@ async def run_suite(api_url: str):
 # ---------------------------------------------------------------------------
 
 def main():
+    global CLAIMS
+
     parser = argparse.ArgumentParser(
         description="Run Spin Cycle regression test suite"
     )
@@ -578,6 +595,18 @@ def main():
     parser.add_argument(
         "--list", action="store_true",
         help="Just list claims and what they test, don't submit",
+    )
+    parser.add_argument(
+        "--count", type=int, default=None,
+        help="Run only the first N claims (default: all)",
+    )
+    parser.add_argument(
+        "--timeout", type=int, default=None,
+        help="Poll timeout in seconds (default: count × 35 min)",
+    )
+    parser.add_argument(
+        "--smoke", action="store_true",
+        help="Smoke test: 1 claim (Texas power grid), 40 min timeout",
     )
     args = parser.parse_args()
 
@@ -593,7 +622,18 @@ def main():
             print()
         return
 
-    asyncio.run(run_suite(args.api_url))
+    count = args.count
+    timeout = args.timeout
+
+    if args.smoke:
+        # Texas power grid claim is index 3 — move it to front
+        # so --count 1 picks it up
+        smoke_claim = CLAIMS[3]  # Texas power grid
+        CLAIMS = [smoke_claim] + [c for i, c in enumerate(CLAIMS) if i != 3]
+        count = 1
+        timeout = timeout or 2400
+
+    asyncio.run(run_suite(args.api_url, count=count, timeout=timeout))
 
 
 if __name__ == "__main__":

@@ -93,13 +93,6 @@ async def lifespan(app: FastAPI):
         await conn.run_sync(Base.metadata.create_all)
     log.info(logger, MODULE, "db_ready", "Database tables ready")
 
-    # Seed MBFC source ratings from cache file
-    from src.tools.source_ratings import seed_source_ratings
-    seeded_count = seed_source_ratings()
-    if seeded_count > 0:
-        log.info(logger, MODULE, "mbfc_seeded", "Loaded MBFC source ratings",
-                 source_count=seeded_count)
-
     # Connect to Temporal
     temporal_client = await TemporalClient.connect(TEMPORAL_HOST)
     app.state.temporal = temporal_client

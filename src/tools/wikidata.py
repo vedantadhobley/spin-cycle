@@ -20,7 +20,6 @@ Caching:
 - Cache hit = instant, cache miss = API query + store
 """
 
-import re
 import httpx
 import logging
 from datetime import datetime, timezone, timedelta
@@ -88,6 +87,15 @@ PROPERTIES = {**CORPORATE_PROPERTIES, **FAMILY_PROPERTIES}
 _entity_cache: dict[str, Optional[str]] = {}
 
 
+def _strip_leading_article(name: str) -> str:
+    """Strip leading 'the', 'a', 'an' (case-insensitive)."""
+    stripped = name.lstrip()
+    for article in ("the ", "a ", "an "):
+        if stripped.lower().startswith(article):
+            return stripped[len(article):]
+    return stripped
+
+
 def _is_cache_stale(scraped_at: datetime) -> bool:
     """Check if cached data is older than TTL."""
     now = datetime.now(timezone.utc)
@@ -147,7 +155,7 @@ async def search_entity(name: str) -> Optional[str]:
     """
     # Strip leading articles — NER often extracts "the Cato Institute" but
     # Wikidata search needs "Cato Institute"
-    clean_name = re.sub(r"^(?:the|a|an)\s+", "", name, flags=re.IGNORECASE)
+    clean_name = _strip_leading_article(name)
 
     if clean_name in _entity_cache:
         return _entity_cache[clean_name]
@@ -327,7 +335,7 @@ async def get_ownership_chain(entity_name: str) -> dict:
         }
     """
     # Strip leading articles to match search_entity behavior
-    clean_name = re.sub(r"^(?:the|a|an)\s+", "", entity_name, flags=re.IGNORECASE)
+    clean_name = _strip_leading_article(entity_name)
 
     # Check cache with cleaned name first, then original
     cached = _get_cached_entity(clean_name) or _get_cached_entity(entity_name)
@@ -336,13 +344,11 @@ async def get_ownership_chain(entity_name: str) -> dict:
 
     qid = await search_entity(entity_name)
     if not qid:
-        result = {
+        return {
             "entity": entity_name,
             "qid": None,
             "error": f"Entity '{entity_name}' not found in Wikidata",
         }
-        _store_cached_entity(clean_name, None, result)
-        return result
 
     # Get direct relationships (corporate + family)
     relationships = await get_entity_relationships(qid)
