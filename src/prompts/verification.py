@@ -107,6 +107,9 @@ different verification approaches:
   7. EXTRACT UNDERLYING QUESTION: Loaded phrasing → factual question underneath
   8. ENTITY DISAMBIGUATION: Add minimum context for unique identification
   9. OPERATIONALIZE COMPARISONS: Define comparison groups by shared trait, not vague similarity
+  10. THE SEARCHABILITY TEST: Facts must be complete natural-language sentences
+  11. TREND/SERIES CLAIMS: "every year", "consistently" → ONE fact, not N enumerated comparisons
+  12. GROUP QUANTIFIER CLAIMS: "every G7 nation", "all NATO members" → ONE fact, not N member checks
 
 ### Special Claim Patterns (Rules in linguistic taxonomy)
 
@@ -292,6 +295,15 @@ counter-evidence to look for.
      Scientific consensus vs one outlier is not "both sides."
      Weight by quality AND quantity, not just existence of disagreement.
 
+  9. RETROACTIVE STATUS:
+     Sources describe people by their CURRENT title, not their title at the
+     time of the event. When a claim hinges on status at a specific time
+     ("while serving as", "during their tenure"), verify the person held
+     that role AT THE TIME, not just that they hold it now. Even when
+     multiple sources use a current title to describe a past event, that is
+     journalistic shorthand — NOT temporal evidence. The judge must
+     independently verify date overlap or mark the temporal condition
+     unverifiable.
 
 ## SYNTHESIZE_SYSTEM — Verdict Combination
 
@@ -554,10 +566,41 @@ this test. A researcher cannot search for "[Value X]" — it is not a fact.
 fact. Do not split it into isolated quantities that only have meaning relative \
 to each other. Keep the relationship in a single searchable statement.
 
+11. TREND AND SERIES CLAIMS — DO NOT ENUMERATE
+   When a claim asserts a trend over a time period ("increasing every year", \
+"has grown steadily since", "declined each quarter", "consistently ranked"), \
+keep it as ONE fact about the trend. Do NOT decompose into individual \
+time-step comparisons. The researcher finds the time-series data; the judge \
+evaluates whether the trend holds across the full period.
+   BAD:  "Budget in 2024 > 2023", "Budget in 2023 > 2022", ... (20 facts)
+   GOOD: "Agency X's budget increased in every year from 2005 to 2025" (1 fact)
+   BAD:  "Population in 2020 > 2019", "Population in 2019 > 2018", ...
+   GOOD: "Country Y's population grew every year over the past decade" (1 fact)
+   This applies to ALL series patterns: yearly, quarterly, monthly, per-event. \
+One trend = one fact. The researcher needs a dataset or summary, not 20 \
+separate lookups for adjacent data points.
+
+12. GROUP QUANTIFIER CLAIMS — DO NOT ENUMERATE MEMBERS
+   When a claim asserts something about ALL or MOST members of a defined \
+group ("every G20 nation", "all NATO members", "no Fortune 500 company"), \
+keep it as ONE fact about the group. Do NOT decompose into individual \
+member checks. The researcher finds a summary or dataset covering the \
+group; the judge evaluates whether the assertion holds across members.
+   BAD:  "Country A has UHC", "Country B has UHC", ... (7 facts for G7)
+   GOOD: "All G7 member nations except the United States have a universal \
+         healthcare system" (1 fact)
+   BAD:  "Company A pays tax", "Company B pays tax", ... (N facts)
+   GOOD: "All Fortune 500 companies paid federal income tax in 2024" (1 fact)
+   This applies when the group is NAMED and DEFINED (G7, EU, BRICS, etc.). \
+For unnamed ad-hoc groups ("both Google and Meta"), rule 1 applies — split \
+into individual entity facts.
+
 SIMPLICITY GUIDANCE:
 - Simple factual claims stay as single facts
 - Complex claims with multiple entities/actions get multiple facts
 - Comparisons and rankings are usually 1-2 facts, not algebraic decompositions
+- Trend claims ("every year", "consistently", "steadily") are 1 fact, not N
+- Group quantifiers ("every G7 nation", "all NATO members") are 1 fact, not N
 
 EVIDENCE-NEED CATEGORIES:
 Each fact gets one or more categories that describe what KIND of evidence \
@@ -732,6 +775,36 @@ Comparative/ranking claim (DO NOT use placeholders):
 }}
 Note: The comparison is kept as one searchable fact. The researcher finds the \
 numbers; the judge evaluates the comparison.
+
+Trend claim (DO NOT enumerate individual years):
+"Agency Z's budget has been increasing every year for the past two decades"
+→ {{
+  "thesis": "Agency Z has seen uninterrupted annual budget growth over 20 years",
+  "key_test": "Agency Z's budget must have increased in every single year over the past two decades with no year-over-year decrease",
+  "structure": "simple",
+  "interested_parties": {{"direct": ["Agency Z"], "institutional": [], "affiliated_media": [], "reasoning": "Agency Z is the subject of the budget claim"}},
+  "facts": [
+    {{"text": "Agency Z's budget increased in every single year over the past two decades compared to the previous year", "categories": ["QUANTITATIVE"], "seed_queries": ["Agency Z budget history by year", "Agency Z annual budget 2005 to 2025", "Agency Z budget cuts or decreases"]}}
+  ]
+}}
+Note: The trend is ONE fact. The researcher finds a budget time series or \
+summary table. The judge checks whether any year-over-year decrease occurred. \
+Do NOT split into "2024 > 2023", "2023 > 2022", etc.
+
+Group quantifier claim (DO NOT enumerate members):
+"Every country in Alliance X has adopted Policy Y"
+→ {{
+  "thesis": "All Alliance X members have adopted Policy Y",
+  "key_test": "Every Alliance X member nation must have adopted Policy Y; one non-adopter = false",
+  "structure": "simple",
+  "interested_parties": {{"direct": [], "institutional": ["Alliance X"], "affiliated_media": [], "reasoning": "Alliance X is the group whose members are being evaluated"}},
+  "facts": [
+    {{"text": "All Alliance X member nations have adopted Policy Y", "categories": ["GENERAL"], "seed_queries": ["Alliance X members Policy Y", "countries that adopted Policy Y", "Alliance X nations without Policy Y"]}}
+  ]
+}}
+Note: The group membership is ONE fact. The researcher finds a list of which \
+members adopted the policy; the judge checks all members against it. Do NOT \
+produce separate "Country A adopted Policy Y", "Country B adopted Policy Y" facts.
 
 Return a JSON object:
 {{
@@ -1291,6 +1364,31 @@ current claims about platform behavior. Technology and policies change rapidly.
    - Scientific consensus vs one outlier paper is not "both sides."
    - Weight by quality and quantity of evidence, not just existence of disagreement.
    - When evidence is lopsided, say so clearly.
+
+9. RETROACTIVE STATUS: Sources describe people/entities by their CURRENT \
+title or status, not their status at the time of the event being described.
+   - A source written today may call someone "the CEO" when describing events \
+that happened years before they became CEO. The title is retroactive shorthand, \
+NOT evidence they held that role at the time of the event.
+   - When a claim hinges on status AT A SPECIFIC TIME ("while serving as", \
+"during their tenure", "as director"), you MUST verify the person held that \
+role AT THE TIME OF THE EVENT, not just that they hold it now or held it later.
+   - Check the DATES: when did the event occur? When did the person start/end \
+the role? Do these overlap? If not, the claim's temporal condition is not met.
+   - Sources may say "the chairman did X" when describing something that happened \
+before the person became chairman. This is journalistic shorthand for \
+identification, not a statement about their role at the time.
+   - CRITICAL: When multiple sources describe an event using a person's current \
+role ("the CEO was fined", "the sitting director was charged"), this does NOT \
+establish they held that role when the event occurred. Journalistic convention \
+uses current titles for identification — it is NOT a temporal claim. You MUST \
+independently verify the timeline:
+     a) When exactly did the event occur? (specific date)
+     b) When did the person start and end the relevant role? (specific dates)
+     c) Do (a) and (b) overlap?
+   If you cannot find dates for both (a) and (b) in the evidence, the temporal \
+condition is UNVERIFIABLE — not true, not false. Do not infer temporal overlap \
+from a source's choice of title.
 
 When you detect any of these patterns, note them in your reasoning. The \
 verdict should reflect accuracy; the reasoning should explain context.
