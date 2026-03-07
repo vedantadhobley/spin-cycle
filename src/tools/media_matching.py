@@ -1,19 +1,28 @@
-"""Media outlet domain matching and publisher ownership checking.
+"""Media outlet matching, publisher ownership checking, and MBFC owner extraction.
 
 Used by seed ranking (research phase) and judge annotation to detect
 when evidence comes from media outlets affiliated with interested parties.
 
-Two checks:
-1. URL matching (url_matches_media): Does the source URL match a known
-   media outlet name? Handles domain aliases (e.g., "Washington Post" →
+Three functions:
+1. extract_owners_from_mbfc: Extract PERSON/ORG names from MBFC ownership
+   strings via SpaCy NER. Used by research phase to Wikidata-expand
+   media owners and discover their networks before seed ranking.
+
+2. url_matches_media: Does the source URL match a known media outlet
+   name? Handles domain aliases (e.g., "Washington Post" →
    washingtonpost.com, wapo).
 
-2. Publisher ownership (check_publisher_ownership): Does the MBFC
-   'ownership' field mention any interested party? Catches indirect
-   ownership ties (e.g., Rupert Murdoch → Wall Street Journal).
+3. check_publisher_ownership: Does the MBFC 'ownership' field mention
+   any interested party? Catches indirect ownership ties
+   (e.g., Rupert Murdoch → Wall Street Journal).
 """
 
 from src.tools.source_ratings import get_source_rating_sync
+from src.utils.logging import log, get_logger
+from src.utils.ner import extract_entity_names
+
+MODULE = "media_matching"
+logger = get_logger()
 
 # Common media outlet domain aliases for better URL matching.
 # Maps common name variations to their likely domain patterns.
@@ -32,6 +41,45 @@ MEDIA_DOMAIN_ALIASES = {
     "financial times": ["ft.com"],
     "daily beast": ["thedailybeast", "dailybeast"],
 }
+
+
+# Generic ownership strings that won't yield useful PERSON/ORG entities.
+_GENERIC_OWNERSHIP = {
+    "state-funded", "state funded", "non-profit", "nonprofit",
+    "government", "government-funded", "government funded",
+    "publicly traded", "publicly-traded", "public", "private",
+    "employee-owned", "employee owned", "independent",
+    "cooperative", "co-operative", "trust", "foundation",
+    "university", "academic", "unknown", "n/a", "",
+}
+
+
+def extract_owners_from_mbfc(ownership: str | None) -> list[str]:
+    """Extract PERSON/ORG names from an MBFC free-text ownership string.
+
+    MBFC ownership fields contain strings like:
+        "Owned by Rupert Murdoch's News Corporation"
+        "Jeff Bezos (since 2013)"
+        "State-Funded"  → no useful entities
+
+    Uses SpaCy NER to extract real person/org names. Skips generic
+    strings that describe funding models rather than specific owners.
+
+    Returns:
+        List of owner names suitable for Wikidata expansion.
+    """
+    if not ownership:
+        return []
+
+    # Skip generic ownership descriptors
+    if ownership.strip().lower() in _GENERIC_OWNERSHIP:
+        return []
+
+    owners = extract_entity_names(ownership, labels={"PERSON", "ORG"})
+    log.info(logger, MODULE, "owners_extracted",
+             "Extracted owner entities from MBFC ownership string",
+             ownership=ownership, owner_count=len(owners), owners=owners)
+    return owners
 
 
 def url_matches_media(url_lower: str, media_outlet: str) -> bool:
@@ -54,6 +102,9 @@ def url_matches_media(url_lower: str, media_outlet: str) -> bool:
         if name in media_lower or media_lower in name:
             for alias in aliases:
                 if alias in url_lower:
+                    log.info(logger, MODULE, "url_media_match",
+                             "URL matches affiliated media via alias",
+                             url=url_lower, media=media_outlet, alias=alias)
                     return True
 
     # Fall back to generic normalization: strip spaces, strip leading "the"
@@ -62,11 +113,17 @@ def url_matches_media(url_lower: str, media_outlet: str) -> bool:
         stripped = stripped[4:]
     normalized = stripped.replace(" ", "")
     if normalized and len(normalized) > 3 and normalized in url_lower:
+        log.info(logger, MODULE, "url_media_match",
+                 "URL matches affiliated media via normalized name",
+                 url=url_lower, media=media_outlet)
         return True
 
     # Also try hyphenated: "washington-post"
     hyphenated = media_lower.replace(" ", "-")
     if hyphenated in url_lower:
+        log.info(logger, MODULE, "url_media_match",
+                 "URL matches affiliated media via hyphenated name",
+                 url=url_lower, media=media_outlet)
         return True
 
     return False
@@ -95,6 +152,10 @@ def check_publisher_ownership(url: str, all_parties: list[str]) -> str | None:
         if len(party_lower) < 4:
             continue  # Skip very short names to avoid false matches
         if party_lower in ownership_lower:
+            log.info(logger, MODULE, "publisher_ownership_match",
+                     "Publisher ownership matches interested party",
+                     url=url, party=party,
+                     ownership=rating["ownership"])
             return party
 
     return None

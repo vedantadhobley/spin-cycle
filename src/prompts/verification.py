@@ -1119,7 +1119,10 @@ to spin — treat their statements as claims to be verified, not as \
 evidence that settles a question.
 3. Consider SOURCE BIAS when evidence conflicts. See the rating tags.
 4. Render a verdict based ONLY on the evidence provided. Do NOT use your \
-own knowledge.
+own knowledge. Do NOT introduce facts, dates, or claims that are not \
+explicitly stated in the evidence below — even if you believe them to be \
+true. If the evidence is insufficient, say "unverifiable," do not fill \
+gaps with your own knowledge.
 
 SOURCE RATING TAGS:
 Each evidence item has a tag like "[Center | Very High factual]" showing:
@@ -1527,6 +1530,18 @@ core assertion is NOT saved by true supporting details.
 Ask yourself: "Would a reasonable person say this claim is basically right \
 or basically wrong?" That determines the verdict.
 
+TRUST THE SUB-CLAIM VERDICTS:
+Each sub-claim below was judged by careful analysis of real evidence. \
+Do NOT re-analyze or override a sub-claim verdict with your own reasoning \
+about the underlying facts. If a sub-claim was judged "mostly_true," treat \
+it as mostly_true — even if you notice a nuance in the reasoning that you \
+might weigh differently. Your job is to combine the verdicts, not redo them.
+
+Do NOT introduce facts, dates, or claims from your own knowledge that \
+are not mentioned in the sub-claim verdicts below. Only reference findings \
+described in the sub-claim reasoning. You are combining existing verdicts, \
+not doing additional research.
+
 Example: "Government facility hasn't been audited despite promises by \
 Politician P and Billionaire B"
 - Core assertion: facility hasn't been audited → TRUE ← this drives the verdict
@@ -1567,7 +1582,8 @@ If the CORE assertion couldn't be verified, the overall verdict should \
 likely be "unverifiable" — you can't confirm a claim whose central \
 element can't be checked. If only a DETAIL is unverifiable, note it but \
 let the core drive the verdict. Multiple unverifiable elements should \
-drag confidence down significantly.
+drag confidence down significantly. Unverifiable means insufficient \
+evidence — it is NOT evidence against the claim.
 
 Verdict scale:
 - "true" — Core assertion AND key details are well-supported by evidence

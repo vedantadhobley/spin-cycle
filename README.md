@@ -38,10 +38,8 @@ Because we're putting the spin through the wringer.
               │  └─────────┘  └──────────┘  └────────────────┘  │
               │                      │                            │
               │               ┌──────▼──────┐                    │
-              │               │ SearXNG     │                    │
-              │               │ Serper      │                    │
               │               │ DuckDuckGo  │                    │
-              │               │ Brave       │                    │
+              │               │ SearXNG     │                    │
               │               │ Wikipedia   │                    │
               │               │ Page Fetch  │                    │
               │               └─────────────┘                    │
@@ -65,7 +63,7 @@ Because we're putting the spin through the wringer.
 | LLM | Qwen3.5-35B-A3B (via llama.cpp/ROCm) | Single instance, ~38 tok/s sustained throughput |
 | NER | [SpaCy](https://spacy.io/) (en_core_web_sm) | Entity extraction from claims and evidence (CPU, ~ms) |
 | Knowledge graph | [Wikidata](https://www.wikidata.org/) SPARQL | Ownership chains, media holdings, family relationships |
-| Source ratings | [MBFC](https://mediabiasfactcheck.com/) | Bias and factual reporting ratings (scraped + cached) |
+| Source ratings | [MBFC](https://mediabiasfactcheck.com/) | Bias and factual reporting ratings (REST API index bootstrap + cached) |
 | Legislation | [LegiScan](https://legiscan.com/) API | US bill search, roll call votes, bill text (Civic API tier) |
 | Grammar | [LanguageTool](https://languagetool.org/) (Java, local) | Grammar correction on all LLM outputs (catches quantization artifacts) |
 | Database | PostgreSQL 16 + SQLAlchemy 2.0 (async) | Claims, sub-claims, evidence, verdicts, source ratings |
@@ -101,14 +99,15 @@ decompose_claim       Normalize → Decompose (2 LLM calls, 1 activity)
                       Wikidata expands parties → ownership, media, family
     ↓
 RESEARCH PHASE (all facts, 2 concurrent):
-    research_subclaim   Phase 1: Programmatic seed search (~80-100 URLs)
-       ↓                Phase 1b: Await MBFC ratings → score → conflict detect
-       ↓                  → rank → keep top 30 (annotated with tier + conflicts)
+    research_subclaim   Phase 1a: Programmatic seed search (DuckDuckGo + SearXNG, ~30-50 URLs)
+       ↓                Phase 1b: MBFC await → MBFC ownership→Wikidata enrichment
+       ↓                  → score → conflict detect → rank → top 30 (tier + conflicts)
        ↓                Phase 2: LangGraph ReAct agent (fetches, follow-up)
-       ↓                Phase 3: LegiScan enrichment (bills, votes, bill text)
-    ↓
-JUDGE PHASE (all facts, 2 concurrent):
-    judge_subclaim      Pre-judge: SpaCy NER + Wikidata enrichment
+       ↓                Phase 3: LegiScan + evidence NER→Wikidata enrichment
+       ↓                Returns: evidence + enriched interested parties
+    ↓                   (enriched parties merged across sub-claims)
+JUDGE PHASE (all facts, 2 concurrent, receives merged parties):
+    judge_subclaim      Pre-judge: lightweight NER cleanup (parallel Wikidata)
        ↓                Evidence ranking + MBFC annotation
        ↓                4 conflict-of-interest checks per evidence item
        ↓                LLM evaluates evidence (6-level verdict scale)
@@ -297,7 +296,7 @@ docker logs -f spin-cycle-dev-worker
 | `SERPER_API_KEY` | (empty) | Serper key for Google search evidence |
 | `BRAVE_API_KEY` | (empty) | Brave Search API key |
 | `LEGISCAN_API_KEY` | (empty) | LegiScan Civic API key (US legislation, votes, bill text) |
-| `SEARXNG_URL` | `http://searxng:8080` | SearXNG meta-search endpoint (self-hosted) |
+| `SEARXNG_URL` | `http://searxng:8080` | SearXNG meta-search endpoint (secondary search, self-hosted) |
 
 ## Port Allocation
 
@@ -310,16 +309,18 @@ docker logs -f spin-cycle-dev-worker
 
 ## Database
 
-Four tables in PostgreSQL, all with UUID primary keys:
+Six tables in PostgreSQL, all with UUID primary keys (except cache tables which use string PKs):
 
 | Table | Purpose | Key Columns |
 |-------|---------|-------------|
-| `claims` | Top-level claims | text, source_url, status (pending→verified), timestamps |
+| `claims` | Top-level claims | text, source_url, status (queued→pending→verified), timestamps |
 | `sub_claims` | Decomposed sub-claim tree | text, parent_id (self-ref FK), is_leaf, verdict, confidence, reasoning |
 | `evidence` | Research results per sub-claim | source_type (web/wikipedia/news_api), content, URL |
 | `verdicts` | Overall claim verdict | verdict, confidence, reasoning, reasoning_chain (JSONB) |
+| `source_ratings` | Cached MBFC ratings | domain (PK), bias, factual_reporting, ownership, country |
+| `wikidata_cache` | Cached Wikidata entity data | entity_name (PK), qid, relationships (JSONB), 7-day TTL |
 
-Relationships: `claims` → has many `sub_claims` → has many `evidence`. `claims` → has one `verdict`.
+Relationships: `claims` → has many `sub_claims` → has many `evidence`. `claims` → has one `verdict`. Cache tables are standalone (no FK relationships).
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for full schema documentation with column types and constraints.
 
@@ -345,6 +346,7 @@ spin-cycle/
 │   ├── utils/                      # Shared utilities
 │   │   ├── logging.py              # Structured logging (JSON for Loki, pretty for dev)
 │   │   ├── ner.py                  # SpaCy NER — entity extraction (PERSON/ORG)
+│   │   ├── quote_detection.py      # Detect claim subject quotes in evidence text
 │   │   ├── text_cleanup.py         # Grammar/spell check for LLM output
 │   │   └── evidence_ranker.py      # Source + evidence quality scoring, seed ranking, judge capping
 │   │
@@ -359,18 +361,19 @@ spin-cycle/
 │   │   ├── research.py             # Seed search + rank + ReAct agent + evidence extraction
 │   │   ├── judge.py                # Evidence ranking, annotation, LLM verdict
 │   │   ├── synthesize.py           # Verdict synthesis
-│   │   └── claim_category.py       # Seed query routing (SearXNG category selection)
+│   │   └── claim_category.py       # Seed query routing (backend selection)
 │   │
 │   ├── tools/                      # Evidence gathering + data sources
 │   │   ├── source_ratings.py       # MBFC ratings (scrape + cache + parallel await)
 │   │   ├── source_filter.py        # Domain blocklist + MBFC cache population
-│   │   ├── media_matching.py       # URL↔media outlet matching, publisher ownership detection
+│   │   ├── mbfc_index.py           # MBFC REST API index bootstrap (~10,300 sources)
+│   │   ├── media_matching.py       # URL↔media matching, publisher ownership, MBFC owner extraction
 │   │   ├── wikidata.py             # Wikidata SPARQL — ownership chains, relationships
 │   │   ├── legiscan.py             # LegiScan API — US legislation, votes, bill text
-│   │   ├── searxng.py              # SearXNG meta-search (self-hosted)
+│   │   ├── searxng.py              # SearXNG meta-search (secondary)
 │   │   ├── serper.py               # Serper (Google Search API)
 │   │   ├── brave.py                # Brave Search API
-│   │   ├── web_search.py           # DuckDuckGo
+│   │   ├── web_search.py           # DuckDuckGo (primary search backend)
 │   │   ├── wikipedia.py            # Wikipedia API
 │   │   └── page_fetcher.py         # URL → text extraction + SpaCy entity metadata
 │   │
@@ -380,7 +383,8 @@ spin-cycle/
 │   │
 │   ├── schemas/                    # Data schemas
 │   │   ├── api.py                  # Pydantic schemas for API
-│   │   └── llm_outputs.py          # Pydantic schemas for LLM structured output
+│   │   ├── llm_outputs.py          # Pydantic schemas for LLM structured output
+│   │   └── interested_parties.py   # InterestedPartiesDict TypedDict (pipeline contract)
 │   │
 │   ├── workflows/
 │   │   └── verify.py               # VerifyClaimWorkflow
@@ -394,7 +398,10 @@ spin-cycle/
 │
 └── tests/
     ├── test_health.py
-    └── test_schemas.py
+    ├── test_schemas.py
+    ├── test_evidence_ranker.py
+    ├── regression_claims.py         # Known-answer regression suite
+    └── stress_claims.py             # Load/stress testing
 ```
 
 ## What's Next

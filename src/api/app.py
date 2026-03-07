@@ -93,6 +93,13 @@ async def lifespan(app: FastAPI):
         await conn.run_sync(Base.metadata.create_all)
     log.info(logger, MODULE, "db_ready", "Database tables ready")
 
+    # Bootstrap MBFC index from REST API if needed
+    from src.tools.mbfc_index import bootstrap_mbfc_index, is_bootstrap_needed
+    if is_bootstrap_needed():
+        log.info(logger, MODULE, "mbfc_bootstrap_start", "Bootstrapping MBFC index from API")
+        count = await bootstrap_mbfc_index()
+        log.info(logger, MODULE, "mbfc_bootstrap_done", "MBFC index ready", record_count=count)
+
     # Connect to Temporal
     temporal_client = await TemporalClient.connect(TEMPORAL_HOST)
     app.state.temporal = temporal_client

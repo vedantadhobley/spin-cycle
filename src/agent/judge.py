@@ -293,14 +293,20 @@ async def _enrich_parties_from_evidence(
     all_parties: list[str],
     affiliated_media: list[str],
 ) -> tuple[list[str], list[str]]:
-    """Two-pass Wikidata enrichment from evidence content.
+    """Lightweight Wikidata enrichment from evidence content (judge-time cleanup).
 
-    Pass 1: SpaCy NER extracts people/orgs from evidence text → Wikidata expand.
-    Pass 2: Source publisher domains → Wikidata expand ownership chains.
+    SpaCy NER extracts people/orgs from evidence text → Wikidata expand in parallel.
+    Only adds entities whose Wikidata graph overlaps with existing parties.
 
-    Both check for connections to existing interested parties.
+    Note: The heavy lifting (MBFC ownership → Wikidata, evidence NER → Wikidata)
+    now happens in the research phase. This is a lightweight cleanup pass that
+    catches any entities the research phase missed (e.g., from page fetches
+    that weren't in the seed evidence).
+
     Returns new lists — does NOT mutate the input lists.
     """
+    import asyncio
+
     enriched_parties = list(all_parties)
     enriched_media = list(affiliated_media)
 
@@ -354,41 +360,10 @@ async def _enrich_parties_from_evidence(
                   "SpaCy NER extracted new entities from evidence",
                   new_entities=new_entities[:15])
 
-        for entity in new_entities[:8]:  # Cap to avoid too many lookups
-            await _enrich_entity(entity)
-
-    # Pass 2b: Wikidata-expand source publishers
-    publisher_domains = set()
-    for ev in source_evidence:
-        url = ev.get("source_url") or ""
-        if not url or url == "N/A":
-            continue
-        try:
-            hostname = urlparse(url).hostname or ""
-            hostname = hostname.lower()
-            if hostname.startswith("www."):
-                hostname = hostname[4:]
-            if hostname:
-                publisher_domains.add(hostname)
-        except Exception:
-            continue
-
-    if publisher_domains:
-        # Refresh after NER pass may have added entities
-        all_parties_lower = {p.lower() for p in enriched_parties}
-
-        for domain in list(publisher_domains)[:6]:
-            if domain in all_parties_lower:
-                continue
-
-            # Normalize domain to a searchable publisher name
-            name = domain.split(".")[0]
-            if len(name) < 3:
-                continue
-
-            publisher_name = name.title()
-            if publisher_name.lower() not in all_parties_lower:
-                await _enrich_entity(publisher_name)
+        # Parallel Wikidata expansion (was sequential before)
+        await asyncio.gather(
+            *[_enrich_entity(entity) for entity in new_entities[:8]]
+        )
 
     return enriched_parties, enriched_media
 
@@ -412,6 +387,10 @@ def _annotate_evidence(
     evidence_parts = []
     bias_distribution = {"left": 0, "center": 0, "right": 0, "unrated": 0}
     interested_party_count = 0
+    affiliated_media_count = 0
+    party_quotes_count = 0
+    publisher_ownership_count = 0
+    sub_source_count = 0
 
     for i, ev in enumerate(source_evidence, 1):
         source = ev.get("source_type", "unknown")
@@ -435,6 +414,7 @@ def _annotate_evidence(
                         f"which has ownership ties to claim subject."
                     )
                     interested_party_count += 1
+                    affiliated_media_count += 1
                     log.debug(logger, MODULE, "affiliated_media_detected",
                               "Source URL matches affiliated media",
                               media=media_outlet, url=url)
@@ -445,6 +425,7 @@ def _annotate_evidence(
             quoted_entities = detect_claim_subject_quotes(content, all_parties)
             if quoted_entities:
                 interested_party_count += 1
+                party_quotes_count += 1
                 entities_str = ", ".join(quoted_entities)
                 interest_warnings.append(
                     f"⚠️ QUOTES INTERESTED PARTY: {entities_str} — "
@@ -459,6 +440,7 @@ def _annotate_evidence(
             owner_match = check_publisher_ownership(url, all_parties)
             if owner_match:
                 interested_party_count += 1
+                publisher_ownership_count += 1
                 interest_warnings.append(
                     f"⚠️ PUBLISHER OWNED BY INTERESTED PARTY: "
                     f"Source publisher is owned by {owner_match}."
@@ -502,6 +484,7 @@ def _annotate_evidence(
                         if not low_factual and not extreme_bias:
                             continue
 
+                        sub_source_count += 1
                         interest_warnings.append(
                             f"⚠️ SUB-SOURCE: References {org_name} "
                             f"[{sub_bias} | {sub_factual} factual reporting]"
@@ -541,12 +524,30 @@ def _annotate_evidence(
 
     evidence_text = "\n\n".join(evidence_parts)
 
-    # Add bias distribution warning if evidence is skewed
+    # Determine bias skew for logging
     total_rated = (
         bias_distribution["left"]
         + bias_distribution["center"]
         + bias_distribution["right"]
     )
+    bias_skew = "none"
+    if total_rated >= 3:
+        if bias_distribution["left"] / total_rated > 0.6:
+            bias_skew = "left"
+        elif bias_distribution["right"] / total_rated > 0.6:
+            bias_skew = "right"
+
+    log.info(logger, MODULE, "annotation_summary",
+             "Evidence annotation complete",
+             evidence_count=len(source_evidence),
+             affiliated_media_warnings=affiliated_media_count,
+             party_quote_warnings=party_quotes_count,
+             publisher_ownership_warnings=publisher_ownership_count,
+             sub_source_warnings=sub_source_count,
+             bias_distribution=bias_distribution,
+             bias_skew=bias_skew)
+
+    # Add bias distribution warning if evidence is skewed
     if total_rated >= 3:
         left_pct = bias_distribution["left"] / total_rated
         right_pct = bias_distribution["right"] / total_rated

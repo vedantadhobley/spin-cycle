@@ -17,6 +17,11 @@ because they create grammatically odd phrases, even if each word is valid.
 import language_tool_python
 from functools import lru_cache
 
+from src.utils.logging import log, get_logger
+
+logger = get_logger()
+MODULE = "utils"
+
 
 @lru_cache(maxsize=1)
 def _get_tool() -> language_tool_python.LanguageTool:
@@ -49,8 +54,12 @@ def cleanup_text(text: str | None) -> str | None:
         corrected = language_tool_python.utils.correct(text, matches)
         return corrected
         
-    except Exception:
+    except Exception as e:
         # If anything goes wrong (Java not installed, server fails, etc.),
         # just return the original text. We don't want cleanup failures
         # to break the verification pipeline.
+        log.warning(logger, MODULE, "cleanup_failed",
+                    "Text cleanup failed, returning original text",
+                    error=str(e), error_type=type(e).__name__,
+                    text_length=len(text))
         return text

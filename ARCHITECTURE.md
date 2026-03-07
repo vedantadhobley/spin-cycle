@@ -84,23 +84,29 @@ The key insight: **LangGraph runs inside Temporal activities, not instead of the
 
 ```
 Temporal Workflow
-└── Activity: research_subclaim (retryable, timeout: 180s)
-    ├── Phase 1: Programmatic seed search (no LLM, ~3-20s)
+└── Activity: research_subclaim (retryable, timeout: 300s)
+    ├── Phase 1a: Programmatic seed search (no LLM, ~3-8s)
     │   ├── claim_category.py routes LLM-written queries + base queries
-    │   ├── Fire to SearXNG/Serper/Brave/Wikipedia concurrently (~80-100 URLs)
-    │   ├── await_ratings_parallel() — bounded MBFC lookups (20s timeout)
-    │   ├── score_url() — quality scoring with real MBFC data
+    │   └── Fire to DuckDuckGo/SearXNG/Wikipedia concurrently (~30-50 URLs)
+    ├── Phase 1b: MBFC + party enrichment + ranking (~15-50s cold, ~0s cached)
+    │   ├── _collect_domains() + await_ratings_parallel() — bounded MBFC lookups
+    │   ├── _enrich_parties_from_mbfc() — SpaCy NER extracts owners from MBFC
+    │   │   ownership strings → Wikidata-expand (parallel, cap 6) → new parties/media
+    │   ├── score_url() — quality scoring with real MBFC data + enriched parties
     │   ├── media_matching.py — conflict detection (affiliated media + ownership)
     │   ├── CONFLICT_PENALTY (-15) for conflicted sources
     │   └── Sort → keep top 30 → annotate with tier + conflict labels
     ├── Phase 2: LangGraph ReAct Agent (seeds pre-loaded as prior searches)
     │   ├── pre_model_hook (progress: tool calls, URLs, tier/conflict coverage)
     │   ├── LLM call (sees seed results + progress, decides what to fetch/follow-up)
-    │   ├── SearXNG/Serper/Brave search (filtered by source_filter)
+    │   ├── DuckDuckGo/SearXNG search (filtered by source_filter)
     │   ├── Wikipedia search, Page fetcher (full article reads)
     │   └── ... (8-12 tool calls, then agent stops)
     └── Phase 3: Programmatic enrichment
-        └── LegiScan (US legislation: bill details, roll call votes, bill text)
+        ├── LegiScan (US legislation: bill details, roll call votes, bill text)
+        └── _enrich_parties_from_evidence_content() — SpaCy NER on evidence
+            articles → Wikidata-expand (parallel, cap 8) → add if graph overlaps
+    Returns: (evidence, enriched_interested_parties)
 ```
 
 Temporal handles the **macro orchestration** (decompose → research → judge → synthesize → store). LangGraph handles the **micro orchestration** (search → read → decide → search more).
@@ -284,28 +290,32 @@ This is where the LangGraph ReAct agent runs. For each **atomic fact**:
 4. Tool executes the search → returns results as text
 5. Loop back to pre_model → agent. Progress note updates each iteration
 6. LLM reads results + progress → decides if it needs more → calls another tool or stops
-7. Typically: 8-12 tool calls per sub-claim, ~38 max agent steps
-8. Agent timeout: 120s (soft), 180s (Temporal hard limit)
-9. Max steps: 28 (allows ~14 tool calls before hard stop)
+7. Typically: 8-12 tool calls per sub-claim, 38 max agent steps
+8. Agent timeout: 120s (soft), 300s (Temporal hard limit)
+9. Max steps: 38 (each tool call costs ~3 steps: pre_model + agent + tools)
 
 **Streaming evidence collection:** The agent uses `astream()` with `stream_mode="updates"` instead of `ainvoke()`. Messages are collected incrementally as the agent works. If the agent hits its step limit (`GraphRecursionError`) or times out, we keep ALL evidence gathered up to that point instead of losing everything. This replaced a direct `ainvoke()` call that would return nothing on interruption.
 
 The research agent uses **thinking=off**. The ReAct loop is pure tool-routing — picking search queries and deciding when to stop. Thinking mode wastes ~25-45s per iteration generating `<think>` blocks that nobody reads, just to produce an 8-token tool call. With thinking off, the same search queries are produced in ~3s per iteration.
 
 **Tools available to the agent (dynamically loaded based on API keys):**
-- `searxng_search` — SearXNG meta-search (news, general web). Self-hosted, no API key.
-- `web_search` — DuckDuckGo search (fallback/supplementary). No API key needed.
+- `web_search` — DuckDuckGo search (primary). Official API, always available.
+- `searxng_search` — SearXNG meta-search (secondary, extra coverage). Self-hosted, no API key.
 - `serper_search` — Google search via Serper API. Requires `SERPER_API_KEY`.
 - `brave_search` — Brave Search API. Requires `BRAVE_API_KEY`.
 - `wikipedia_search` — Wikipedia API search (established facts, background).
 - `page_fetcher` — Fetches and extracts text from URLs found in search results.
 
-**Programmatic enrichment (NOT agent tools — runs after the agent finishes):**
-- **LegiScan** — US legislation search. If the subclaim matches any legislation, appends bill details (sponsors, status, history), roll call votes (individual member positions), and bill text (the actual legislative language). The bill text enables the judge to detect "poison pills" — provisions slipped into otherwise popular bills that explain otherwise puzzling voting patterns. Requires `LEGISCAN_API_KEY`.
+**Programmatic enrichment (NOT agent tools):**
+- **MBFC → Wikidata enrichment** (runs BEFORE seed ranking) — After `await_ratings_parallel()` warms the MBFC cache, `_enrich_parties_from_mbfc()` extracts PERSON/ORG names from MBFC ownership strings via SpaCy NER (e.g., "Owned by Rupert Murdoch's News Corporation" → ["Rupert Murdoch", "News Corporation"]), then Wikidata-expands them in parallel (capped at 6). MBFC ownership is authoritative — all discoveries are added unconditionally. New parties/media influence conflict detection in subsequent seed ranking.
+- **LegiScan** (runs after the agent finishes) — US legislation search. If the subclaim matches any legislation, appends bill details (sponsors, status, history), roll call votes (individual member positions), and bill text (the actual legislative language). The bill text enables the judge to detect "poison pills" — provisions slipped into otherwise popular bills that explain otherwise puzzling voting patterns. Requires `LEGISCAN_API_KEY`.
+- **Evidence NER → Wikidata enrichment** (runs after LegiScan) — `_enrich_parties_from_evidence_content()` runs SpaCy NER on concatenated evidence article content, then Wikidata-expands new entities in parallel (capped at 8). Unlike MBFC enrichment, evidence mentions are only added if their Wikidata graph **overlaps** with existing interested parties (less authoritative).
+
+**Return type:** `research_claim()` returns `tuple[list[dict], InterestedPartiesDict]` — both the evidence and enriched interested parties. The workflow merges enriched parties across all sub-claims and passes the merged set to the judge phase.
 
 All search tools pass results through `source_filter.py` before returning — low-quality sources (Reddit, Quora, social media, content farms, etc.) are silently dropped. See **Source Quality Filtering** below.
 
-**MBFC cache population** runs as fire-and-forget background tasks during research. When search results come back, `populate_mbfc_cache()` launches async MBFC scrapes for uncached domains without blocking the agent. A `_mbfc_pending` dedup set prevents the same domain from being scraped multiple times across concurrent searches. By the time the judge runs, the cache is warm.
+**MBFC index bootstrap** (`src/tools/mbfc_index.py`) downloads the full MBFC source index (~10,300 records) from the WordPress REST API on startup, upserting into the `source_ratings` table. Subsequent lookups are instant DB SELECTs. The index refreshes every 7 days.
 
 **Page fetcher entity extraction:** When the agent fetches a full article, SpaCy NER extracts PERSON/ORG entities from the content and includes them in the tool output (e.g., "Entities mentioned: Person A, Person B, Organization X"). This gives the agent visibility into who is quoted/mentioned without an additional LLM call.
 
@@ -323,7 +333,8 @@ After the agent finishes, we extract evidence from the conversation:
 
 ### Step 3: judge_subclaim
 
-**File:** `src/activities/verify_activities.py`
+**File:** `src/agent/judge.py` → `judge()`
+**Activity wrapper:** `src/activities/verify_activities.py`
 **Prompt:** `src/prompts/verification.py` → `JUDGE_SYSTEM` / `JUDGE_USER`
 
 The LLM evaluates evidence for a single sub-claim. This is NOT agentic — it's a single LLM call with structured output. Uses **thinking=off** — the structured prompt guides reasoning explicitly, and thinking mode generates 5000-9500 tokens (3-4 min) without improving verdict quality.
@@ -354,11 +365,11 @@ Full evidence scoring (`score_evidence` — used for judge, adds source_type + c
 
 Domain diversity cap (max 3 items per domain) ensures at least 7 unique source domains. Political bias is deliberately NOT a scoring signal. Unrated sources get low defaults (4/30) — unrated government domains get 20/30. All scoring uses `get_source_rating_sync()` — cache-only, zero network calls.
 
-**Pre-judge enrichment** runs before the LLM sees any evidence, in two passes:
+**Pre-judge enrichment** is a lightweight cleanup pass. The heavy lifting (MBFC ownership → Wikidata, evidence NER → Wikidata) now happens in the research phase. The judge receives merged interested parties from all research sub-claims.
 
-1. **Entity enrichment (SpaCy NER → Wikidata):** All evidence content is concatenated, SpaCy extracts PERSON/ORG entities, new entities not already in `all_parties` are Wikidata-expanded (capped at 8). If a newly discovered entity connects to an existing interested party, it's added to `all_parties` and its media holdings are added to `affiliated_media`.
+The judge still runs one pass: **Entity enrichment (SpaCy NER → Wikidata, parallel):** All evidence content is concatenated, SpaCy extracts PERSON/ORG entities, new entities not already in `all_parties` are Wikidata-expanded **in parallel** via `asyncio.gather` (capped at 8). If a newly discovered entity connects to an existing interested party, it's added to `all_parties` and its media holdings are added to `affiliated_media`. This catches entities from page fetches that weren't in the seed evidence.
 
-2. **Publisher enrichment (domain → Wikidata):** Unique source domains are extracted from evidence URLs and Wikidata-expanded to discover ownership chains. This catches cases where a news outlet is owned by an interested party.
+Publisher ownership discovery (previously "Pass 2b" — domain → name heuristic → Wikidata) has been removed from the judge. Research now handles this via `_enrich_parties_from_mbfc()`, which uses real MBFC ownership data + SpaCy NER instead of domain-to-name guessing (~20-30% hit rate).
 
 **4 conflict-of-interest checks** run per evidence item during formatting:
 
@@ -383,9 +394,9 @@ Output: {"verdict": "true", "confidence": 0.95,
          "reasoning": "Multiple sources confirm..."}
 ```
 
-Sub-claim verdicts: `true` | `mostly_true` | `mixed` | `mostly_false` | `false` | `unverifiable`
+Sub-claim verdicts: `true` | `mostly_true` | `mixed` | `mostly_false` | `false` | `partially_true` | `unverifiable`
 
-The judge uses a **6-level verdict scale** with spirit-vs-substance guidance:
+The judge uses a **7-level verdict scale** with spirit-vs-substance guidance (the sub-claim enum includes `partially_true` for legacy compatibility):
 - `true` — core assertion and key details are correct
 - `mostly_true` — spirit is right, minor details off (e.g., "$50B" when the real figure is $48B)
 - `mixed` — substantial parts both confirmed and contradicted
@@ -450,16 +461,18 @@ VerifyClaimWorkflow
 │
 ├── RESEARCH PHASE — sliding window, MAX_CONCURRENT=2
 │   └── asyncio.gather(research_subclaim × N facts, semaphore=2)
-│       Each research_subclaim:
-│       ├── Phase 1: Seed search + MBFC await + rank/filter → top 30 seeds
+│       Each research_subclaim returns {evidence, enriched_parties}:
+│       ├── Phase 1a: Seed search (~30-50 URLs)
+│       ├── Phase 1b: MBFC await → MBFC→Wikidata enrichment → rank/filter → top 30
 │       ├── Phase 2: ReAct agent (seeds pre-loaded, 8-12 tool calls)
-│       └── Phase 3: LegiScan enrichment
+│       └── Phase 3: LegiScan enrichment + evidence NER→Wikidata enrichment
+│   Merge enriched parties across all sub-claims (union of all_parties + affiliated_media)
 │
-├── JUDGE PHASE — sliding window, MAX_CONCURRENT=2
+├── JUDGE PHASE — sliding window, MAX_CONCURRENT=2 (receives merged parties)
 │   └── asyncio.gather(judge_subclaim × N facts, semaphore=2)
 │       Each judge_subclaim:
 │       ├── Rank + cap evidence (score_evidence + rank_and_select)
-│       ├── NER enrichment (SpaCy entities → Wikidata → augment parties)
+│       ├── Lightweight NER cleanup (SpaCy → Wikidata, parallel, catches stragglers)
 │       ├── Annotate evidence (MBFC, conflict flags, bias distribution)
 │       └── LLM verdict (6-level scale)
 │
@@ -478,7 +491,8 @@ Key properties:
 - **MAX_CONCURRENT = 2** — matched to GPU `--parallel 2`. Each agent gets a dedicated inference slot.
 - **Thesis-aware** — decompose extracts speaker's intent (thesis, structure, key_test). Synthesis evaluates whether the argument survives the evidence.
 - **Streaming evidence** — agent uses `astream()` to collect evidence incrementally. Timeout or step limit preserves all evidence gathered so far.
-- **Programmatic enrichment** — LegiScan, Wikidata, and MBFC all run deterministically (not as agent tools).
+- **Programmatic enrichment** — LegiScan, Wikidata, and MBFC all run deterministically (not as agent tools). MBFC ownership → Wikidata enrichment runs in research (before ranking). Evidence NER → Wikidata runs in research (after agent). Judge NER is a parallel cleanup pass.
+- **Cross-sub-claim party merging** — enriched parties from each research sub-claim are merged (union) before the judge phase, so every sub-claim benefits from every other sub-claim's discoveries.
 - **Single synthesis** — `synthesize_verdict` combines all fact-level judgments into one final verdict. Single-fact claims skip synthesis entirely.
 - **Temporal retries per activity** — if one research call fails, only that activity retries (max 3 attempts).
 - **Date-aware** — all prompts include `Today's date: {current_date}`.
@@ -506,7 +520,7 @@ All search results pass through a domain blocklist before reaching the research 
 
 Search engines return Reddit comments, Quora answers, Medium blogs, and other user-generated content that isn't citable for fact-checking. The LLM prompt also instructs the agent to prefer authoritative sources, but the code-level filter catches what the LLM might miss.
 
-### Blocked Categories (~55 domains)
+### Blocked Categories (~117 domains)
 
 | Category | Examples | Reason |
 |----------|----------|--------|
@@ -519,6 +533,9 @@ Search engines return Reddit comments, Quora answers, Medium blogs, and other us
 | Tabloids | dailymail.co.uk, thesun.co.uk, nypost.com, tmz.com | Sensationalist, unreliable |
 | Partisan outlets | breitbart.com, infowars.com, dailywire.com, occupydemocrats.com | Ideological bias |
 | State propaganda | rt.com, sputniknews.com | State-controlled media |
+| Entertainment databases | imdb.com, rottentomatoes.com, metacritic.com, tvtropes.org | Not news or evidence sources |
+| Medical/niche forums | flutrackers.com, mayoclinic.org, medscape.com, patient.info | Not journalism |
+| Sports/weather/travel | espn.com, weather.com, accuweather.com, booking.com | Rarely evidence for claims |
 
 ### How It's Wired
 
@@ -637,7 +654,7 @@ Key decisions:
 │ created_at      │       │ verdict (enum)   │       │ supports_claim    │
 │ updated_at      │       │ confidence (float)│       │ retrieved_at      │
 └────────┬────────┘       │ reasoning (text) │       └────────────────────┘
-         │                   └──────────────────┘
+         │                └──────────────────┘
          │       ┌──────────────────┐      parent_id is self-referential:
          │       │    verdicts      │      compound nodes link to their parent,
          │       │──────────────────│      leaves link to their parent node,
@@ -650,6 +667,23 @@ Key decisions:
                  │   (jsonb)         │
                  │ created_at        │
                  └──────────────────┘
+
+Cache tables (no FK relationships — standalone lookup):
+
+┌──────────────────────┐       ┌──────────────────────┐
+│   source_ratings     │       │   wikidata_cache     │
+│──────────────────────│       │──────────────────────│
+│ domain (varchar) PK  │       │ entity_name (PK)     │
+│ bias (enum)          │       │ qid (varchar)        │
+│ bias_score (float)   │       │ relationships (jsonb)│
+│ factual_reporting    │       │ scraped_at           │
+│ credibility (enum)   │       └──────────────────────┘
+│ country, media_type  │
+│ ownership (varchar)  │
+│ traffic, mbfc_url    │
+│ raw_data (jsonb)     │
+│ scraped_at, updated  │
+└──────────────────────┘
 ```
 
 ### Table: `claims`
@@ -662,7 +696,7 @@ The top-level entity. One row per claim submitted (manually or via extraction).
 | `text` | `TEXT` | NOT NULL | The original claim text |
 | `source_url` | `VARCHAR(2048)` | nullable | URL where the claim was found |
 | `source_name` | `VARCHAR(256)` | nullable | Name of the source (e.g., "BBC News") |
-| `status` | `ENUM('pending','processing','verified','flagged')` | NOT NULL, default 'pending' | Workflow state |
+| `status` | `ENUM('queued','pending','processing','verified','flagged')` | NOT NULL, default 'pending' | Workflow state |
 | `created_at` | `TIMESTAMPTZ` | default now() | When the claim was submitted |
 | `updated_at` | `TIMESTAMPTZ` | default now(), on update | Last modification time |
 
@@ -670,7 +704,7 @@ The top-level entity. One row per claim submitted (manually or via extraction).
 - Has many `sub_claims` (cascade delete)
 - Has one `verdict` (cascade delete)
 
-**Status lifecycle:** `pending` → `processing` → `verified` (or `flagged`)
+**Status lifecycle:** `queued` → `pending` → `processing` → `verified` (or `flagged`). Claims submitted while another is running start as `queued`; `start_next_queued_claim` promotes them to `pending`.
 
 ### Table: `sub_claims`
 
@@ -726,11 +760,42 @@ The overall verdict for a claim, produced by the synthesize step.
 **Relationships:**
 - Belongs to one `claim` (one-to-one via unique constraint)
 
+### Table: `source_ratings`
+
+Cached MBFC (Media Bias/Fact Check) ratings. Populated by `await_ratings_parallel()` during seed ranking and by fire-and-forget background scrapes during research. Used by evidence scoring, conflict detection, and judge annotation. MBFC ownership strings are also fed to SpaCy NER for Wikidata expansion.
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `domain` | `VARCHAR(256)` | PK | Domain key, e.g., "reuters.com" |
+| `bias` | `ENUM(...)` | nullable | Political bias rating (9 values: extreme-left → extreme-right, satire, conspiracy-pseudoscience) |
+| `bias_score` | `FLOAT` | nullable | Numeric bias: -10 (far left) to +10 (far right) |
+| `factual_reporting` | `ENUM(...)` | nullable | Factual reporting rating (6 values: very-high → very-low) |
+| `credibility` | `ENUM(...)` | nullable | Credibility rating (high, medium, low) |
+| `country` | `VARCHAR(128)` | nullable | Country of origin, e.g., "United Kingdom" |
+| `media_type` | `VARCHAR(128)` | nullable | Type: "News Wire", "TV Station", "Newspaper", etc. |
+| `ownership` | `VARCHAR(256)` | nullable | Ownership info, e.g., "Thomson Reuters Corp", "State-Funded" |
+| `traffic` | `VARCHAR(64)` | nullable | Traffic level: "High Traffic", "Medium Traffic" |
+| `mbfc_url` | `VARCHAR(512)` | nullable | Link to MBFC page for reference |
+| `raw_data` | `JSONB` | nullable | Extra scraped fields |
+| `scraped_at` | `TIMESTAMPTZ` | default now() | When the rating was scraped |
+| `updated_at` | `TIMESTAMPTZ` | default now(), on update | Last update time |
+
+### Table: `wikidata_cache`
+
+Cached Wikidata entity relationships for conflict-of-interest detection. Stores ownership chains, media holdings, political affiliations. TTL: 7 days (entities change less frequently than news bias ratings).
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `entity_name` | `VARCHAR(256)` | PK | Search term, e.g., "Acme Corp" |
+| `qid` | `VARCHAR(32)` | nullable | Wikidata QID, e.g., "Q312" (None if not found) |
+| `relationships` | `JSONB` | nullable | Full `get_ownership_chain()` result |
+| `scraped_at` | `TIMESTAMPTZ` | default now() | When the entity was looked up |
+
 ### Enums
 
 | Enum Name | Values | Used By |
 |-----------|--------|---------|
-| `claim_status` | pending, processing, verified, flagged | claims.status |
+| `claim_status` | queued, pending, processing, verified, flagged | claims.status |
 | `sub_claim_verdict` | true, false, partially_true, unverifiable, mostly_true, mixed, mostly_false | sub_claims.verdict |
 | `evidence_source_type` | web, wikipedia, news_api | evidence.source_type |
 | `verdict_type` | true, mostly_true, mixed, mostly_false, false, unverifiable | verdicts.verdict |
@@ -886,8 +951,8 @@ spin-cycle-dev-adminer           :4502  ← Postgres web UI (Dracula theme)
 
 - `LLAMA_URL` — LLM API (llama.cpp Qwen3.5-35B-A3B, unified thinking/non-thinking, via Tailscale)
 - `LLAMA_EMBED_URL` — LLM embeddings API (llama.cpp, via Tailscale)
-- SearXNG — self-hosted meta-search (configured via `SEARXNG_URL`)
-- DuckDuckGo — web search (no API key)
+- DuckDuckGo — primary search (official API, always available)
+- SearXNG — secondary meta-search (self-hosted, configured via `SEARXNG_URL`)
 - Serper — Google search API (requires `SERPER_API_KEY`)
 - Brave Search — web search API (requires `BRAVE_API_KEY`)
 - Wikipedia API — factual lookups (no API key)
@@ -1038,17 +1103,17 @@ Config: `~/workspace/monitor/promtail/promtail.yml`
 | Component | Status | Details |
 |-----------|--------|---------|
 | Docker infrastructure | **Done** | 7 containers, health checks, volume persistence |
-| PostgreSQL schema | **Done** | 4 tables: claims, sub_claims (with tree structure), evidence, verdicts |
+| PostgreSQL schema | **Done** | 6 tables: claims, sub_claims (with tree structure), evidence, verdicts, source_ratings (MBFC cache), wikidata_cache |
 | FastAPI API | **Done** | POST/GET claims, health check, lifespan management |
 | Temporal workflow | **Done** | VerifyClaimWorkflow with 7 activities, flat pipeline, thesis-aware synthesis, retry policies |
 | Temporal worker | **Done** | Registers workflow + 7 activities, max_concurrent_activities=2, structured logging |
 | `decompose_claim` | **Done** | LLM decomposes text into flat facts (guided by linguistic patterns) + thesis (structure, key_test) in one pass |
-| `research_subclaim` | **Done** | LangGraph ReAct agent with SearXNG + DuckDuckGo + Serper + Brave + Wikipedia + page_fetcher |
+| `research_subclaim` | **Done** | LangGraph ReAct agent with DuckDuckGo + SearXNG + Wikipedia + page_fetcher (Serper/Brave if API keys configured) |
 | `judge_subclaim` | **Done** | LLM evaluates evidence, returns structured verdict |
 | `synthesize_verdict` | **Done** | Thesis-aware synthesis — evaluates whether speaker's argument survives sub-verdicts (importance-weighted, not count-based) |
 | `store_result` | **Done** | Writes flat result to Postgres (all sub-claims as leaves) |
-| Source quality filtering | **Done** | Domain blocklist (~55 domains) filters all search results + page fetches |
-| Prompts | **Done** | 4 prompt pairs documented in `src/prompts/verification.py` |
+| Source quality filtering | **Done** | Domain blocklist (~117 domains) filters all search results + page fetches |
+| Prompts | **Done** | 5 prompt pairs (NORMALIZE, DECOMPOSE, RESEARCH, JUDGE, SYNTHESIZE) in `src/prompts/verification.py` |
 | LLM connectivity | **Done** | Unified Qwen3.5 via `LLAMA_URL` — `enable_thinking=False` for all steps (thinking mode unused, generates excessive tokens) |
 | Logging | **Done** | Structured JSON logging via `src/utils/logging.py`, Promtail → Loki → Grafana |
 | Tests | **Done** | Health endpoint, schema validation |
@@ -1139,20 +1204,21 @@ Adminer is available at http://localhost:4502:
 
 Key queries:
 ```sql
--- See all claims and their status
-SELECT id, text, status, overall_verdict, created_at FROM claims ORDER BY created_at DESC;
+-- See all claims and their verdicts
+SELECT c.id, c.text, c.status, v.verdict, v.confidence, c.created_at
+FROM claims c LEFT JOIN verdicts v ON v.claim_id = c.id
+ORDER BY c.created_at DESC;
 
--- See sub-claims and their verdicts
-SELECT sc.text, v.verdict, v.confidence, v.reasoning
-FROM sub_claims sc
-JOIN verdicts v ON v.sub_claim_id = sc.id
-WHERE sc.claim_id = '<claim-id>';
+-- See sub-claims for a claim
+SELECT text, verdict, confidence, reasoning
+FROM sub_claims
+WHERE claim_id = '<claim-id>'
+ORDER BY id;
 
 -- See evidence collected for a sub-claim
-SELECT source_type, source_url, snippet, relevance_score
+SELECT source_type, source_url, content, supports_claim
 FROM evidence
-WHERE sub_claim_id = '<sub-claim-id>'
-ORDER BY relevance_score DESC;
+WHERE sub_claim_id = '<sub-claim-id>';
 ```
 
 ### Running Unit Tests
@@ -1194,6 +1260,7 @@ spin-cycle/
 │   ├── utils/                      # Shared utilities
 │   │   ├── logging.py              # Structured logging (JSON for Loki, pretty for dev)
 │   │   ├── ner.py                  # SpaCy NER — entity extraction (PERSON/ORG)
+│   │   ├── quote_detection.py      # Detect claim subject quotes in evidence text
 │   │   ├── text_cleanup.py         # Grammar/spell check for LLM output (LanguageTool)
 │   │   └── evidence_ranker.py      # Source + evidence scoring, seed ranking, judge capping
 │   │
@@ -1205,27 +1272,29 @@ spin-cycle/
 │   │
 │   ├── agent/                      # Domain logic (called by Temporal activities)
 │   │   ├── decompose.py            # Normalize + extract facts + Wikidata expansion
-│   │   ├── research.py             # Seed search + rank + ReAct agent + evidence extraction
+│   │   ├── research.py             # Seed search + MBFC/evidence enrichment + rank + ReAct agent
 │   │   ├── judge.py                # Evidence ranking, annotation, LLM verdict
 │   │   ├── synthesize.py           # Verdict synthesis
-│   │   └── claim_category.py       # Seed query routing (SearXNG category selection)
+│   │   └── claim_category.py       # Seed query routing (backend selection)
 │   │
 │   ├── tools/                      # Evidence gathering + data sources
 │   │   ├── source_ratings.py       # MBFC ratings (scrape + cache + parallel await)
 │   │   ├── source_filter.py        # Domain blocklist + MBFC cache population
-│   │   ├── media_matching.py       # URL↔media outlet matching, publisher ownership
+│   │   ├── media_matching.py       # URL↔media matching, publisher ownership, MBFC owner extraction
+│   │   ├── mbfc_index.py           # MBFC index bootstrap (WordPress REST API → source_ratings DB)
 │   │   ├── wikidata.py             # Wikidata SPARQL — ownership chains, relationships
 │   │   ├── legiscan.py             # LegiScan API — US legislation, votes, bill text
 │   │   ├── searxng.py              # SearXNG meta-search (self-hosted)
 │   │   ├── serper.py               # Serper (Google Search API)
 │   │   ├── brave.py                # Brave Search API
-│   │   ├── web_search.py           # DuckDuckGo search wrapper
+│   │   ├── web_search.py           # DuckDuckGo search (primary backend)
 │   │   ├── wikipedia.py            # Wikipedia API
 │   │   └── page_fetcher.py         # URL → text extraction (respects blocklist)
 │   │
 │   ├── schemas/                    # Data schemas
 │   │   ├── api.py                  # Pydantic API request/response models
-│   │   └── llm_outputs.py          # Pydantic schemas for LLM structured output
+│   │   ├── llm_outputs.py          # Pydantic schemas for LLM structured output
+│   │   └── interested_parties.py   # InterestedPartiesDict TypedDict (pipeline contract)
 │   │
 │   ├── prompts/                    # All LLM prompts with documentation
 │   │   ├── verification.py         # Normalize, Decompose, Research, Judge, Synthesize
@@ -1238,7 +1307,7 @@ spin-cycle/
 │   │   └── verify_activities.py    # All 7 verification activities
 │   │
 │   └── db/                         # Database layer
-│       ├── models.py               # SQLAlchemy models (Claim, SubClaim, Evidence, Verdict)
+│       ├── models.py               # SQLAlchemy models (6 tables: Claim, SubClaim, Evidence, Verdict, SourceRating, WikidataCache)
 │       └── session.py              # Async engine + session factory
 │
 ├── scripts/

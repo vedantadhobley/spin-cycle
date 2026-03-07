@@ -6,7 +6,7 @@ Activities can be retried independently if they fail.
 The verification pipeline has 7 activities:
   0. create_claim             — creates a claim record in the DB (when started from Temporal UI)
   1. decompose_claim          — normalize + extract facts + Wikidata expansion (2 LLM calls)
-  2. research_subclaim        — seed search + rank + ReAct agent + LegiScan enrichment
+  2. research_subclaim        — seed search + MBFC→Wikidata + rank + ReAct agent + LegiScan + evidence NER
   3. judge_subclaim           — evidence ranking + annotation + LLM verdict
   4. synthesize_verdict       — LLM combines sub-verdicts into final verdict
   5. store_result             — writes result tree to Postgres
@@ -76,17 +76,22 @@ async def research_subclaim(
     interested_parties: dict | None = None,
     categories: list[str] | None = None,
     seed_queries: list[str] | None = None,
-) -> list[dict]:
+) -> dict:
     """Research evidence for a sub-claim using the LangGraph ReAct agent.
 
     Delegates to src/agent/research.research_claim() for all domain logic.
+
+    Returns dict with:
+        - evidence: list of evidence dicts
+        - enriched_parties: InterestedPartiesDict with new parties/media
+          discovered from MBFC ownership and evidence NER
     """
     log.info(activity.logger, "research", "start", "Researching sub-claim",
              sub_claim=sub_claim, categories=categories,
              seed_query_count=len(seed_queries) if seed_queries else 0)
 
     from src.agent.research import research_claim
-    evidence = await research_claim(
+    evidence, enriched_parties = await research_claim(
         sub_claim, interested_parties,
         categories=categories,
         seed_queries=seed_queries,
@@ -94,7 +99,7 @@ async def research_subclaim(
 
     log.info(activity.logger, "research", "done", "Research complete",
              sub_claim=sub_claim, evidence_count=len(evidence))
-    return evidence
+    return {"evidence": evidence, "enriched_parties": dict(enriched_parties)}
 
 
 @activity.defn

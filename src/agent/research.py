@@ -5,11 +5,15 @@
 Phase 1 — Programmatic seed search (~3-20s):
   1. _run_seed_searches(): Fire LLM-written queries + base queries (raw claim,
      Wikipedia) to SearXNG/Serper/Brave concurrently. Yields ~80-100 raw URLs.
-  2. _rank_and_filter_seeds(): Await MBFC ratings in parallel (per-domain
-     15s httpx timeout), score URLs with score_url(), detect interested-party conflicts
-     (affiliated media + publisher ownership), apply CONFLICT_PENALTY (-15)
+  2. _collect_domains() + await_ratings_parallel(): Warm MBFC cache for all
+     seed domains (per-domain 15s httpx timeout).
+  3. _enrich_parties_from_mbfc(): Extract owner names from MBFC ownership
+     fields via SpaCy NER, Wikidata-expand to discover networks/media holdings.
+     New parties/media influence conflict detection in the next step.
+  4. _rank_and_filter_seeds(): Score URLs with score_url(), detect interested-party
+     conflicts (affiliated media + publisher ownership), apply CONFLICT_PENALTY (-15)
      to conflicted sources, sort by adjusted score, keep top 30.
-  3. _build_seed_messages(): Package ranked seeds as synthetic AIMessage +
+  5. _build_seed_messages(): Package ranked seeds as synthetic AIMessage +
      ToolMessage pairs so the agent sees them as prior searches.
 
 Phase 2 — LangGraph ReAct agent (~60-90s):
@@ -32,6 +36,8 @@ Phase 2 — LangGraph ReAct agent (~60-90s):
 Phase 3 — Programmatic enrichment:
   - _enrich_with_legislation(): LegiScan search for matching legislation,
     bill text, roll call votes, sponsors. Appended to agent evidence.
+  - _enrich_parties_from_evidence_content(): SpaCy NER on evidence articles
+    → Wikidata-expand new entities → add if graph overlaps existing parties.
 
 ## Agent tools
 
@@ -271,11 +277,11 @@ def _research_pre_model_hook(state: dict) -> dict:
 def _build_tool_list() -> list:
     """Build the agent's tool list based on which API keys are configured.
 
-    Priority order for search tools:
-      1. SearXNG (self-hosted meta-search, free, aggregates many engines)
-      2. Serper (Google index, reliable paid API)
-      3. Brave (independent index, good for diversity)
-      4. DuckDuckGo (free fallback, no key needed)
+    Search tools:
+      1. DuckDuckGo (primary — official API, always available, reliable)
+      2. SearXNG (secondary — self-hosted meta-search, extra coverage)
+      3. Serper (Google index, if API key configured and has credits)
+      4. Brave (independent index, if API key configured)
 
     Always included:
       - Wikipedia (free, reliable for established facts)
@@ -283,21 +289,22 @@ def _build_tool_list() -> list:
     """
     tools = []
 
-    # Search tools — add based on availability
+    # DuckDuckGo — primary search, always available
+    tools.append(get_web_search_tool())
+
+    # SearXNG — secondary, adds coverage even with degraded engines
     if searxng_available():
         tools.append(get_searxng_tool())
-        log.debug(logger, MODULE, "tool_enabled", "SearXNG meta-search enabled")
+        log.info(logger, MODULE, "tool_enabled", "SearXNG meta-search enabled")
 
+    # Paid API search tools — add if configured
     if serper_available():
         tools.append(get_serper_tool())
-        log.debug(logger, MODULE, "tool_enabled", "Serper search enabled")
+        log.info(logger, MODULE, "tool_enabled", "Serper search enabled")
 
     if brave_available():
         tools.append(get_brave_tool())
-        log.debug(logger, MODULE, "tool_enabled", "Brave search enabled")
-
-    # DuckDuckGo — always available as fallback
-    tools.append(get_web_search_tool())
+        log.info(logger, MODULE, "tool_enabled", "Brave search enabled")
 
     # Wikipedia — always available
     tools.append(get_wikipedia_tool())
@@ -313,8 +320,8 @@ def _build_tool_list() -> list:
     # This frees up the agent's tool budget for actual evidence gathering.
 
     tool_names = [t.name for t in tools]
-    log.debug(logger, MODULE, "tools_loaded", "Research agent tools configured",
-              tool_count=len(tools), tools=tool_names)
+    log.info(logger, MODULE, "tools_loaded", "Research agent tools configured",
+             tool_count=len(tools), tools=tool_names)
 
     return tools
 
@@ -546,6 +553,7 @@ async def _run_seed_searches(
 
     from src.agent.claim_category import generate_seed_queries
     from src.tools.searxng import search_searxng
+    from src.tools.web_search import search_duckduckgo
     from src.tools.wikipedia import search_wikipedia
 
     if not categories:
@@ -555,7 +563,7 @@ async def _run_seed_searches(
     log.info(logger, MODULE, "seed_plan", "Seed search plan",
              sub_claim=sub_claim, categories=categories,
              query_count=len(query_specs),
-             labels=[s["label"] for s in query_specs])
+             queries=[{"label": s["label"], "query": s["query"], "max_results": s["max_results"]} for s in query_specs])
 
     sem = asyncio.Semaphore(8)
     tasks = []
@@ -570,6 +578,12 @@ async def _run_seed_searches(
                 resolved_backend = "searxng" if searxng_available() else None
             elif backend == "searxng" and not searxng_available():
                 resolved_backend = None
+            # duckduckgo is always available — no fallback needed
+
+            if resolved_backend and resolved_backend != backend:
+                log.info(logger, MODULE, "backend_fallback",
+                         "Backend unavailable, falling back",
+                         original=backend, resolved=resolved_backend)
 
             if not resolved_backend:
                 continue
@@ -592,6 +606,9 @@ async def _run_seed_searches(
                         elif be == "brave":
                             return (lbl, q, "web",
                                     await search_brave(q, max_results=mx))
+                        elif be == "duckduckgo":
+                            return (lbl, q, "web",
+                                    await search_duckduckgo(q, max_results=mx))
                         elif be == "wikipedia":
                             return (lbl, q, "wikipedia",
                                     await search_wikipedia(q, max_results=mx))
@@ -745,6 +762,207 @@ def _build_seed_messages(seed_results: list[dict]) -> list:
 CONFLICT_PENALTY = -15
 
 
+def _collect_domains(seed_results: list[dict]) -> set[str]:
+    """Extract unique domains from seed results for MBFC cache warming."""
+    from src.tools.source_ratings import extract_domain
+
+    domains = set()
+    for r in seed_results:
+        url = r.get("source_url", "")
+        if url:
+            domains.add(extract_domain(url))
+    domains.discard("")
+    return domains
+
+
+async def _enrich_parties_from_mbfc(
+    seed_results: list[dict],
+    all_parties: list[str],
+    affiliated_media: list[str],
+) -> tuple[list[str], list[str]]:
+    """Expand MBFC ownership data via Wikidata to discover new interested parties.
+
+    After await_ratings_parallel(), every seed domain has a cached MBFC rating
+    with an 'ownership' field (e.g., "Owned by Rupert Murdoch's News Corporation").
+    This function extracts owner names via SpaCy NER, then Wikidata-expands them
+    to discover their networks, media holdings, and family connections.
+
+    MBFC ownership is authoritative — all discoveries are added unconditionally
+    (unlike evidence NER which requires Wikidata overlap).
+
+    Runs BEFORE seed scoring so new parties/media influence conflict detection.
+
+    Returns new (all_parties, affiliated_media) lists — does NOT mutate inputs.
+    """
+    import asyncio
+    from src.tools.source_ratings import get_source_rating_sync, extract_domain
+    from src.tools.media_matching import extract_owners_from_mbfc
+    from src.tools.wikidata import get_ownership_chain, collect_all_connected_parties
+
+    enriched_parties = list(all_parties)
+    enriched_media = list(affiliated_media)
+    all_parties_lower = {p.lower() for p in enriched_parties}
+
+    # Collect unique owners from all seed domains' MBFC ratings
+    seen_domains = set()
+    new_owners = []
+    for r in seed_results:
+        url = r.get("source_url", "")
+        if not url:
+            continue
+        domain = extract_domain(url)
+        if domain in seen_domains:
+            continue
+        seen_domains.add(domain)
+
+        rating = get_source_rating_sync(url)
+        if not rating or not rating.get("ownership"):
+            continue
+
+        owners = extract_owners_from_mbfc(rating["ownership"])
+        for owner in owners:
+            if owner.lower() not in all_parties_lower:
+                new_owners.append(owner)
+                all_parties_lower.add(owner.lower())
+
+    if not new_owners:
+        return enriched_parties, enriched_media
+
+    log.info(logger, MODULE, "mbfc_owner_discovery",
+             "MBFC ownership entities discovered for Wikidata expansion",
+             new_owners=new_owners[:10])
+
+    # Wikidata-expand new owners in parallel, capped at 6
+    async def _expand_owner(owner: str) -> None:
+        try:
+            result = await get_ownership_chain(owner)
+            if result.get("error"):
+                return
+
+            connected = collect_all_connected_parties(result)
+
+            # MBFC ownership is authoritative — add unconditionally
+            if owner not in enriched_parties:
+                enriched_parties.append(owner)
+            for person in connected["people"]:
+                if person not in enriched_parties:
+                    enriched_parties.append(person)
+            for org in connected["orgs"]:
+                if org not in enriched_parties:
+                    enriched_parties.append(org)
+            for media in connected["media"]:
+                if media not in enriched_media:
+                    enriched_media.append(media)
+
+            log.info(logger, MODULE, "mbfc_owner_expanded",
+                     "MBFC owner Wikidata-expanded",
+                     owner=owner,
+                     people=len(connected["people"]),
+                     media=len(connected["media"]),
+                     orgs=len(connected["orgs"]))
+        except Exception as e:
+            log.warning(logger, MODULE, "mbfc_owner_expand_failed",
+                        "MBFC owner Wikidata expansion failed",
+                        owner=owner, error=str(e))
+
+    await asyncio.gather(*[_expand_owner(o) for o in new_owners[:6]])
+
+    log.info(logger, MODULE, "mbfc_enrichment_done",
+             "MBFC→Wikidata enrichment complete",
+             parties_before=len(all_parties),
+             parties_after=len(enriched_parties),
+             media_before=len(affiliated_media),
+             media_after=len(enriched_media))
+
+    return enriched_parties, enriched_media
+
+
+async def _enrich_parties_from_evidence_content(
+    evidence: list[dict],
+    all_parties: list[str],
+    affiliated_media: list[str],
+) -> tuple[list[str], list[str]]:
+    """Discover new interested parties from evidence article content via NER + Wikidata.
+
+    Runs AFTER extract_evidence() + LegiScan. SpaCy NER extracts people/orgs
+    mentioned in evidence articles, then Wikidata checks if they connect to
+    existing interested parties.
+
+    Unlike MBFC enrichment (authoritative, add unconditionally), evidence mentions
+    are only added if their Wikidata graph OVERLAPS with existing parties.
+
+    Returns new (all_parties, affiliated_media) lists — does NOT mutate inputs.
+    """
+    import asyncio
+    from src.tools.wikidata import get_ownership_chain, collect_all_connected_parties
+    from src.utils.ner import extract_quoted_entities
+
+    enriched_parties = list(all_parties)
+    enriched_media = list(affiliated_media)
+
+    # NER on concatenated evidence content
+    all_content = " ".join(ev.get("content", "") for ev in evidence)
+    discovered_entities = extract_quoted_entities(all_content)
+
+    all_parties_lower = {p.lower() for p in enriched_parties}
+    new_entities = [
+        e for e in discovered_entities
+        if e.lower() not in all_parties_lower
+    ]
+
+    if not new_entities:
+        return enriched_parties, enriched_media
+
+    log.debug(logger, MODULE, "evidence_ner_entities",
+              "SpaCy NER extracted new entities from evidence content",
+              new_entities=new_entities[:15])
+
+    # Wikidata-expand in parallel, capped at 8.
+    # Only add if graph overlaps with existing parties.
+    async def _expand_entity(entity: str) -> None:
+        try:
+            result = await get_ownership_chain(entity)
+            if result.get("error"):
+                return
+
+            connected = collect_all_connected_parties(result)
+            all_connected = (
+                set(connected["people"])
+                | set(connected["orgs"])
+                | set(connected["media"])
+            )
+            overlap = all_connected & set(enriched_parties)
+
+            if overlap:
+                if entity not in enriched_parties:
+                    enriched_parties.append(entity)
+                for person in connected["people"]:
+                    if person not in enriched_parties:
+                        enriched_parties.append(person)
+                for media in connected["media"]:
+                    if media not in enriched_media:
+                        enriched_media.append(media)
+
+                log.info(logger, MODULE, "evidence_ner_enrichment_found",
+                         "Evidence entity connects to interested party",
+                         entity=entity, overlap=list(overlap)[:5])
+        except Exception as e:
+            log.warning(logger, MODULE, "evidence_ner_expand_failed",
+                        "Evidence entity Wikidata expansion failed",
+                        entity=entity, error=str(e))
+
+    await asyncio.gather(*[_expand_entity(e) for e in new_entities[:8]])
+
+    log.info(logger, MODULE, "evidence_ner_enrichment_done",
+             "Evidence NER→Wikidata enrichment complete",
+             parties_before=len(all_parties),
+             parties_after=len(enriched_parties),
+             media_before=len(affiliated_media),
+             media_after=len(enriched_media))
+
+    return enriched_parties, enriched_media
+
+
 async def _rank_and_filter_seeds(
     seed_results: list[dict],
     affiliated_media: list[str],
@@ -753,38 +971,23 @@ async def _rank_and_filter_seeds(
 ) -> list[dict]:
     """Rank seeds by quality + conflict detection, keep top N.
 
-    1. Collect unique domains from all seeds
-    2. Await MBFC ratings in parallel (per-domain 15s httpx timeout)
-    3. Score each seed with score_url() (now has real MBFC data)
-    4. Detect conflicts: affiliated media URL match + publisher ownership
-    5. Annotate each seed with _tier and _conflict_flags metadata
-    6. Apply CONFLICT_PENALTY to conflicted sources
-    7. Sort by adjusted score DESC, keep top max_seeds
+    IMPORTANT: Caller must ensure MBFC cache is warm before calling this
+    (via _collect_domains + await_ratings_parallel). This function no longer
+    awaits MBFC itself — the caller does it so that MBFC→Wikidata enrichment
+    can run between the await and ranking.
+
+    1. Score each seed with score_url() (assumes MBFC data is cached)
+    2. Detect conflicts: affiliated media URL match + publisher ownership
+    3. Annotate each seed with _tier and _conflict_flags metadata
+    4. Apply CONFLICT_PENALTY to conflicted sources
+    5. Sort by adjusted score DESC, keep top max_seeds
     """
     if not seed_results:
         return []
 
-    from src.tools.source_ratings import await_ratings_parallel, extract_domain
     from src.tools.media_matching import url_matches_media, check_publisher_ownership
 
-    # Step 1: Collect unique domains
-    domains = set()
-    for r in seed_results:
-        url = r.get("source_url", "")
-        if url:
-            domains.add(extract_domain(url))
-    domains.discard("")
-
-    # Step 2: Await MBFC ratings — the AUTHORITATIVE blocking layer.
-    # warm_mbfc_cache_background (in search tools) is the opportunistic layer
-    # that fires-and-forgets. This call is the guarantee: we block here until
-    # every domain has a real MBFC lookup before scoring and ranking.
-    if domains:
-        await await_ratings_parallel(
-            list(domains), max_concurrent=8,
-        )
-
-    # Step 3-4: Score and detect conflicts
+    # Score and detect conflicts
     scored: list[tuple[int, dict]] = []
     for r in seed_results:
         url = r.get("source_url", "")
@@ -804,6 +1007,9 @@ async def _rank_and_filter_seeds(
             owner_match = check_publisher_ownership(url, all_parties)
             if owner_match:
                 conflict_flags.append(f"owned by: {owner_match}")
+                log.info(logger, MODULE, "publisher_ownership_conflict",
+                         "Publisher ownership match detected",
+                         url=url, owner=owner_match)
 
         # Apply conflict penalty
         adjusted_score = quality_score
@@ -823,11 +1029,23 @@ async def _rank_and_filter_seeds(
     ranked = [r for _, r in scored[:max_seeds]]
 
     conflict_count = sum(1 for _, r in scored[:max_seeds] if r.get("_conflict_flags"))
+    top_5 = [
+        {"url": r.get("source_url", ""), "score": s, "tier": r.get("_tier", ""),
+         "conflict": r.get("_conflict_flags", [])}
+        for s, r in scored[:5]
+    ]
+    dropped = [
+        {"url": r.get("source_url", ""), "score": s}
+        for s, r in scored[max_seeds:]
+    ] if len(scored) > max_seeds else []
     log.info(logger, MODULE, "seed_ranked",
              "Seeds ranked and filtered",
              total_seeds=len(seed_results),
              kept=len(ranked),
-             conflicted=conflict_count)
+             conflicted=conflict_count,
+             top_5=top_5,
+             dropped_count=len(dropped),
+             dropped_sample=dropped[:5])
 
     return ranked
 
@@ -839,7 +1057,7 @@ async def research_claim(
     timeout_secs: int = 120,
     categories: list[str] | None = None,
     seed_queries: list[str] | None = None,
-) -> list[dict]:
+) -> tuple[list[dict], InterestedPartiesDict]:
     """Run the research agent to gather evidence for a sub-claim.
 
     This is the main entry point called by the research_subclaim activity.
@@ -870,12 +1088,10 @@ async def research_claim(
                       this fact needs. None if decompose didn't produce them.
 
     Returns:
-        List of evidence dicts (deduplicated by URL), each with:
-          - source_type: "web" or "wikipedia"
-          - source_url: URL extracted from tool output (None for DDG)
-          - title: Page/article title
-          - content: The evidence text/snippet
-          - supports_claim: None (determined by the judge step later)
+        Tuple of (evidence, enriched_interested_parties):
+          - evidence: List of evidence dicts (deduplicated by URL)
+          - enriched_interested_parties: Updated InterestedPartiesDict with
+            new parties/media discovered from MBFC ownership + evidence NER
     """
     import asyncio
 
@@ -886,10 +1102,13 @@ async def research_claim(
     affiliated_media = interested_parties.get("affiliated_media", [])
     all_parties = interested_parties.get("all_parties", [])
 
+    # Build the enriched parties dict (will be updated through the pipeline)
+    enriched_parties: InterestedPartiesDict = dict(interested_parties)
+
     log.info(logger, MODULE, "start", "Starting research agent",
              sub_claim=sub_claim)
 
-    # Phase 1: Programmatic seed searches (no LLM, ~3-8 seconds)
+    # Phase 1a: Programmatic seed searches (no LLM, ~3-8 seconds)
     # Gathers a broad, deterministic evidence pool before the agent starts.
     # The agent sees these as prior searches and spends its budget on
     # deep-dive fetching and targeted follow-up instead of initial discovery.
@@ -904,9 +1123,26 @@ async def research_claim(
                     error=str(e), error_type=type(e).__name__)
         seed_results = []
 
-    # Phase 1b: Rank seeds by quality + conflict detection
-    # Awaits MBFC lookups, scores URLs, detects interested party conflicts,
-    # sorts by adjusted score, keeps top 30.
+    # Phase 1b-i: Collect domains and await MBFC ratings in parallel.
+    # Separated from _rank_and_filter_seeds so we can run MBFC→Wikidata
+    # enrichment between the MBFC await and ranking.
+    from src.tools.source_ratings import await_ratings_parallel
+
+    domains = _collect_domains(seed_results)
+    if domains:
+        await await_ratings_parallel(list(domains), max_concurrent=8)
+
+    # Phase 1b-ii: MBFC→Wikidata enrichment (Step A).
+    # Extract owner names from MBFC ownership fields, Wikidata-expand them
+    # to discover networks/media holdings. Runs BEFORE ranking so new
+    # parties influence conflict detection.
+    all_parties, affiliated_media = await _enrich_parties_from_mbfc(
+        seed_results, all_parties, affiliated_media,
+    )
+    enriched_parties["all_parties"] = all_parties
+    enriched_parties["affiliated_media"] = affiliated_media
+
+    # Phase 1b-iii: Rank seeds by quality + conflict detection (with enriched parties)
     seed_results = await _rank_and_filter_seeds(
         seed_results,
         affiliated_media=affiliated_media,
@@ -951,10 +1187,18 @@ async def research_claim(
                  agent_steps=len(collected_messages),
                  seed_results=len(seed_results))
 
-        # Programmatic enrichment: LegiScan (legislation, votes, bill text)
+        # Phase 3a: Programmatic enrichment: LegiScan (legislation, votes, bill text)
         evidence = await _enrich_with_legislation(evidence, sub_claim)
 
-        return evidence
+        # Phase 3b: Evidence NER→Wikidata enrichment (Step B).
+        # Discover new interested parties from evidence article content.
+        all_parties, affiliated_media = await _enrich_parties_from_evidence_content(
+            evidence, all_parties, affiliated_media,
+        )
+        enriched_parties["all_parties"] = all_parties
+        enriched_parties["affiliated_media"] = affiliated_media
+
+        return evidence, enriched_parties
 
     except Exception as e:
         from langgraph.errors import GraphRecursionError
@@ -983,14 +1227,25 @@ async def research_claim(
             # Programmatic enrichment: LegiScan
             evidence = await _enrich_with_legislation(evidence, sub_claim)
 
-            return evidence
+            # Attempt Step B enrichment on partial evidence
+            try:
+                all_parties, affiliated_media = await _enrich_parties_from_evidence_content(
+                    evidence, all_parties, affiliated_media,
+                )
+                enriched_parties["all_parties"] = all_parties
+                enriched_parties["affiliated_media"] = affiliated_media
+            except Exception:
+                pass  # Keep whatever enrichment we have
+
+            return evidence, enriched_parties
 
         # No evidence gathered at all — fall back to direct search
         log.error(logger, MODULE, "agent_failed",
                   f"{log_msg} with no evidence, falling back to direct search",
                   error=str(e), error_type=error_type,
                   sub_claim=sub_claim)
-        return await _research_fallback(sub_claim)
+        fallback_evidence = await _research_fallback(sub_claim)
+        return fallback_evidence, enriched_parties
 
 
 async def _enrich_with_legislation(

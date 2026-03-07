@@ -1,4 +1,4 @@
-"""Source quality filter and MBFC cache warming for search results.
+"""Source quality filter for search results.
 
 Hard filter — if a domain is blocked, the result is silently dropped.
 
@@ -10,9 +10,9 @@ Two-layer filtering:
    factual rating. Block sources with "mixed" or worse factual reporting.
    This is principled filtering based on accuracy, not political bias.
 
-Also provides warm_mbfc_cache_background() — background MBFC scraping for
-domains in search results. Fires and forgets so the cache is warm by the
-time the seed ranking phase (await_ratings_parallel) and judge run.
+Also provides warm_mbfc_cache_background() — after bootstrap, every MBFC domain
+is already in the DB. This function is now a lightweight no-op that maintains
+the interface for search tool callers.
 """
 
 from urllib.parse import urlparse
@@ -23,12 +23,6 @@ from src.utils.logging import log, get_logger
 
 MODULE = "tools"
 logger = get_logger()
-
-# Hold references to background tasks so they don't get garbage-collected
-_background_tasks: set = set()
-
-# Track domains already being scraped in background to avoid duplicate requests
-_mbfc_pending: set = set()
 
 # Hard blocklist — things that are NOT news sources at all.
 # These can never be cited as evidence regardless of content quality.
@@ -165,6 +159,29 @@ HARD_BLOCKED_DOMAINS = {
     "duckduckgo.com",
     "yahoo.com",
     "baidu.com",
+
+    # Entertainment databases — not news or evidence sources
+    "imdb.com",
+    "m.imdb.com",
+    "rottentomatoes.com",
+    "metacritic.com",
+    "tvtropes.org",
+    "letterboxd.com",
+    "goodreads.com",
+
+    # Niche forums / medical trackers — not journalism
+    "flutrackers.com",
+    "patient.info",
+    "mayoclinic.org",
+    "clevelandclinic.org",
+    "medscape.com",
+
+    # Sports / weather / travel — rarely evidence for claims
+    "espn.com",
+    "weather.com",
+    "accuweather.com",
+    "booking.com",
+    "airbnb.com",
 }
 
 # Factual ratings that we block — "mixed" and worse
@@ -174,14 +191,14 @@ BLOCKED_FACTUAL_RATINGS = {"mixed", "low", "very-low"}
 
 def _get_cached_mbfc_rating(domain: str) -> Optional[str]:
     """Check MBFC cache for a domain's factual rating.
-    
+
     Returns the factual_reporting rating if cached, None if not in cache.
     This is sync and cache-only — no network calls.
     """
     try:
         # Import here to avoid circular imports
         from src.tools.source_ratings import get_source_rating_sync
-        
+
         rating = get_source_rating_sync(domain)
         if rating:
             return rating.get("factual_reporting")
@@ -198,7 +215,7 @@ def is_blocked(url: str) -> bool:
     Two-layer check:
     1. Hard blocklist — social media, video, content farms (always blocked)
     2. MBFC factual rating — news sources with "mixed" or worse are blocked
-    
+
     If a domain isn't in the hard blocklist AND isn't in MBFC cache,
     it passes through (we err on the side of allowing unknown sources).
     """
@@ -222,7 +239,7 @@ def is_blocked(url: str) -> bool:
         if clean_domain:
             factual = _get_cached_mbfc_rating(clean_domain)
             if factual and factual in BLOCKED_FACTUAL_RATINGS:
-                log.debug(logger, MODULE, "mbfc_block", 
+                log.debug(logger, MODULE, "mbfc_block",
                           f"Blocked {clean_domain} — factual rating: {factual}")
                 return True
 
@@ -232,6 +249,37 @@ def is_blocked(url: str) -> bool:
                     "is_blocked check failed, allowing domain through",
                     url=url, error=str(e))
         return False
+
+
+def _block_reason(url: str) -> str | None:
+    """Return the reason a URL is blocked, or None if allowed.
+
+    Mirrors is_blocked() logic but returns a descriptive reason string.
+    """
+    if not url:
+        return None
+
+    try:
+        hostname = urlparse(url).hostname or ""
+        hostname = hostname.lower()
+
+        # Check hard blocklist (handles subdomains)
+        parts = hostname.split(".")
+        for i in range(len(parts)):
+            domain = ".".join(parts[i:])
+            if domain in HARD_BLOCKED_DOMAINS:
+                return "hard_blocked"
+
+        # Not hard blocked — check MBFC factual rating
+        clean_domain = extract_domain(url)
+        if clean_domain:
+            factual = _get_cached_mbfc_rating(clean_domain)
+            if factual and factual in BLOCKED_FACTUAL_RATINGS:
+                return f"low_factual ({factual})"
+
+        return None
+    except Exception:
+        return None
 
 
 def filter_results(results: list[dict], url_key: str = "url") -> list[dict]:
@@ -245,104 +293,33 @@ def filter_results(results: list[dict], url_key: str = "url") -> list[dict]:
         Filtered list with blocked domains removed.
     """
     filtered = []
-    blocked_count = 0
+    blocked_details: list[dict] = []
 
     for r in results:
         url = r.get(url_key, "")
-        if is_blocked(url):
-            blocked_count += 1
+        reason = _block_reason(url)
+        if reason:
+            domain = extract_domain(url) or urlparse(url).hostname or url
+            blocked_details.append({"domain": domain, "reason": reason})
         else:
             filtered.append(r)
 
-    if blocked_count > 0:
-        log.debug(logger, MODULE, "source_filter", "Filtered low-quality sources",
-                  blocked_count=blocked_count, kept_count=len(filtered))
+    if blocked_details:
+        blocked_summary = "; ".join(
+            f"{b['domain']} ({b['reason']})" for b in blocked_details
+        )
+        log.info(logger, MODULE, "source_filter", "Filtered low-quality sources",
+                 blocked_count=len(blocked_details), kept_count=len(filtered),
+                 blocked=blocked_summary)
 
     return filtered
 
 
 async def warm_mbfc_cache_background(results: list[dict], url_key: str = "url") -> None:
-    """Opportunistic background MBFC cache warming for search results.
+    """No-op after MBFC index bootstrap — all domains are already in the DB.
 
-    This is the FIRE-AND-FORGET layer of the two-layer MBFC strategy:
-      1. warm_mbfc_cache_background (here) — called by search tools on every
-         result set. Non-blocking. Warms the cache so data is ready later.
-      2. await_ratings_parallel (source_ratings.py) — called by seed ranking.
-         BLOCKING. The authoritative layer that guarantees MBFC data is
-         available before scoring and ranking.
-
-    Launches MBFC scrapes as a background task so search tools return
-    immediately. The cache will be populated by the time the seed ranking
-    phase or judge runs.
+    Kept for interface stability with search tool callers. After bootstrap,
+    every MBFC-tracked domain has bias/factual in the DB. Unknown domains
+    are simply not in MBFC (nothing to scrape).
     """
-    import asyncio
-
-    # Collect unique domains that aren't hard-blocked and aren't cached
-    domains_to_check = set()
-    for r in results:
-        url = r.get(url_key, "")
-        if not url:
-            continue
-
-        domain = extract_domain(url)
-        if not domain:
-            continue
-
-        # Skip if hard-blocked (no point checking MBFC)
-        parts = domain.split(".")
-        hard_blocked = False
-        for i in range(len(parts)):
-            if ".".join(parts[i:]) in HARD_BLOCKED_DOMAINS:
-                hard_blocked = True
-                break
-        if hard_blocked:
-            continue
-
-        # Skip if already cached
-        cached_rating = _get_cached_mbfc_rating(domain)
-        if cached_rating is not None:
-            continue
-
-        # Skip if already being scraped in another background task
-        if domain in _mbfc_pending:
-            continue
-
-        domains_to_check.add(domain)
-
-    if not domains_to_check:
-        return
-
-    # Mark these domains as pending before launching background task
-    _mbfc_pending.update(domains_to_check)
-
-    log.debug(logger, MODULE, "mbfc_populate_start",
-              "Pre-populating MBFC cache (background)",
-              domain_count=len(domains_to_check))
-
-    # Import here to avoid circular imports
-    from src.tools.source_ratings import get_source_rating
-
-    # Scrape concurrently, cap at 4 to avoid hammering MBFC
-    sem = asyncio.Semaphore(4)
-
-    async def _check(domain: str) -> None:
-        async with sem:
-            try:
-                await get_source_rating(domain)
-            except Exception as e:
-                log.warning(logger, MODULE, "mbfc_populate_failed",
-                            "MBFC cache population failed for domain",
-                            domain=domain, error=str(e))
-            finally:
-                _mbfc_pending.discard(domain)
-
-    async def _run_all() -> None:
-        await asyncio.gather(*[_check(d) for d in domains_to_check])
-        log.debug(logger, MODULE, "mbfc_populate_done",
-                  "MBFC cache populated (background)",
-                  domain_count=len(domains_to_check))
-
-    # Fire-and-forget — don't block the search tool
-    task = asyncio.create_task(_run_all())
-    _background_tasks.add(task)
-    task.add_done_callback(_background_tasks.discard)
+    pass

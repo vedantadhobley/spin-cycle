@@ -45,6 +45,13 @@ async def main():
     log.info(logger, MODULE, "starting", "Connecting to Temporal",
              temporal_host=TEMPORAL_HOST, task_queue=TASK_QUEUE)
 
+    # Bootstrap MBFC index from REST API if needed (first startup ~25s, skip if fresh)
+    from src.tools.mbfc_index import bootstrap_mbfc_index, is_bootstrap_needed
+    if is_bootstrap_needed():
+        log.info(logger, MODULE, "mbfc_bootstrap_start", "Bootstrapping MBFC index from API")
+        count = await bootstrap_mbfc_index()
+        log.info(logger, MODULE, "mbfc_bootstrap_done", "MBFC index ready", record_count=count)
+
     client = await Client.connect(TEMPORAL_HOST)
     log.info(logger, MODULE, "connected", "Connected to Temporal server",
              temporal_host=TEMPORAL_HOST)

@@ -4,22 +4,16 @@ The decompose LLM writes targeted seed queries per fact — human-quality
 search queries tailored to the specific evidence each fact needs. This
 module wraps those LLM-provided queries in backend routing specs based
 on the fact's categories, and adds mechanical base queries (raw sub-claim
-to SearXNG, Wikipedia search).
-
-Categories (also from the decompose LLM) determine which SearXNG category
-to use: CURRENT_EVENTS → news, SCIENTIFIC → science, everything else → general.
++ Wikipedia).
 
 The query specs are consumed by _run_seed_searches() in research.py,
 which dispatches them to backends with availability fallback.
+
+Backends: DuckDuckGo (primary, official API, always reliable) + SearXNG
+(secondary, for extra coverage). SearXNG's scraping-based engines degrade
+over time (CAPTCHA/blocked), but even with only Bing it adds some results
+that DDG misses.
 """
-
-
-# Map categories to SearXNG search categories.
-# CURRENT_EVENTS → news, SCIENTIFIC → science, everything else → general.
-_CATEGORY_TO_SEARXNG = {
-    "CURRENT_EVENTS": "news",
-    "SCIENTIFIC": "science",
-}
 
 
 def generate_seed_queries(
@@ -32,33 +26,25 @@ def generate_seed_queries(
     The LLM writes the search queries (good phrasing, targeted to the
     evidence need). This function handles backend routing:
     - Which backends to send each query to
-    - Which SearXNG category to use
     - How many results to request
     - Deduplication
 
     Returns a list of query specs, each with:
         query: str — the search query
         backends: list[str] — which backends to dispatch to
-        searxng_category: str — SearXNG category (general, news, science)
+        searxng_category: str — kept for interface compat, unused by DDG
         max_results: int — max results per backend
         label: str — unique label for dedup and logging
     """
     specs: list[dict] = []
 
-    # Determine the best SearXNG category from the fact's categories
-    searxng_cat = "general"
-    for cat in categories:
-        if cat in _CATEGORY_TO_SEARXNG:
-            searxng_cat = _CATEGORY_TO_SEARXNG[cat]
-            break
-
     # ── Base queries (always generated, mechanical) ──────────────────
-    # 1. Raw sub-claim → SearXNG (wide net)
+    # 1. Raw sub-claim → DDG + SearXNG (wide net, backend diversity)
     specs.append({
         "query": sub_claim[:120],
-        "backends": ["searxng"],
-        "searxng_category": searxng_cat,
-        "max_results": 30,
+        "backends": ["duckduckgo", "searxng"],
+        "searxng_category": "",
+        "max_results": 20,
         "label": "primary",
     })
 
@@ -79,9 +65,9 @@ def generate_seed_queries(
                 continue
             specs.append({
                 "query": query[:120],
-                "backends": ["searxng"],
-                "searxng_category": searxng_cat,
-                "max_results": 20,
+                "backends": ["duckduckgo", "searxng"],
+                "searxng_category": "",
+                "max_results": 15,
                 "label": f"seed_{i}",
             })
 

@@ -42,8 +42,8 @@ async def search_serper(query: str, max_results: int = 5) -> list[dict]:
         return []
 
     import time as _time
-    log.debug(logger, MODULE, "serper_start", "Serper search starting",
-              query=query, max_results=max_results)
+    log.info(logger, MODULE, "serper_start", "Serper search starting",
+             query=query, max_results=max_results)
     _t0 = _time.monotonic()
 
     async with httpx.AsyncClient() as client:
@@ -79,12 +79,14 @@ async def search_serper(query: str, max_results: int = 5) -> list[dict]:
                     "url": kg.get("descriptionLink") or kg.get("website") or "",
                 })
 
+            raw_count = len(results)
+
             await warm_mbfc_cache_background(results)
             results = filter_results(results)[:max_results]
 
-            log.debug(logger, MODULE, "serper_done", "Serper search complete",
-                      query=query, result_count=len(results),
-                      latency_ms=int((_time.monotonic() - _t0) * 1000))
+            log.info(logger, MODULE, "serper_done", "Serper search complete",
+                     query=query, raw_count=raw_count, result_count=len(results),
+                     latency_ms=int((_time.monotonic() - _t0) * 1000))
             return results
 
         except httpx.HTTPStatusError as e:

@@ -47,8 +47,8 @@ async def search_searxng(
         return []
 
     import time as _time
-    log.debug(logger, MODULE, "searxng_start", "SearXNG search starting",
-              query=query, max_results=max_results, categories=categories)
+    log.info(logger, MODULE, "searxng_start", "SearXNG search starting",
+             query=query, max_results=max_results, categories=categories)
     _t0 = _time.monotonic()
 
     async with httpx.AsyncClient() as client:
@@ -76,13 +76,15 @@ async def search_searxng(
                     "engines": item.get("engines", []),
                 })
 
+            raw_count = len(results)
+
             # Pre-populate MBFC cache so filter_results has data for unknown domains
             await warm_mbfc_cache_background(results)
             results = filter_results(results)[:max_results]
 
-            log.debug(logger, MODULE, "searxng_done", "SearXNG search complete",
-                      query=query, result_count=len(results),
-                      latency_ms=int((_time.monotonic() - _t0) * 1000))
+            log.info(logger, MODULE, "searxng_done", "SearXNG search complete",
+                     query=query, raw_count=raw_count, result_count=len(results),
+                     latency_ms=int((_time.monotonic() - _t0) * 1000))
             return results
 
         except Exception as e:

@@ -7,7 +7,11 @@ Flat pipeline — no recursion:
      — interested parties expanded via Wikidata (programmatic)
   2. Research all facts (separate phase, thinking=off — fast)
      — full interested_parties dict passed for conflict detection
+     — MBFC ownership → Wikidata enrichment discovers new parties/media
+     — evidence NER → Wikidata enrichment discovers connected entities
+     — enriched parties merged across sub-claims for judge phase
   3. Judge all facts (separate phase, thinking=on — slow)
+     — receives merged interested parties from all research sub-claims
   4. Synthesize all verdicts into a final result
   5. Store result + start next queued claim
 
@@ -127,8 +131,8 @@ class VerifyClaimWorkflow:
         # Then judge all facts (thinking=on, slow)
         # This prevents slow judge calls from starving faster research agents.
 
-        async def _research(fact: dict) -> tuple[str, list]:
-            """Research a single fact, return (fact_text, evidence)."""
+        async def _research(fact: dict) -> tuple[str, list, dict]:
+            """Research a single fact, return (fact_text, evidence, enriched_parties)."""
             fact_text = fact["text"]
             fact_categories = fact.get("categories", ["GENERAL"])
             fact_seed_queries = fact.get("seed_queries", [])
@@ -137,20 +141,21 @@ class VerifyClaimWorkflow:
                      claim_id=claim_id, fact=fact_text,
                      categories=fact_categories,
                      seed_query_count=len(fact_seed_queries))
-            evidence = await workflow.execute_activity(
+            result = await workflow.execute_activity(
                 research_subclaim,
                 args=[fact_text, interested_parties,
                       fact_categories, fact_seed_queries],
                 start_to_close_timeout=timedelta(seconds=300),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
-            return (fact_text, evidence)
+            return (fact_text, result["evidence"], result.get("enriched_parties", {}))
 
-        async def _judge(fact_text: str, evidence: list) -> dict:
+        async def _judge(fact_text: str, evidence: list,
+                         merged_parties: dict) -> dict:
             """Judge a single fact given its evidence."""
             return await workflow.execute_activity(
                 judge_subclaim,
-                args=[claim_text, fact_text, evidence, interested_parties],
+                args=[claim_text, fact_text, evidence, merged_parties],
                 start_to_close_timeout=timedelta(seconds=300),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
@@ -160,7 +165,7 @@ class VerifyClaimWorkflow:
         # As soon as one finishes, the next starts immediately (no batch waiting).
         research_semaphore = asyncio.Semaphore(MAX_CONCURRENT)
 
-        async def _research_with_limit(fact: dict) -> tuple[str, list]:
+        async def _research_with_limit(fact: dict) -> tuple[str, list, dict]:
             async with research_semaphore:
                 return await _research(fact)
 
@@ -175,9 +180,12 @@ class VerifyClaimWorkflow:
             return_exceptions=True
         )
 
-        # Filter out failures
+        # Filter out failures and merge enriched parties across sub-claims
         all_evidence = []
         research_failures = 0
+        merged_all_parties = set(interested_parties.get("all_parties", []))
+        merged_affiliated_media = set(interested_parties.get("affiliated_media", []))
+
         for i, result in enumerate(research_results):
             if isinstance(result, Exception):
                 log.warning(workflow.logger, MODULE, "research_failed",
@@ -186,20 +194,32 @@ class VerifyClaimWorkflow:
                             error=str(result))
                 research_failures += 1
             else:
-                all_evidence.append(result)
+                fact_text, evidence, enriched = result
+                all_evidence.append((fact_text, evidence))
+                # Merge enriched parties from each sub-claim
+                if enriched:
+                    merged_all_parties.update(enriched.get("all_parties", []))
+                    merged_affiliated_media.update(enriched.get("affiliated_media", []))
+
+        # Build merged interested parties for the judge phase
+        merged_parties = dict(interested_parties)
+        merged_parties["all_parties"] = list(merged_all_parties)
+        merged_parties["affiliated_media"] = list(merged_affiliated_media)
 
         _research_ms = round((workflow.time() - _t0) * 1000)
         log.info(workflow.logger, MODULE, "research_phase_done",
                  "Research phase completed",
                  claim_id=claim_id, latency_ms=_research_ms,
-                 succeeded=len(all_evidence), failed=research_failures)
+                 succeeded=len(all_evidence), failed=research_failures,
+                 merged_parties=len(merged_all_parties),
+                 merged_media=len(merged_affiliated_media))
 
         # Phase 2: Judge all facts with sliding window concurrency
         judge_semaphore = asyncio.Semaphore(MAX_CONCURRENT)
 
         async def _judge_with_limit(fact_text: str, evidence: list) -> dict:
             async with judge_semaphore:
-                return await _judge(fact_text, evidence)
+                return await _judge(fact_text, evidence, merged_parties)
 
         log.info(workflow.logger, MODULE, "judge_phase_start",
                  "Starting judge phase with sliding window",
