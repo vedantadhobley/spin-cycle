@@ -51,7 +51,7 @@ async def search_duckduckgo(query: str, max_results: int = 5) -> list[dict]:
 
     Uses langchain_community's DuckDuckGoSearchResults (official API).
     Returns list of {title, snippet, url} dicts — same schema as
-    search_searxng/search_serper/search_brave.
+    search_serper/search_searxng/search_brave.
     """
     log.info(logger, MODULE, "ddg_start", "DuckDuckGo search starting",
              query=query, max_results=max_results)

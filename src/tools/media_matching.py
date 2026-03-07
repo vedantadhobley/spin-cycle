@@ -43,6 +43,18 @@ MEDIA_DOMAIN_ALIASES = {
 }
 
 
+# Generic corporate/industry terms that appear in MBFC ownership strings
+# but aren't meaningful party identifiers.  Single-word parties matching
+# these are skipped in check_publisher_ownership() to prevent false positives
+# (e.g. "Media" in all_parties matching every ownership string that contains
+# the word "media").
+_GENERIC_OWNERSHIP_TERMS = {
+    "media", "group", "inc", "corp", "corporation", "company",
+    "holdings", "enterprises", "foundation", "institute", "network",
+    "news", "digital", "publishing", "entertainment", "international",
+    "limited", "ltd", "llc", "partners", "trust", "association",
+}
+
 # Generic ownership strings that won't yield useful PERSON/ORG entities.
 _GENERIC_OWNERSHIP = {
     "state-funded", "state funded", "non-profit", "nonprofit",
@@ -148,9 +160,16 @@ def check_publisher_ownership(url: str, all_parties: list[str]) -> str | None:
     ownership_lower = rating["ownership"].lower()
 
     for party in all_parties:
-        party_lower = party.lower()
+        party_lower = party.lower().strip()
         if len(party_lower) < 4:
             continue  # Skip very short names to avoid false matches
+        # Skip single-word generic corporate terms (e.g. "Media", "Group")
+        words = party_lower.split()
+        if len(words) == 1 and party_lower in _GENERIC_OWNERSHIP_TERMS:
+            log.debug(logger, MODULE, "generic_term_skipped",
+                      "Skipped generic corporate term in ownership check",
+                      party=party, url=url)
+            continue
         if party_lower in ownership_lower:
             log.info(logger, MODULE, "publisher_ownership_match",
                      "Publisher ownership matches interested party",

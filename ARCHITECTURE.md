@@ -26,7 +26,7 @@ There are three major technologies in play, each doing a different job. Understa
 LangChain is the **toolbox**. It provides:
 
 - **`ChatOpenAI`** — the LLM client that talks to the LLM server's OpenAI-compatible API. Every LLM call in the project goes through this class. It handles message formatting, streaming, structured output, and tool calling.
-- **LangChain tools** — standardised interfaces for external services. DuckDuckGo search, Wikipedia, SearXNG, Serper, Brave, and page fetching are all wrapped as LangChain tools with a common `.invoke()` / `.ainvoke()` API.
+- **LangChain tools** — standardised interfaces for external services. Serper (Google), DuckDuckGo, Wikipedia, SearXNG, Brave, and page fetching are all wrapped as LangChain tools with a common `.invoke()` / `.ainvoke()` API.
 - **Message types** — `SystemMessage`, `HumanMessage`, `AIMessage`, `ToolMessage`. These are the primitives that make up an LLM conversation.
 
 LangChain does NOT handle orchestration, retries, scheduling, or state persistence. It's the building blocks.
@@ -299,10 +299,10 @@ This is where the LangGraph ReAct agent runs. For each **atomic fact**:
 The research agent uses **thinking=off**. The ReAct loop is pure tool-routing — picking search queries and deciding when to stop. Thinking mode wastes ~25-45s per iteration generating `<think>` blocks that nobody reads, just to produce an 8-token tool call. With thinking off, the same search queries are produced in ~3s per iteration.
 
 **Tools available to the agent (dynamically loaded based on API keys):**
-- `web_search` — DuckDuckGo search (primary). Official API, always available.
-- `searxng_search` — SearXNG meta-search (secondary, extra coverage). Self-hosted, no API key.
-- `serper_search` — Google search via Serper API. Requires `SERPER_API_KEY`.
-- `brave_search` — Brave Search API. Requires `BRAVE_API_KEY`.
+- `serper_search` — Google search via Serper API (primary). Requires `SERPER_API_KEY`.
+- `web_search` — DuckDuckGo search (fallback). Always available, free.
+- `searxng_search` — SearXNG meta-search (optional padding). Self-hosted, no API key.
+- `brave_search` — Brave Search API (optional). Requires `BRAVE_API_KEY`.
 - `wikipedia_search` — Wikipedia API search (established facts, background).
 - `page_fetcher` — Fetches and extracts text from URLs found in search results.
 
@@ -539,7 +539,7 @@ Search engines return Reddit comments, Quora answers, Medium blogs, and other us
 
 ### How It's Wired
 
-- `filter_results(results)` — called in all 4 search tools (SearXNG, Serper, Brave, DuckDuckGo) on the result list before returning
+- `filter_results(results)` — called in all search tools (Serper, SearXNG, Brave, DuckDuckGo) on the result list before returning
 - `is_blocked(url)` — called in `page_fetcher.py` to reject blocked URLs before fetching
 - Handles subdomains: `old.reddit.com` matches the `reddit.com` block
 - Search tools request extra results (e.g., 15 instead of 10) to compensate for filtering losses
@@ -951,10 +951,10 @@ spin-cycle-dev-adminer           :4502  ← Postgres web UI (Dracula theme)
 
 - `LLAMA_URL` — LLM API (llama.cpp Qwen3.5-35B-A3B, unified thinking/non-thinking, via Tailscale)
 - `LLAMA_EMBED_URL` — LLM embeddings API (llama.cpp, via Tailscale)
-- DuckDuckGo — primary search (official API, always available)
-- SearXNG — secondary meta-search (self-hosted, configured via `SEARXNG_URL`)
-- Serper — Google search API (requires `SERPER_API_KEY`)
-- Brave Search — web search API (requires `BRAVE_API_KEY`)
+- Serper — primary search (Google results via API, requires `SERPER_API_KEY`)
+- DuckDuckGo — fallback search (free, always available)
+- SearXNG — optional padding (self-hosted meta-search, configured via `SEARXNG_URL`)
+- Brave Search — optional (independent index, requires `BRAVE_API_KEY`)
 - Wikipedia API — factual lookups (no API key)
 
 ---
@@ -1108,7 +1108,7 @@ Config: `~/workspace/monitor/promtail/promtail.yml`
 | Temporal workflow | **Done** | VerifyClaimWorkflow with 7 activities, flat pipeline, thesis-aware synthesis, retry policies |
 | Temporal worker | **Done** | Registers workflow + 7 activities, max_concurrent_activities=2, structured logging |
 | `decompose_claim` | **Done** | LLM decomposes text into flat facts (guided by linguistic patterns) + thesis (structure, key_test) in one pass |
-| `research_subclaim` | **Done** | LangGraph ReAct agent with DuckDuckGo + SearXNG + Wikipedia + page_fetcher (Serper/Brave if API keys configured) |
+| `research_subclaim` | **Done** | LangGraph ReAct agent with Serper (primary) + DuckDuckGo (fallback) + SearXNG + Wikipedia + page_fetcher |
 | `judge_subclaim` | **Done** | LLM evaluates evidence, returns structured verdict |
 | `synthesize_verdict` | **Done** | Thesis-aware synthesis — evaluates whether speaker's argument survives sub-verdicts (importance-weighted, not count-based) |
 | `store_result` | **Done** | Writes flat result to Postgres (all sub-claims as leaves) |
@@ -1284,10 +1284,10 @@ spin-cycle/
 │   │   ├── mbfc_index.py           # MBFC index bootstrap (WordPress REST API → source_ratings DB)
 │   │   ├── wikidata.py             # Wikidata SPARQL — ownership chains, relationships
 │   │   ├── legiscan.py             # LegiScan API — US legislation, votes, bill text
-│   │   ├── searxng.py              # SearXNG meta-search (self-hosted)
-│   │   ├── serper.py               # Serper (Google Search API)
+│   │   ├── searxng.py              # SearXNG meta-search (optional padding, self-hosted)
+│   │   ├── serper.py               # Serper (Google Search API) — primary search backend
 │   │   ├── brave.py                # Brave Search API
-│   │   ├── web_search.py           # DuckDuckGo search (primary backend)
+│   │   ├── web_search.py           # DuckDuckGo search (fallback backend)
 │   │   ├── wikipedia.py            # Wikipedia API
 │   │   └── page_fetcher.py         # URL → text extraction (respects blocklist)
 │   │
@@ -1334,4 +1334,4 @@ spin-cycle/
 | `pydantic` | >=2.0 | Request/response validation |
 | `sqlalchemy` | >=2.0 | Async ORM (PostgreSQL) |
 | `asyncpg` | >=0.30.0 | Async PostgreSQL driver |
-| `httpx` | >=0.28.0 | Async HTTP client (Wikipedia, Serper, Brave, SearXNG) |
+| `httpx` | >=0.28.0 | Async HTTP client (Serper, Wikipedia, Brave, SearXNG) |

@@ -4,7 +4,7 @@
 
 Phase 1 — Programmatic seed search (~3-20s):
   1. _run_seed_searches(): Fire LLM-written queries + base queries (raw claim,
-     Wikipedia) to SearXNG/Serper/Brave concurrently. Yields ~80-100 raw URLs.
+     Wikipedia) to Serper/DuckDuckGo/SearXNG concurrently. Yields ~30-50 raw URLs.
   2. _collect_domains() + await_ratings_parallel(): Warm MBFC cache for all
      seed domains (per-domain 15s httpx timeout).
   3. _enrich_parties_from_mbfc(): Extract owner names from MBFC ownership
@@ -42,10 +42,10 @@ Phase 3 — Programmatic enrichment:
 ## Agent tools
 
 Dynamically registered based on API keys:
-  - searxng_search: Self-hosted meta-search (needs SEARXNG_URL)
-  - serper_search: Google results via Serper API (needs SERPER_API_KEY)
-  - brave_search: Brave Search index (needs BRAVE_API_KEY)
-  - web_search: DuckDuckGo fallback (always available)
+  - serper_search: Google results via Serper API (primary, needs SERPER_API_KEY)
+  - web_search: DuckDuckGo (fallback, always available)
+  - searxng_search: Self-hosted meta-search (optional padding, needs SEARXNG_URL)
+  - brave_search: Brave Search index (optional, needs BRAVE_API_KEY)
   - wikipedia_search: Wikipedia API (always available)
   - fetch_page_content: Read full page text from URLs (always available)
 
@@ -196,10 +196,10 @@ def _build_progress_note(messages: list) -> str | None:
     engine_names = []
     for t in tools_used:
         tl = t.lower()
-        if "searxng" in tl:
-            engine_names.append("SearXNG")
-        elif "serper" in tl:
+        if "serper" in tl:
             engine_names.append("Serper")
+        elif "searxng" in tl:
+            engine_names.append("SearXNG")
         elif "brave" in tl:
             engine_names.append("Brave")
         elif "web_search" in tl or "duckduckgo" in tl:
@@ -213,10 +213,10 @@ def _build_progress_note(messages: list) -> str | None:
     suggestions = []
     # Only suggest engines that are actually configured
     available_engines = {"DuckDuckGo", "Wikipedia"}
-    if searxng_available():
-        available_engines.add("SearXNG")
     if serper_available():
         available_engines.add("Serper")
+    if searxng_available():
+        available_engines.add("SearXNG")
     if brave_available():
         available_engines.add("Brave")
     unused_engines = available_engines - set(engine_names)
@@ -277,11 +277,11 @@ def _research_pre_model_hook(state: dict) -> dict:
 def _build_tool_list() -> list:
     """Build the agent's tool list based on which API keys are configured.
 
-    Search tools:
-      1. DuckDuckGo (primary — official API, always available, reliable)
-      2. SearXNG (secondary — self-hosted meta-search, extra coverage)
-      3. Serper (Google index, if API key configured and has credits)
-      4. Brave (independent index, if API key configured)
+    Search tools (priority order):
+      1. Serper (primary — Google results via Serper API, needs SERPER_API_KEY)
+      2. DuckDuckGo (fallback — always available, free)
+      3. SearXNG (optional padding — self-hosted meta-search)
+      4. Brave (optional — independent index, needs BRAVE_API_KEY)
 
     Always included:
       - Wikipedia (free, reliable for established facts)
@@ -289,19 +289,20 @@ def _build_tool_list() -> list:
     """
     tools = []
 
-    # DuckDuckGo — primary search, always available
+    # Serper — primary search (Google results)
+    if serper_available():
+        tools.append(get_serper_tool())
+        log.info(logger, MODULE, "tool_enabled", "Serper search enabled (primary)")
+
+    # DuckDuckGo — fallback, always available
     tools.append(get_web_search_tool())
 
-    # SearXNG — secondary, adds coverage even with degraded engines
+    # SearXNG — optional padding, adds coverage even with degraded engines
     if searxng_available():
         tools.append(get_searxng_tool())
         log.info(logger, MODULE, "tool_enabled", "SearXNG meta-search enabled")
 
-    # Paid API search tools — add if configured
-    if serper_available():
-        tools.append(get_serper_tool())
-        log.info(logger, MODULE, "tool_enabled", "Serper search enabled")
-
+    # Brave — optional, independent index
     if brave_available():
         tools.append(get_brave_tool())
         log.info(logger, MODULE, "tool_enabled", "Brave search enabled")
@@ -430,7 +431,7 @@ def _parse_tool_output(content: str, tool_name: str) -> list[dict]:
     if stripped.startswith(("Blocked source:", "Failed to fetch", "Invalid URL")):
         return []
 
-    # Multi-result tools (SearXNG, Serper, Brave, Wikipedia, DDG)
+    # Multi-result tools (Serper, SearXNG, Brave, Wikipedia, DDG)
     # Split on '---' separator used by all our tool wrappers
     blocks = stripped.split("\n\n---\n\n")
 
@@ -573,7 +574,7 @@ async def _run_seed_searches(
             # Resolve backend with availability fallback
             resolved_backend = backend
             if backend == "serper" and not serper_available():
-                resolved_backend = "searxng" if searxng_available() else None
+                resolved_backend = "duckduckgo"  # free fallback
             elif backend == "brave" and not brave_available():
                 resolved_backend = "searxng" if searxng_available() else None
             elif backend == "searxng" and not searxng_available():
@@ -597,12 +598,12 @@ async def _run_seed_searches(
             ):
                 async with sem:
                     try:
-                        if be == "searxng":
-                            return (lbl, q, "web",
-                                    await search_searxng(q, max_results=mx, categories=cat or "general"))
-                        elif be == "serper":
+                        if be == "serper":
                             return (lbl, q, "web",
                                     await search_serper(q, max_results=mx))
+                        elif be == "searxng":
+                            return (lbl, q, "web",
+                                    await search_searxng(q, max_results=mx, categories=cat or "general"))
                         elif be == "brave":
                             return (lbl, q, "web",
                                     await search_brave(q, max_results=mx))
@@ -1298,13 +1299,30 @@ async def _research_fallback(sub_claim: str) -> list[dict]:
     we fall back to running search tools directly. No LLM reasoning about
     what to search — we just search for the claim text directly.
 
-    Uses the best available search tool (SearXNG > Serper > Brave > DDG).
+    Uses the best available search tool (Serper > SearXNG > Brave > DDG).
     """
     log.info(logger, MODULE, "fallback_start", "Running fallback direct search",
              sub_claim=sub_claim)
     evidence = []
 
-    # Try SearXNG first (self-hosted meta-search)
+    # Try Serper first (Google results — primary)
+    if serper_available():
+        try:
+            results = await search_serper(sub_claim, max_results=8)
+            for r in results:
+                evidence.append({
+                    "source_type": "web",
+                    "source_url": r.get("url"),
+                    "title": r.get("title", ""),
+                    "content": r.get("snippet", ""),
+                    "supports_claim": None,
+                })
+        except Exception as e:
+            log.warning(logger, MODULE, "fallback_serper_failed",
+                        "Serper fallback search failed",
+                        error=str(e), error_type=type(e).__name__)
+
+    # Try SearXNG (self-hosted meta-search)
     if searxng_available():
         try:
             from src.tools.searxng import search_searxng
@@ -1320,23 +1338,6 @@ async def _research_fallback(sub_claim: str) -> list[dict]:
         except Exception as e:
             log.warning(logger, MODULE, "fallback_searxng_failed",
                         "SearXNG fallback search failed",
-                        error=str(e), error_type=type(e).__name__)
-
-    # Try Serper (best paid results)
-    if serper_available():
-        try:
-            results = await search_serper(sub_claim, max_results=5)
-            for r in results:
-                evidence.append({
-                    "source_type": "web",
-                    "source_url": r.get("url"),
-                    "title": r.get("title", ""),
-                    "content": r.get("snippet", ""),
-                    "supports_claim": None,
-                })
-        except Exception as e:
-            log.warning(logger, MODULE, "fallback_serper_failed",
-                        "Serper fallback search failed",
                         error=str(e), error_type=type(e).__name__)
 
     # Try Brave (different index = different results)

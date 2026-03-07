@@ -293,10 +293,10 @@ docker logs -f spin-cycle-dev-worker
 | `LOG_FORMAT` | `json` (prod) / `pretty` (dev) | Log output format — `json` for Grafana Loki, `pretty` for terminal |
 | `LOG_LEVEL` | `INFO` | Log level — `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 | `NEWSAPI_KEY` | (empty) | NewsAPI key (not currently wired — future use) |
-| `SERPER_API_KEY` | (empty) | Serper key for Google search evidence |
+| `SERPER_API_KEY` | (empty) | Serper key for Google search (primary search backend) |
 | `BRAVE_API_KEY` | (empty) | Brave Search API key |
 | `LEGISCAN_API_KEY` | (empty) | LegiScan Civic API key (US legislation, votes, bill text) |
-| `SEARXNG_URL` | `http://searxng:8080` | SearXNG meta-search endpoint (secondary search, self-hosted) |
+| `SEARXNG_URL` | `http://searxng:8080` | SearXNG meta-search endpoint (optional padding, self-hosted) |
 
 ## Port Allocation
 
@@ -370,10 +370,10 @@ spin-cycle/
 │   │   ├── media_matching.py       # URL↔media matching, publisher ownership, MBFC owner extraction
 │   │   ├── wikidata.py             # Wikidata SPARQL — ownership chains, relationships
 │   │   ├── legiscan.py             # LegiScan API — US legislation, votes, bill text
-│   │   ├── searxng.py              # SearXNG meta-search (secondary)
-│   │   ├── serper.py               # Serper (Google Search API)
+│   │   ├── searxng.py              # SearXNG meta-search (optional padding)
+│   │   ├── serper.py               # Serper (Google Search API) — primary search backend
 │   │   ├── brave.py                # Brave Search API
-│   │   ├── web_search.py           # DuckDuckGo (primary search backend)
+│   │   ├── web_search.py           # DuckDuckGo (fallback search backend)
 │   │   ├── wikipedia.py            # Wikipedia API
 │   │   └── page_fetcher.py         # URL → text extraction + SpaCy entity metadata
 │   │

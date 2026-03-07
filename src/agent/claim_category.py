@@ -9,10 +9,9 @@ on the fact's categories, and adds mechanical base queries (raw sub-claim
 The query specs are consumed by _run_seed_searches() in research.py,
 which dispatches them to backends with availability fallback.
 
-Backends: DuckDuckGo (primary, official API, always reliable) + SearXNG
-(secondary, for extra coverage). SearXNG's scraping-based engines degrade
-over time (CAPTCHA/blocked), but even with only Bing it adds some results
-that DDG misses.
+Backends: Serper (primary — Google results via API) + DuckDuckGo (free
+fallback, always available) + SearXNG (optional padding, self-hosted
+meta-search). If Serper is unavailable, seeds fall back to DDG.
 """
 
 
@@ -39,10 +38,10 @@ def generate_seed_queries(
     specs: list[dict] = []
 
     # ── Base queries (always generated, mechanical) ──────────────────
-    # 1. Raw sub-claim → DDG + SearXNG (wide net, backend diversity)
+    # 1. Raw sub-claim → Serper (Google, primary) + DDG (fallback) + SearXNG (padding)
     specs.append({
         "query": sub_claim[:120],
-        "backends": ["duckduckgo", "searxng"],
+        "backends": ["serper", "duckduckgo", "searxng"],
         "searxng_category": "",
         "max_results": 20,
         "label": "primary",
@@ -65,7 +64,7 @@ def generate_seed_queries(
                 continue
             specs.append({
                 "query": query[:120],
-                "backends": ["duckduckgo", "searxng"],
+                "backends": ["serper", "duckduckgo", "searxng"],
                 "searxng_category": "",
                 "max_results": 15,
                 "label": f"seed_{i}",
