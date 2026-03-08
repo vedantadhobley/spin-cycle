@@ -513,6 +513,12 @@ someone who has NOT seen the original claim can verify it.
    GOOD: "Organization X is exempt from customs duties under [specific treaty]"
    BAD:  "Spending increased significantly" (whose spending? what baseline?)
    GOOD: "Agency Y spending increased from $140B to $160B between 2019 and 2023"
+   When a claim mentions a person who holds MULTIPLE roles, attribute each \
+action to the CORRECT entity. "Elon Musk runs SpaceX while heading the \
+agency cutting government spending" → the agency cutting spending is DOGE, \
+not SpaceX. Do not transfer an action from one role to another entity.
+   BAD:  "SpaceX is cutting government spending" (wrong entity)
+   GOOD: "Elon Musk heads the agency (DOGE) that is cutting government spending"
 
 7. EXTRACT THE UNDERLYING FACTUAL QUESTION
    When phrasing is loaded or abstract, ask: "what factual question is actually being asked?" \
@@ -575,6 +581,12 @@ cannot search for "X". If the claim contains a specific number, keep that \
 number. If the claim does not specify a number, do not invent one. \
 The same applies to dates and names: "Entity A did Z after Event B" is \
 searchable. "Entity A did Z on [Specific Date]" is NOT.
+   ANOTHER COMMON VIOLATION: Do not rephrase a claim's specific assertion \
+into a tautology. "Lost more than half its coral" is a specific, \
+falsifiable claim. "Had a specific average coral cover percentage" is a \
+tautology — obviously a percentage existed. The original claim asserts a \
+MAGNITUDE OF CHANGE, not the existence of a number. Keep the original \
+assertion: "coral cover declined by more than 50% since 1995."
 
 11. TREND AND SERIES CLAIMS — DO NOT ENUMERATE
    When a claim asserts a trend over a time period ("increasing every year", \
@@ -611,6 +623,13 @@ SIMPLICITY GUIDANCE:
 - Comparisons and rankings are usually 1-2 facts, not algebraic decompositions
 - Trend claims ("every year", "consistently", "steadily") are 1 fact, not N
 - Group quantifiers ("every G7 nation", "all NATO members") are 1 fact, not N
+- Do NOT produce unfalsifiable sub-claims. If a sub-claim is true by \
+definition ("X had a specific value", "a number exists for Y"), it is \
+not a verifiable fact — it is a tautology. Instead, state the actual \
+claim: "X's value was greater than Y" or "X declined by more than 50%."
+- Do NOT produce two sub-claims that are logical negations or \
+paraphrases of each other. "No X did Y" and "Y happened for every X" \
+are the SAME claim — pick one phrasing and use it once.
 
 EVIDENCE-NEED CATEGORIES:
 Each fact gets one or more categories that describe what KIND of evidence \
@@ -1133,6 +1152,15 @@ own knowledge. Do NOT introduce facts, dates, or claims that are not \
 explicitly stated in the evidence below — even if you believe them to be \
 true. If the evidence is insufficient, say "unverifiable," do not fill \
 gaps with your own knowledge.
+   CRITICAL — TIMELINE FACTS: You are especially prone to hallucinating \
+WHEN someone held a role. Do NOT assume a person was president, CEO, \
+director, etc. at the time of an event unless the evidence EXPLICITLY \
+states the dates of both the event AND the role and they overlap. \
+"Trump was convicted in May 2024" does NOT mean he was president in \
+May 2024 — you must find his inauguration date IN THE EVIDENCE to \
+make that connection. If the evidence doesn't state when someone \
+started or ended a role, you CANNOT determine whether they held it \
+at the time of a given event.
 
 SOURCE RATING TAGS:
 Each evidence item has a tag like "[Center | Very High factual]" showing:
