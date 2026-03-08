@@ -565,6 +565,16 @@ this test. A researcher cannot search for "[Value X]" — it is not a fact.
    When a claim is fundamentally a comparison, the comparison itself is the \
 fact. Do not split it into isolated quantities that only have meaning relative \
 to each other. Keep the relationship in a single searchable statement.
+   COMMON VIOLATION: When a claim implies a quantity it does not specify \
+(e.g., "high rate", "significant decline", "dropped over 40%"), do NOT \
+invent a placeholder like "approximately X%", "[specific dollar amount]", \
+"rate of N per 100,000", or "$[Price]". Use the claim's own language. \
+"Country A has a high rate of Y" IS searchable. \
+"Country A has a rate of approximately X per 100,000" is NOT — a researcher \
+cannot search for "X". If the claim contains a specific number, keep that \
+number. If the claim does not specify a number, do not invent one. \
+The same applies to dates and names: "Entity A did Z after Event B" is \
+searchable. "Entity A did Z on [Specific Date]" is NOT.
 
 11. TREND AND SERIES CLAIMS — DO NOT ENUMERATE
    When a claim asserts a trend over a time period ("increasing every year", \
@@ -1409,18 +1419,32 @@ elements are accurate. The spirit of the claim does NOT hold.
 - "false" — evidence clearly contradicts the central claim
 - "unverifiable" — not enough evidence to judge either way
 
-Confidence scoring (USE THE FULL RANGE — do NOT default to 0.9+):
-- 0.95-1.0 — Multiple high-quality sources explicitly confirm/deny. No \
-ambiguity whatsoever. Reserve this for slam-dunk cases only.
-- 0.80-0.94 — Strong evidence from reliable sources, but minor gaps \
-(e.g., exact figures differ slightly, or only 1-2 strong sources).
-- 0.60-0.79 — Moderate evidence. Sources partially address the claim, or \
-there are conflicting signals between sources.
-- 0.40-0.59 — Weak evidence. Sources are tangential, low-quality, or \
-contradict each other roughly equally.
-- 0.20-0.39 — Very little relevant evidence found. Verdict is mostly a \
-best guess.
-- 0.0-0.19 — Essentially no usable evidence. Almost pure uncertainty.
+CONFIDENCE CALIBRATION — anchor to evidence quality (do NOT default to 0.9+):
+An EVIDENCE QUALITY SUMMARY appears at the top of the evidence. Use it \
+to calibrate your confidence. Do not guess — count the sources and tiers.
+
+For confidence above 0.90 you need ALL of:
+  - Multiple TIER 1 or TIER 2 sources that explicitly address the claim
+  - Sources agree on the core assertion
+  - No significant interested party contamination
+
+For confidence 0.75-0.89 you need:
+  - At least one TIER 1 or TIER 2 source with directly relevant evidence
+  - No direct contradiction between reliable sources
+
+Confidence should be 0.60-0.74 when:
+  - Evidence is mostly from unrated sources
+  - Sources are tangential (mention the topic but don't directly address the claim)
+  - Only 1-2 sources available
+
+Confidence should be below 0.60 when:
+  - No sources directly address the claim
+  - Evidence is thin, tangential, or primarily from interested parties
+  - Sources contradict each other roughly equally
+
+These are guidelines, not hard limits. A single primary-source document \
+(e.g., a vote record, court filing, official dataset) CAN justify high \
+confidence even with few sources — but explain why in your reasoning.
 
 Be calibrated: if the evidence is decent but not overwhelming, use 0.7 \
 or 0.75 — not 0.95. Only use 0.9+ when the evidence is rock-solid from \

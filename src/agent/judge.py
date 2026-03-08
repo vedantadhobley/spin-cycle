@@ -14,8 +14,9 @@ from src.prompts.verification import JUDGE_SYSTEM, JUDGE_USER
 from src.schemas.llm_outputs import JudgeOutput
 from src.db.session import get_sync_session
 from src.db.models import SourceRating
-from src.tools.source_ratings import get_source_rating_sync
+from src.tools.source_ratings import get_source_rating_sync, extract_domain
 from src.tools.media_matching import url_matches_media, check_publisher_ownership
+from src.utils.evidence_ranker import tier_label
 from src.tools.wikidata import get_ownership_chain, collect_all_connected_parties
 from src.utils.logging import log, get_logger
 from src.utils.quote_detection import detect_claim_subject_quotes
@@ -217,8 +218,12 @@ async def judge(
     )
 
     # Format evidence for LLM prompt with annotations
-    evidence_text = _annotate_evidence(
+    evidence_text, quality_summary = _annotate_evidence(
         source_evidence, all_parties, affiliated_media, interested_parties,
+    )
+    full_evidence = (
+        f"{quality_summary}\n\n{evidence_text}"
+        if quality_summary else evidence_text
     )
 
     # Invoke the judge LLM
@@ -230,7 +235,7 @@ async def judge(
             user_prompt=JUDGE_USER.format(
                 claim_text=claim_text,
                 sub_claim=sub_claim,
-                evidence_text=evidence_text,
+                evidence_text=full_evidence,
             ),
             schema=JudgeOutput,
             semantic_validator=validate_judge,
@@ -373,7 +378,7 @@ def _annotate_evidence(
     all_parties: list[str],
     affiliated_media: list[str],
     interested_parties: dict,
-) -> str:
+) -> tuple[str, str]:
     """Format evidence with MBFC ratings, interest checks, and bias tracking.
 
     Four interest checks per evidence item:
@@ -382,7 +387,7 @@ def _annotate_evidence(
     3. Publisher owned by interested party
     4. Sub-source references with poor ratings
 
-    Returns formatted evidence text for injection into the judge prompt.
+    Returns (evidence_text, quality_summary) for injection into the judge prompt.
     """
     evidence_parts = []
     bias_distribution = {"left": 0, "center": 0, "right": 0, "unrated": 0}
@@ -391,6 +396,10 @@ def _annotate_evidence(
     party_quotes_count = 0
     publisher_ownership_count = 0
     sub_source_count = 0
+
+    # Quality summary accumulators
+    tier_counts: dict[str, int] = {}  # e.g. "TIER 1 (very high factual)": 3
+    unique_domains: set[str] = set()
 
     for i, ev in enumerate(source_evidence, 1):
         source = ev.get("source_type", "unknown")
@@ -401,6 +410,15 @@ def _annotate_evidence(
         # Get source rating (from cache)
         rating = get_source_rating_sync(url) if url != "N/A" else None
         rating_tag = _format_source_tag(rating)
+
+        # Track tier and domain for quality summary
+        if url != "N/A":
+            domain = extract_domain(url)
+            if domain:
+                unique_domains.add(domain)
+            tier = tier_label(url)
+            tier_key = tier if tier else "unrated"
+            tier_counts[tier_key] = tier_counts.get(tier_key, 0) + 1
 
         interest_warnings = []
 
@@ -590,4 +608,33 @@ def _annotate_evidence(
                 f"truly INDEPENDENT corroboration."
             )
 
-    return evidence_text
+    # Build quality summary for confidence calibration
+    quality_lines = []
+    quality_lines.append(
+        f"- {len(source_evidence)} sources "
+        f"({len(unique_domains)} unique domains)"
+    )
+
+    # Format tier breakdown
+    tier_parts = []
+    for tier_key in sorted(tier_counts, key=lambda k: (k == "unrated", k)):
+        count = tier_counts[tier_key]
+        tier_parts.append(f"{count} {tier_key}")
+    if tier_parts:
+        quality_lines.append(f"- Quality: {', '.join(tier_parts)}")
+
+    # Format bias spread
+    bias_parts = []
+    for direction in ("left", "center", "right", "unrated"):
+        if bias_distribution[direction] > 0:
+            bias_parts.append(
+                f"{bias_distribution[direction]} {direction}"
+            )
+    if bias_parts:
+        quality_lines.append(f"- Bias spread: {', '.join(bias_parts)}")
+
+    quality_summary = (
+        "EVIDENCE QUALITY SUMMARY:\n" + "\n".join(quality_lines)
+    )
+
+    return evidence_text, quality_summary
