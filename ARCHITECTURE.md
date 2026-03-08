@@ -651,8 +651,8 @@ Key decisions:
 │ source_url      │   └──▶│ parent_id (FK)   │   └──▶│ source_type (enum)│
 │ source_name     │       │ is_leaf (bool)   │       │ source_url        │
 │ status (enum)   │       │ text (text)      │       │ content (text)    │
-│ created_at      │       │ verdict (enum)   │       │ supports_claim    │
-│ updated_at      │       │ confidence (float)│       │ retrieved_at      │
+│ created_at      │       │ verdict (enum)   │       │ retrieved_at      │
+│ updated_at      │       │ confidence (float)│       │                    │
 └────────┬────────┘       │ reasoning (text) │       └────────────────────┘
          │                └──────────────────┘
          │       ┌──────────────────┐      parent_id is self-referential:
@@ -737,7 +737,6 @@ Individual pieces of evidence gathered by the research agent for a sub-claim.
 | `source_type` | `ENUM('web','wikipedia','news_api')` | NOT NULL | Where the evidence came from |
 | `source_url` | `VARCHAR(2048)` | nullable | URL of the source (often embedded in content) |
 | `content` | `TEXT` | nullable | The evidence text/excerpt |
-| `supports_claim` | `BOOLEAN` | nullable | Whether this evidence supports the claim (set by judge) |
 | `retrieved_at` | `TIMESTAMPTZ` | default now() | When the evidence was gathered |
 
 **Relationships:**
@@ -1216,7 +1215,7 @@ WHERE claim_id = '<claim-id>'
 ORDER BY id;
 
 -- See evidence collected for a sub-claim
-SELECT source_type, source_url, content, supports_claim
+SELECT source_type, source_url, content
 FROM evidence
 WHERE sub_claim_id = '<sub-claim-id>';
 ```

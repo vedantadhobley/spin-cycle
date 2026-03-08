@@ -64,7 +64,6 @@ class Evidence(Base):
     )
     source_url = Column(String(2048), nullable=True)
     content = Column(Text, nullable=True)
-    supports_claim = Column(Boolean, nullable=True)
     retrieved_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     sub_claim = relationship("SubClaim", back_populates="evidence")

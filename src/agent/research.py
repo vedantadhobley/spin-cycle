@@ -424,7 +424,6 @@ def _parse_tool_output(content: str, tool_name: str) -> list[dict]:
             "source_url": url,
             "title": title,
             "content": body[:5000],
-            "supports_claim": None,
         }]
 
     # Blocked/error responses from page fetcher
@@ -469,7 +468,6 @@ def _parse_tool_output(content: str, tool_name: str) -> list[dict]:
             "source_url": url,
             "title": title,
             "content": snippet[:5000],
-            "supports_claim": None,
         })
 
     return items
@@ -548,7 +546,7 @@ async def _run_seed_searches(
     Unavailable backends fall back to SearXNG (self-hosted, always available).
 
     Returns evidence dicts matching _parse_tool_output schema:
-        {source_type, source_url, title, content, supports_claim}
+        {source_type, source_url, title, content}
     """
     import asyncio
 
@@ -653,7 +651,6 @@ async def _run_seed_searches(
                     "source_url": url,
                     "title": item.get("title", ""),
                     "content": item.get("summary", ""),
-                    "supports_claim": None,
                     "_seed_query": query,
                 })
             else:
@@ -662,7 +659,6 @@ async def _run_seed_searches(
                     "source_url": url,
                     "title": item.get("title", ""),
                     "content": item.get("snippet", ""),
-                    "supports_claim": None,
                     "_seed_query": query,
                 })
 
@@ -1315,7 +1311,6 @@ async def _research_fallback(sub_claim: str) -> list[dict]:
                     "source_url": r.get("url"),
                     "title": r.get("title", ""),
                     "content": r.get("snippet", ""),
-                    "supports_claim": None,
                 })
         except Exception as e:
             log.warning(logger, MODULE, "fallback_serper_failed",
@@ -1333,7 +1328,6 @@ async def _research_fallback(sub_claim: str) -> list[dict]:
                     "source_url": r.get("url"),
                     "title": r.get("title", ""),
                     "content": r.get("snippet", ""),
-                    "supports_claim": None,
                 })
         except Exception as e:
             log.warning(logger, MODULE, "fallback_searxng_failed",
@@ -1350,7 +1344,6 @@ async def _research_fallback(sub_claim: str) -> list[dict]:
                     "source_url": r.get("url"),
                     "title": r.get("title", ""),
                     "content": r.get("snippet", ""),
-                    "supports_claim": None,
                 })
         except Exception as e:
             log.warning(logger, MODULE, "fallback_brave_failed",
@@ -1367,7 +1360,6 @@ async def _research_fallback(sub_claim: str) -> list[dict]:
                     "source_type": "web",
                     "source_url": None,
                     "content": results[:3000],
-                    "supports_claim": None,
                 })
         except Exception as e:
             log.warning(logger, MODULE, "fallback_ddg_failed",
@@ -1384,7 +1376,6 @@ async def _research_fallback(sub_claim: str) -> list[dict]:
                 "source_url": r.get("url"),
                 "title": r.get("title", ""),
                 "content": r.get("summary", ""),
-                "supports_claim": None,
             })
     except Exception as e:
         log.warning(logger, MODULE, "fallback_wiki_failed",

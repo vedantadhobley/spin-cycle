@@ -193,7 +193,6 @@ async def store_result(claim_id: str, result: dict) -> None:
                         source_type=source_type,
                         source_url=ev.get("source_url"),
                         content=ev.get("content"),
-                        supports_claim=ev.get("supports_claim"),
                     )
                     session.add(evidence)
 

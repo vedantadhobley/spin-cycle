@@ -315,7 +315,7 @@ async def search_legislation(subclaim: str) -> list[dict]:
 
     Returns:
         List of evidence dicts compatible with the judge:
-        [{source_type, source_url, title, content, supports_claim}]
+        [{source_type, source_url, title, content}]
     """
     if not is_available():
         return []
@@ -377,7 +377,6 @@ async def search_legislation(subclaim: str) -> list[dict]:
                 "title": (f"{bill.get('bill_number', '')}: "
                           f"{bill.get('title', 'N/A')}"),
                 "content": "\n\n".join(content_parts)[:15000],
-                "supports_claim": None,
             })
 
     # --- Next 2 bills: details only (conserve quota) ---
@@ -394,7 +393,6 @@ async def search_legislation(subclaim: str) -> list[dict]:
                 "title": (f"{bill.get('bill_number', '')}: "
                           f"{bill.get('title', 'N/A')}"),
                 "content": _format_bill_detail(bill)[:5000],
-                "supports_claim": None,
             })
 
     log.info(logger, MODULE, "done",
