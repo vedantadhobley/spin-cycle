@@ -90,10 +90,11 @@ class VerifyClaimWorkflow:
                  claim_id=claim_id, claim=claim_text)
 
         # Step 1: Normalize + Decompose — normalize claim, then extract atomic facts + thesis
+        # Budget: normalize (~5s) + decompose (~25s) + quality validator (~30s) + potential retry (~15s)
         decomposition = await workflow.execute_activity(
             decompose_claim,
             args=[claim_text],
-            start_to_close_timeout=timedelta(seconds=90),
+            start_to_close_timeout=timedelta(seconds=180),
             retry_policy=RetryPolicy(maximum_attempts=3),
         )
 

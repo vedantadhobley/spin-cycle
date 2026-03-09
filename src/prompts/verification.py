@@ -621,15 +621,6 @@ SIMPLICITY GUIDANCE:
 - Simple factual claims stay as single facts
 - Complex claims with multiple entities/actions get multiple facts
 - Comparisons and rankings are usually 1-2 facts, not algebraic decompositions
-- Trend claims ("every year", "consistently", "steadily") are 1 fact, not N
-- Group quantifiers ("every G7 nation", "all NATO members") are 1 fact, not N
-- Do NOT produce unfalsifiable sub-claims. If a sub-claim is true by \
-definition ("X had a specific value", "a number exists for Y"), it is \
-not a verifiable fact — it is a tautology. Instead, state the actual \
-claim: "X's value was greater than Y" or "X declined by more than 50%."
-- Do NOT produce two sub-claims that are logical negations or \
-paraphrases of each other. "No X did Y" and "Y happened for every X" \
-are the SAME claim — pick one phrasing and use it once.
 
 EVIDENCE-NEED CATEGORIES:
 Each fact gets one or more categories that describe what KIND of evidence \

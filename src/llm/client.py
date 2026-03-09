@@ -16,7 +16,7 @@ from src.utils.logging import log, get_logger
 MODULE = "llm"
 logger = get_logger()
 
-# Single model instance — thinking mode toggled per-request
+# Single model instance — thinking disabled for structured output
 LLAMA_URL = os.getenv("LLAMA_URL")
 if not LLAMA_URL:
     raise RuntimeError("LLAMA_URL environment variable is required")
@@ -25,11 +25,6 @@ MODEL = os.getenv("LLAMA_MODEL", "Qwen3.5-35B-A3B")
 
 def get_llm(temperature: float = 0.1) -> ChatOpenAI:
     """Get the LLM client with thinking disabled.
-
-    Use for tasks that need fast, structured output:
-      - decompose_claim (JSON array)
-      - research_subclaim (ReAct tool-routing)
-      - synthesize_verdict (JSON object)
 
     Args:
         temperature: 0.0 = deterministic, 1.0 = creative.

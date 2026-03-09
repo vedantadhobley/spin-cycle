@@ -191,6 +191,36 @@ class DecomposeOutput(BaseModel):
 
 
 # =============================================================================
+# SUBCLAIM QUALITY CHECK (post-decompose validator)
+# =============================================================================
+
+class SubclaimQualityCheck(BaseModel):
+    """Output from the post-decompose semantic quality validator.
+
+    Detects two structural issues the LLM can't self-enforce during generation:
+    1. Semantic duplicates (logically equivalent sub-claims)
+    2. Group enumeration (individual members instead of group-level claim)
+    """
+    has_duplicates: bool = Field(
+        ..., description="Whether any sub-claims are logically equivalent"
+    )
+    duplicate_pairs: list[list[int]] = Field(
+        default_factory=list,
+        description="Pairs of indices that are semantic duplicates, e.g. [[0, 2], [1, 3]]",
+    )
+    has_enumeration: bool = Field(
+        ..., description="Whether sub-claims enumerate members of a named group"
+    )
+    enumerated_indices: list[int] = Field(
+        default_factory=list,
+        description="Indices of sub-claims that should be consolidated into a group claim",
+    )
+    reasoning: str = Field(
+        default="", description="Explanation of findings"
+    )
+
+
+# =============================================================================
 # JUDGE OUTPUT
 # =============================================================================
 

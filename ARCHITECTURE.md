@@ -145,7 +145,7 @@ llama.cpp's `--reasoning-budget` flag only supports `-1` (unlimited) or `0` (dis
 **Prompts:** `src/prompts/verification.py` → `NORMALIZE_SYSTEM` / `NORMALIZE_USER` + `DECOMPOSE_SYSTEM` / `DECOMPOSE_USER`
 **Patterns:** `src/prompts/linguistic_patterns.py` → 15 canonical linguistic categories + decomposition checklist
 
-The decompose activity now runs **two LLM calls** internally:
+The decompose activity runs **up to four LLM calls** internally:
 
 1. **Normalize** — rewrites the claim in neutral, researchable language (1 LLM call, max_retries=1). Performs 7 transformations grounded in the academic literature:
    - **Bias neutralization** (Pryzant et al. AAAI 2020) — loaded language → neutral equivalents
@@ -158,7 +158,15 @@ The decompose activity now runs **two LLM calls** internally:
 
    If normalization fails, the raw claim is used as fallback (graceful degradation).
 
-2. **Decompose** — extracts flat atomic facts + thesis from the normalized claim (existing logic).
+2. **Decompose** — extracts flat atomic facts + thesis from the normalized claim.
+
+3. **Quality validate** — a post-decompose LLM call (~6-8s) reviews the sub-claim list for two structural issues the decomposer can't self-enforce during generation:
+   - **Semantic duplicates**: logically equivalent sub-claims phrased differently ("No X did Y" ≡ "Y happened for every X"). These cause contradictory verdicts when researched independently.
+   - **Group enumeration**: individual member checks instead of one group-level claim (e.g., 7 G7 country sub-claims instead of 1). Wastes research budget without improving accuracy.
+
+   Uses `SubclaimQualityCheck` schema (`src/schemas/llm_outputs.py`). Only runs when ≥2 sub-claims exist.
+
+4. **Decompose retry** (conditional) — if the validator finds issues, decompose is re-run once with the validator's feedback injected into the user prompt. If the retry also fails, the original output is used (graceful degradation).
 
 The normalized claim and list of changes are stored in `thesis_info` for auditability.
 
@@ -454,10 +462,12 @@ The workflow processes claims in a flat pipeline — decompose once, then resear
 ```
 VerifyClaimWorkflow
 ├── create_claim (if needed)
-├── decompose_claim (90s timeout)
+├── decompose_claim (180s timeout)
 │   ├── normalize (LLM call, graceful fallback if fails)
-│   └── extract (LLM call) → {facts: [{text, categories, seed_queries}, ...], thesis_info: {...}}
-│       └── Wikidata expansion → interested_parties dict (all_parties, affiliated_media, ...)
+│   ├── extract (LLM call) → {facts: [{text, categories, seed_queries}, ...], thesis_info: {...}}
+│   ├── quality validate (LLM call, ~6-8s) — checks for semantic dupes + group enumeration
+│   ├── decompose retry (LLM call, conditional) — re-runs if validator found issues
+│   └── Wikidata expansion → interested_parties dict (all_parties, affiliated_media, ...)
 │
 ├── RESEARCH PHASE — sliding window, MAX_CONCURRENT=2
 │   └── asyncio.gather(research_subclaim × N facts, semaphore=2)

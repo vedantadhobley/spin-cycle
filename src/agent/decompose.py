@@ -1,10 +1,19 @@
 """Domain logic for claim decomposition.
 
-Full pipeline: normalize → LLM extract → NER augment → Wikidata expand.
+Full pipeline: normalize → LLM extract → quality validate → NER augment → Wikidata expand.
 
 The LLM extracts atomic verifiable facts (each with categories and seed
-queries for search routing) plus interested parties from the claim. Then
-this module expands those parties via Wikidata to discover:
+queries for search routing) plus interested parties from the claim. A
+post-decompose quality validator then checks the sub-claim list for two
+structural issues the LLM can't self-enforce during generation:
+
+  1. Semantic duplicates — logically equivalent sub-claims phrased differently
+     (e.g., "No X did Y" ≡ "Y happened for every X")
+  2. Group enumeration — individual member checks instead of one group-level
+     claim (e.g., 7 G7 country facts instead of 1 group fact)
+
+If issues are found, decompose is retried once with the feedback injected
+into the prompt. Then this module expands parties via Wikidata to discover:
   - Executives (CEO, founder, chairperson)
   - Family connections (spouse, parent, child, sibling) + 2-hop in-laws
   - Parent/subsidiary relationships
@@ -28,7 +37,9 @@ from src.llm import invoke_llm, LLMInvocationError, validate_normalize, validate
 from src.prompts.verification import (
     NORMALIZE_SYSTEM, NORMALIZE_USER, DECOMPOSE_SYSTEM, DECOMPOSE_USER,
 )
-from src.schemas.llm_outputs import NormalizeOutput, DecomposeOutput
+from src.schemas.llm_outputs import (
+    NormalizeOutput, DecomposeOutput, AtomicFact, SubclaimQualityCheck,
+)
 from src.prompts.linguistic_patterns import get_linguistic_patterns
 from src.tools.wikidata import get_ownership_chain, collect_all_connected_parties
 from src.schemas.interested_parties import InterestedPartiesDict
@@ -250,14 +261,107 @@ def normalize_interested_parties(raw) -> InterestedPartiesDict:
     }
 
 
+_SUBCLAIM_QUALITY_SYSTEM = """\
+You are reviewing a list of sub-claims extracted from a claim.
+
+Check for TWO issues:
+
+1. SEMANTIC DUPLICATES: Are any sub-claims logically equivalent?
+   "No X did Y" ≡ "Y happened for every X" (logical negation)
+   "X never did Y" ≡ "There is no record of X doing Y" (same assertion)
+   These are duplicates even though they use different words.
+
+2. GROUP ENUMERATION: Do sub-claims individually check members of a named \
+group (G7, NATO, EU, Fortune 500) when one group-level claim would suffice?
+   "France has UHC" + "Germany has UHC" + ... = should be one claim about G7.
+
+Return JSON: {has_duplicates, duplicate_pairs, has_enumeration, \
+enumerated_indices, reasoning}"""
+
+_SUBCLAIM_QUALITY_USER = """\
+CLAIM: {claim_text}
+
+SUB-CLAIMS:
+{numbered_list}"""
+
+
+async def _validate_subclaim_quality(
+    facts: list[AtomicFact],
+    claim_text: str,
+) -> tuple[bool, list[str]]:
+    """Check decomposed sub-claims for semantic duplicates and group enumeration.
+
+    Makes an LLM call to detect list-level structural issues
+    the decomposer can't self-enforce during generation.
+
+    Returns:
+        (is_valid, issues) — if is_valid is False, issues contains natural-language
+        descriptions for constructing a retry prompt.
+    """
+    if len(facts) < 2:
+        return True, []
+
+    numbered = "\n".join(f"{i}. {f.text}" for i, f in enumerate(facts))
+
+    try:
+        result = await invoke_llm(
+            system_prompt=_SUBCLAIM_QUALITY_SYSTEM,
+            user_prompt=_SUBCLAIM_QUALITY_USER.format(
+                claim_text=claim_text, numbered_list=numbered,
+            ),
+            schema=SubclaimQualityCheck,
+            max_retries=1,
+            temperature=0.3,
+            activity_name="subclaim_quality",
+        )
+    except LLMInvocationError as e:
+        log.warning(logger, MODULE, "quality_check_failed",
+                    "Subclaim quality check failed, skipping", error=str(e))
+        return True, []
+
+    issues: list[str] = []
+
+    if result.has_duplicates and result.duplicate_pairs:
+        for pair in result.duplicate_pairs:
+            if len(pair) == 2 and all(0 <= idx < len(facts) for idx in pair):
+                issues.append(
+                    f"Sub-claims {pair[0]} and {pair[1]} are semantically equivalent "
+                    f"(\"{facts[pair[0]].text}\" ≡ \"{facts[pair[1]].text}\"). "
+                    "Keep only one."
+                )
+
+    if result.has_enumeration and result.enumerated_indices:
+        valid_indices = [i for i in result.enumerated_indices if 0 <= i < len(facts)]
+        if len(valid_indices) >= 2:
+            texts = [f"\"{facts[i].text}\"" for i in valid_indices[:4]]
+            issues.append(
+                f"Sub-claims {valid_indices} enumerate individual group members "
+                f"({', '.join(texts)}, ...). Consolidate into a single group-level claim."
+            )
+
+    is_valid = len(issues) == 0
+
+    if not is_valid:
+        log.info(logger, MODULE, "quality_issues",
+                 "Subclaim quality issues detected",
+                 issue_count=len(issues), reasoning=result.reasoning)
+    else:
+        log.debug(logger, MODULE, "quality_ok", "Subclaim quality check passed")
+
+    return is_valid, issues
+
+
 async def decompose(claim_text: str) -> dict:
-    """Full decompose pipeline: normalize → LLM extract → NER augment → Wikidata expand.
+    """Full decompose pipeline: normalize → extract → quality validate → NER → Wikidata.
 
     Pipeline:
     1. LLM normalizes claim (bias neutralization, operationalization, opinion
        separation, coreference resolution, reference grounding, speculation handling)
     2. LLM extracts facts, thesis, and interested parties from normalized claim
-    3. Code expands interested parties via Wikidata (programmatic, cached)
+    3. Quality validator checks for semantic duplicates and group enumeration
+       (LLM call, ~6-8s). If issues found, retries decompose once with feedback.
+    4. SpaCy NER augments entity extraction from claim text
+    5. Code expands interested parties via Wikidata (programmatic, cached)
        - Corporate: CEO, founder, chairperson, parent/subsidiary
        - Family: spouse, parents, children, siblings + 2-hop in-laws
        - Media: ownership ties to news outlets
@@ -306,6 +410,35 @@ async def decompose(claim_text: str) -> dict:
             temperature=0,
             activity_name="decompose",
         )
+
+        # Post-validation: check for semantic duplicates / group enumeration
+        if len(output.facts) >= 2:
+            is_valid, issues = await _validate_subclaim_quality(
+                output.facts, normalized,
+            )
+            if not is_valid:
+                feedback = "\n".join(f"- {issue}" for issue in issues)
+                retry_prompt = (
+                    DECOMPOSE_USER.format(claim_text=normalized)
+                    + f"\n\nYOUR PREVIOUS OUTPUT HAD STRUCTURAL ISSUES:\n{feedback}\n"
+                    "Fix these issues in your new output."
+                )
+                try:
+                    output = await invoke_llm(
+                        system_prompt=decompose_system_with_patterns,
+                        user_prompt=retry_prompt,
+                        schema=DecomposeOutput,
+                        semantic_validator=validate_decompose,
+                        max_retries=1,
+                        temperature=0.1,
+                        activity_name="decompose_retry",
+                    )
+                    log.info(logger, MODULE, "decompose_retry_success",
+                             "Decompose retry succeeded after quality feedback",
+                             fact_count=len(output.facts))
+                except LLMInvocationError:
+                    log.warning(logger, MODULE, "decompose_retry_failed",
+                                "Decompose retry failed, using original output")
 
         # Clean up LLM output text using LanguageTool
         facts = [

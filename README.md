@@ -86,11 +86,15 @@ The claim triggers `VerifyClaimWorkflow` — a flat pipeline of 7 activities:
 ```
 create_claim          Creates DB record (skipped if called via API)
     ↓
-decompose_claim       Normalize → Decompose (2 LLM calls, 1 activity)
+decompose_claim       Normalize → Decompose → Quality Validate (2-4 LLM calls, 1 activity)
                       Normalize: 7 transformations (bias neutralization,
                         operationalization, opinion separation, coreference,
                         reference grounding, speculation, rhetorical framing)
                       Decompose: flat atomic facts + thesis extraction
+                      Quality validate: checks for semantic duplicates
+                        ("No X did Y" ≡ "Y happened for every X") and
+                        group enumeration (7 G7 facts → 1 group fact)
+                        If issues found, retries decompose once with feedback
                       Each fact gets categories + LLM-written seed queries
                       Guided by 15-category linguistic pattern taxonomy
                         + 9 extraction rules (decontextualize, entity disambig.,
@@ -272,6 +276,10 @@ docker logs -f spin-cycle-dev-worker
 # I [WORKER    ] starting: Connecting to Temporal | temporal_host=... task_queue=spin-cycle-verify
 # I [WORKER    ] ready: Worker listening | task_queue=spin-cycle-verify activity_count=7
 # I [DECOMPOSE ] normalized: Claim normalized | changes=[...]
+# I [DECOMPOSE ] quality_ok: Subclaim quality check passed
+#   — or —
+# I [DECOMPOSE ] quality_issues: Subclaim quality issues detected | issue_count=1 ...
+# I [DECOMPOSE ] decompose_retry_success: Decompose retry succeeded | fact_count=1
 # I [DECOMPOSE ] done: Claim decomposed | sub_count=3 thesis=...
 # I [WORKFLOW  ] decomposed: Claim decomposed into atomic facts | fact_count=3
 # I [RESEARCH  ] start: Starting research agent | sub_claim=...
