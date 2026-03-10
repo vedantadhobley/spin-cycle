@@ -86,9 +86,9 @@ class TestHelpers:
         assert _tld_score("") == 0
 
     def test_content_score_tiers(self):
-        assert _content_score("x" * 3000) == 15
-        assert _content_score("x" * 1000) == 10
-        assert _content_score("x" * 300) == 5
+        assert _content_score("x" * 3000) == 30
+        assert _content_score("x" * 1000) == 20
+        assert _content_score("x" * 300) == 10
         assert _content_score("x" * 50) == 0
         assert _content_score("") == 0
         assert _content_score(None) == 0
@@ -109,8 +109,8 @@ class TestScoreEvidence:
         score, breakdown = score_evidence(ev)
         assert breakdown["factual"] == 30  # very-high
         assert breakdown["credibility"] == 10  # high
-        assert breakdown["content"] == 15  # rich
-        assert score >= 65
+        assert breakdown["content"] == 30  # rich
+        assert score >= 80
 
     def test_gov_domain_gets_tld_bonus(self):
         ev = _make_ev(url="https://eia.gov/data/electricity", content="x" * 2500)
@@ -148,6 +148,21 @@ class TestRankAndSelect:
         selected, dropped = rank_and_select(items, max_items=10)
         assert len(selected) == 5
         assert len(dropped) == 0
+
+    def test_prefilter_drops_empty_content(self):
+        """Hub pages and empty content get filtered before ranking."""
+        items = []
+        # 15 substantive items
+        for i in range(15):
+            items.append(_make_ev(url=f"https://site{i}.com/article", content="x" * 300))
+        # 10 hub pages / empty content (below CONTENT_FLOOR of 80)
+        for i in range(10):
+            items.append(_make_ev(url=f"https://hub{i}.com/", content="x" * 30))
+
+        selected, dropped = rank_and_select(items, max_items=20)
+        assert len(selected) == 15  # only substantive items survive
+        no_content_dropped = [d for d in dropped if d["reason"] == "no_content"]
+        assert len(no_content_dropped) == 10
 
     def test_caps_at_max_items(self):
         items = [_make_ev(url=f"https://site{i}.com/article") for i in range(30)]

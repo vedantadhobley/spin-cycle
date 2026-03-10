@@ -368,7 +368,7 @@ Full evidence scoring (`score_evidence` — used for judge, adds source_type + c
 | Component | Range | Signals |
 |-----------|-------|---------|
 | Source type | 0-30 | Wikipedia=30, LegiScan=28 (by URL), web=10 |
-| Content richness | 0-15 | >2000 chars=15, >800=10, >200=5 |
+| Content richness | 0-30 | >2000 chars=30, >800=20, >200=10; <80 chars filtered out pre-ranking |
 | + URL quality | 0-55 | (from score_url above) |
 
 Domain diversity cap (max 3 items per domain) ensures at least 7 unique source domains. Political bias is deliberately NOT a scoring signal. Unrated sources get low defaults (4/30) — unrated government domains get 20/30. All scoring uses `get_source_rating_sync()` — cache-only, zero network calls.

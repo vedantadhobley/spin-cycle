@@ -46,10 +46,15 @@ CREDIBILITY_UNRATED = 2
 GOV_TLD_SCORE = 15   # .gov, .mil
 EDU_TLD_SCORE = 10   # .edu
 
-# --- Content richness thresholds (0-15) ---
-CONTENT_RICH = 2000   # 15 points
-CONTENT_MEDIUM = 800  # 10 points
-CONTENT_MINIMAL = 200 # 5 points
+# --- Content richness thresholds (0-30) ---
+CONTENT_RICH = 2000   # 30 points
+CONTENT_MEDIUM = 800  # 20 points
+CONTENT_MINIMAL = 200 # 10 points
+
+# --- Minimum content length to be useful as evidence ---
+# Below this, the "evidence" is a hub page, landing page, or failed fetch.
+# These waste judge context and dilute real evidence.
+CONTENT_FLOOR = 80
 
 
 def _is_legiscan_url(url: str) -> bool:
@@ -80,11 +85,11 @@ def _content_score(content: str) -> int:
         return 0
     length = len(content)
     if length > CONTENT_RICH:
-        return 15
+        return 30
     if length > CONTENT_MEDIUM:
-        return 10
+        return 20
     if length > CONTENT_MINIMAL:
-        return 5
+        return 10
     return 0
 
 
@@ -168,7 +173,7 @@ def score_evidence(ev: dict) -> tuple[float, dict]:
     else:
         breakdown["source_type"] = SOURCE_TYPE_SCORES.get(source_type, 10)
 
-    # Content richness (0-15)
+    # Content richness (0-30)
     breakdown["content"] = _content_score(content)
 
     total = sum(breakdown.values())
@@ -189,8 +194,22 @@ def rank_and_select(
 
     Returns (selected, dropped) where dropped includes reason annotations.
     """
+    # Pre-filter: drop evidence with near-zero content (hub pages, landing
+    # pages, failed fetches). These waste judge context window.
+    filtered = []
+    content_dropped = []
+    for ev in evidence:
+        content = ev.get("content", "") or ""
+        if len(content) < CONTENT_FLOOR:
+            content_dropped.append({
+                "evidence": ev, "score": 0, "reason": "no_content",
+            })
+        else:
+            filtered.append(ev)
+    evidence = filtered
+
     if len(evidence) <= max_items:
-        return evidence, []
+        return evidence, content_dropped
 
     # Score all items
     scored = []
@@ -221,7 +240,7 @@ def rank_and_select(
         ev["_rank_score"] = total
         selected.append(ev)
 
-    return selected, dropped
+    return selected, content_dropped + dropped
 
 
 def format_ranking_log(

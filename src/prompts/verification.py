@@ -341,6 +341,8 @@ counter-evidence to look for.
 # =============================================================================
 
 NORMALIZE_SYSTEM = """\
+Today's date: {current_date}
+
 You are a linguistic preprocessor for a fact-checking pipeline. Your job is to \
 rewrite claims in neutral, researchable language WITHOUT changing their meaning.
 
@@ -454,6 +456,8 @@ Return ONLY the JSON object.\
 # =============================================================================
 
 DECOMPOSE_SYSTEM = """\
+Today's date: {current_date}
+
 You are a fact-checker's assistant. Your job is to extract verifiable \
 atomic facts from a claim.
 
@@ -508,17 +512,17 @@ the already-mentioned entity and the judge will accept it, missing the point ent
    Each fact must stand alone. Include subject, object, and enough context that \
 someone who has NOT seen the original claim can verify it.
    BAD:  "The response was proportional" (whose response? proportional to what?)
-   GOOD: "Country A's military response was proportional to the border incursion"
+   GOOD: "Country A's response to the incident was proportional to the provocation"
    BAD:  "The organization is exempt" (which organization? exempt from what?)
    GOOD: "Organization X is exempt from customs duties under [specific treaty]"
    BAD:  "Spending increased significantly" (whose spending? what baseline?)
    GOOD: "Agency Y spending increased from $140B to $160B between 2019 and 2023"
    When a claim mentions a person who holds MULTIPLE roles, attribute each \
-action to the CORRECT entity. "Elon Musk runs SpaceX while heading the \
-agency cutting government spending" → the agency cutting spending is DOGE, \
-not SpaceX. Do not transfer an action from one role to another entity.
-   BAD:  "SpaceX is cutting government spending" (wrong entity)
-   GOOD: "Elon Musk heads the agency (DOGE) that is cutting government spending"
+action to the CORRECT entity. "Person X runs Company A while heading \
+Agency B" → Agency B's actions belong to Agency B, not Company A. Do not \
+transfer an action from one role to another entity.
+   BAD:  "Company A is performing Agency B's function" (wrong entity)
+   GOOD: "Person X heads Agency B, which performs that function"
 
 7. EXTRACT THE UNDERLYING FACTUAL QUESTION
    When phrasing is loaded or abstract, ask: "what factual question is actually being asked?" \
@@ -532,11 +536,11 @@ Extract THAT question as the fact, not the literal loaded phrasing.
    IMPORTANT: For characterizations that independent bodies assess (proportional, \
 fair, effective, humane, thorough, etc.), frame the fact as what assessors have \
 found — NOT as an abstract judgment:
-   BAD:  "The military response is proportionate to the attack" (abstract judgment)
-   GOOD: "Independent bodies and international organizations have assessed the \
-military response as proportionate to the attack" (researchable — did they or didn't they?)
-   BAD:  "The election was fair" (abstract judgment)
-   GOOD: "Election monitoring organizations assessed the election as fair" (researchable)
+   BAD:  "The response was proportionate" (abstract judgment)
+   GOOD: "Independent bodies have assessed the response as proportionate" \
+(researchable — did they or didn't they?)
+   BAD:  "The process was fair" (abstract judgment)
+   GOOD: "Monitoring organizations assessed the process as fair" (researchable)
 
 8. ENTITY DISAMBIGUATION
    Add minimum context to uniquely identify entities. Don't assume the researcher \
@@ -650,8 +654,8 @@ articles, meta-analyses, agency reports.
 - GENERAL: None of the above apply. Standard web search is sufficient.
 
 If unsure, use GENERAL. Multiple categories are encouraged when they fit — \
-"Every Republican voted against capping insulin at $35" is both LEGISLATIVE \
-and QUANTITATIVE.
+"Every member of parliament voted against the proposed amendment" is both \
+LEGISLATIVE and QUANTITATIVE.
 
 SEED QUERIES:
 For each fact, write 2-4 search queries that a researcher would type into \
@@ -753,31 +757,31 @@ Parallel claim:
 }}
 
 Temporal/origin claim (CRITICAL — presupposition extraction):
-"Country X started operations in Region Y due to the border attack"
+"Company X started selling in Market Y after the merger"
 → {{
-  "thesis": "Country X initiated military operations specifically in response to the border attack, implying no significant prior operations",
-  "key_test": "Must verify post-attack operations AND check for significant prior operations",
+  "thesis": "Company X began selling in Market Y specifically because of the merger, implying no significant prior sales",
+  "key_test": "Must verify post-merger sales AND check for significant prior sales",
   "structure": "temporal_sequence",
-  "interested_parties": {{"direct": ["Country X military"], "institutional": ["Country X Government", "Country X Ministry of Defense"], "affiliated_media": [], "reasoning": "Country X military and government are subjects of the claim"}},
+  "interested_parties": {{"direct": ["Company X"], "institutional": [], "affiliated_media": [], "reasoning": "Company X is the subject of the claim"}},
   "facts": [
-    {{"text": "Country X launched military operations in Region Y after the border attack", "categories": ["CURRENT_EVENTS"], "seed_queries": ["Country X military operations Region Y timeline", "Country X attack Region Y response"]}},
-    {{"text": "The border attack caused Country X to launch operations in Region Y", "categories": ["CAUSAL"], "seed_queries": ["Country X stated reason for operations Region Y", "Country X Region Y operations other causes"]}},
-    {{"text": "Country X had significant military operations in Region Y before the border attack", "categories": ["CURRENT_EVENTS"], "seed_queries": ["Country X military operations Region Y before border attack", "Country X Region Y history of operations"]}}
+    {{"text": "Company X began selling products in Market Y after the merger", "categories": ["CURRENT_EVENTS"], "seed_queries": ["Company X Market Y expansion timeline", "Company X merger Market Y entry"]}},
+    {{"text": "The merger caused Company X to enter Market Y", "categories": ["CAUSAL"], "seed_queries": ["Company X stated reason for entering Market Y", "Company X Market Y expansion other causes"]}},
+    {{"text": "Company X had significant sales in Market Y before the merger", "categories": ["CURRENT_EVENTS"], "seed_queries": ["Company X Market Y sales before merger", "Company X Market Y history of operations"]}}
   ]
 }}
 Note: The third fact tests the PRESUPPOSITION. "Started" implies nothing before.
 
 Causal claim:
-"The tax cuts caused record job growth"
+"The new regulation caused record enrollment"
 → {{
-  "thesis": "Tax policy directly produced employment gains",
-  "key_test": "Tax cuts happened AND job growth occurred AND causal link exists",
+  "thesis": "The regulation directly produced the enrollment increase",
+  "key_test": "Regulation was implemented AND record enrollment occurred AND causal link exists",
   "structure": "causal",
   "interested_parties": {{"direct": [], "institutional": [], "affiliated_media": [], "reasoning": "No specific interested parties identified"}},
   "facts": [
-    {{"text": "Tax cuts were implemented", "categories": ["LEGISLATIVE"], "seed_queries": ["tax cuts legislation passed enacted", "recent tax cut bill signed into law"]}},
-    {{"text": "Record job growth occurred", "categories": ["QUANTITATIVE"], "seed_queries": ["job growth statistics record", "employment data monthly jobs record"]}},
-    {{"text": "The tax cuts caused the job growth", "categories": ["CAUSAL", "QUANTITATIVE"], "seed_queries": ["tax cuts effect on employment economic analysis", "job growth causes other factors besides tax cuts"]}}
+    {{"text": "The regulation was implemented", "categories": ["LEGISLATIVE"], "seed_queries": ["regulation implemented enacted effective date", "new regulation policy passed"]}},
+    {{"text": "Record enrollment occurred", "categories": ["QUANTITATIVE"], "seed_queries": ["enrollment statistics record high", "enrollment data trend increase"]}},
+    {{"text": "The regulation caused the enrollment increase", "categories": ["CAUSAL", "QUANTITATIVE"], "seed_queries": ["regulation effect on enrollment analysis", "enrollment increase causes other factors"]}},
   ]
 }}
 Note: The causal fact requires evidence of mechanism, not just correlation.
@@ -1123,6 +1127,17 @@ When your verdict depends on comparing numbers, SHOW THE ARITHMETIC:
 percentage may be split among MANY groups, not just the two being compared.
   - Do NOT assume two categories are exhaustive unless the evidence says so.
 
+When a claim includes a specific number or comparison and you have PARTIAL data:
+  - Identify the DIRECTION of the claim (what it's asserting).
+  - If evidence supports the direction but the exact figure is missing or \
+slightly off, use "mostly_true" — not "unverifiable."
+  - If evidence contradicts the direction (e.g., claim says "more than 20%" \
+but studies find no measurable effect), use "mostly_false" — not \
+"unverifiable."
+  - Use "unverifiable" ONLY when the evidence does not address the claim's \
+direction at all. Having incomplete data is not the same as having no \
+data — reason from what you have.
+
 Your job:
 1. Evaluate each piece of evidence — does it SUPPORT, CONTRADICT, or say \
 nothing about the claim?
@@ -1141,8 +1156,10 @@ evidence that settles a question.
 4. Render a verdict based ONLY on the evidence provided. Do NOT use your \
 own knowledge. Do NOT introduce facts, dates, or claims that are not \
 explicitly stated in the evidence below — even if you believe them to be \
-true. If the evidence is insufficient, say "unverifiable," do not fill \
-gaps with your own knowledge.
+true. If the evidence doesn't address the topic at all, say \
+"unverifiable." But if you have partial evidence that lets you assess \
+the claim's direction, reason from it — do not punt to "unverifiable" \
+just because one data point is missing.
    CRITICAL — TIMELINE FACTS: You are especially prone to hallucinating \
 WHEN someone held a role. Do NOT assume a person was president, CEO, \
 director, etc. at the time of an event unless the evidence EXPLICITLY \
@@ -1468,6 +1485,13 @@ confidence even with few sources — but explain why in your reasoning.
 Be calibrated: if the evidence is decent but not overwhelming, use 0.7 \
 or 0.75 — not 0.95. Only use 0.9+ when the evidence is rock-solid from \
 multiple authoritative sources.
+
+For "unverifiable" verdicts, calibrate confidence to how close the evidence came:
+  - 0.50-0.60 — Evidence exists on the TOPIC but not the specific claim
+    (e.g., found general stats but not the exact comparison asserted)
+  - 0.35-0.49 — Very little relevant evidence found at all
+  - 0.20-0.34 — The claim is inherently unverifiable (private info, future
+    prediction, unfalsifiable framing)
 
 OUTPUT QUALITY — proofread before returning:
 - Re-read your output before submitting. Fix any typos or garbled words.

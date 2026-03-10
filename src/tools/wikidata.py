@@ -580,9 +580,21 @@ def collect_all_connected_parties(result: dict) -> dict:
                 people.update(names_or_dict)
 
     # Corporate connections → orgs
-    for key in ("owned_by", "parent_org", "subsidiary", "owner_of", "employer", "member_of"):
+    # Directional properties — always few results, uncapped
+    for key in ("owned_by", "parent_org"):
         for name in result.get(key, []):
             orgs.add(name)
+
+    # Expansive properties — cap to prevent government/mega-corp explosion
+    for key in ("subsidiary", "owner_of", "member_of", "employer"):
+        entries = result.get(key, [])
+        for name in entries[:10]:
+            orgs.add(name)
+        if len(entries) > 10:
+            log.debug(logger, MODULE, "org_expansion_capped",
+                      f"Capped {key} from {len(entries)} to 10",
+                      entity=result.get("entity", ""), key=key,
+                      total=len(entries))
 
     # Don't include the entity itself
     entity_name = result.get("entity", "")

@@ -52,12 +52,12 @@ them for granted without explicitly stating them.
 4. Both must be verified — a false presupposition makes the whole claim misleading
 
 **Example:**
-"Country X started operations in Region Y due to the attack"
-→ Presupposition: "Country X had no significant operations in Region Y before the attack"
-→ Assertion: "Country X launched new operations in Region Y after the attack"
-→ Causal claim: "The attack caused the new operations"
+"Company X started selling in Market Y after the merger"
+→ Presupposition: "Company X had no significant sales in Market Y before the merger"
+→ Assertion: "Company X began selling in Market Y after the merger"
+→ Causal claim: "The merger caused the expansion into Market Y"
 
-If the presupposition is false (Country X DID have operations before), the claim
+If the presupposition is false (Company X DID sell there before), the claim
 is misleading even if the assertion is technically true.
 
 

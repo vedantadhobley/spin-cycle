@@ -33,6 +33,8 @@ Returns a structured dict with:
 The Temporal activity wrapper in verify_activities.py calls decompose() here.
 """
 
+from datetime import date
+
 from src.llm import invoke_llm, LLMInvocationError, validate_normalize, validate_decompose
 from src.prompts.verification import (
     NORMALIZE_SYSTEM, NORMALIZE_USER, DECOMPOSE_SYSTEM, DECOMPOSE_USER,
@@ -374,9 +376,10 @@ async def decompose(claim_text: str) -> dict:
 
     # Step 1: Normalize claim
     norm_output = None
+    today = date.today().isoformat()
     try:
         norm_output = await invoke_llm(
-            system_prompt=NORMALIZE_SYSTEM,
+            system_prompt=NORMALIZE_SYSTEM.format(current_date=today),
             user_prompt=NORMALIZE_USER.format(claim_text=claim_text),
             schema=NormalizeOutput,
             semantic_validator=validate_normalize,
@@ -398,7 +401,7 @@ async def decompose(claim_text: str) -> dict:
                     "Normalization failed, using raw claim", claim=claim_text)
 
     # Step 2: Decompose the NORMALIZED claim
-    decompose_system_with_patterns = DECOMPOSE_SYSTEM + "\n\n" + get_linguistic_patterns()
+    decompose_system_with_patterns = DECOMPOSE_SYSTEM.format(current_date=today) + "\n\n" + get_linguistic_patterns()
 
     try:
         output = await invoke_llm(

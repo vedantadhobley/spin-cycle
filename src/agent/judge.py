@@ -284,9 +284,11 @@ def _rank_evidence(source_evidence: list[dict]) -> list[dict]:
         source_evidence, dropped = rank_and_select(
             source_evidence, max_items=MAX_JUDGE_EVIDENCE,
         )
+        content_filtered = sum(1 for d in dropped if d.get("reason") == "no_content")
         log.info(logger, MODULE, "evidence_ranked",
                  "Ranked and selected evidence for judge prompt",
-                 original=original_count, selected=len(source_evidence))
+                 original=original_count, selected=len(source_evidence),
+                 content_filtered=content_filtered)
         log.debug(logger, MODULE, "evidence_ranking_detail",
                   "Evidence ranking breakdown",
                   **format_ranking_log(source_evidence, dropped))
