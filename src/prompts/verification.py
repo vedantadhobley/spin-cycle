@@ -1045,10 +1045,15 @@ Seed searches have already been run — you can see their results in the \
 conversation above. Results are ranked by source quality:
 - "Source tier: TIER 1/2" indicates credibility level
 - "Conflict:" flags sources with ownership ties to interested parties — deprioritize these
-1. FIRST: Use fetch_page_content on the highest-tier NON-CONFLICTED URL
-2. SECOND: Fetch the most claim-relevant TIER 2 non-conflicted source
-3. If seed evidence leans one direction, counter-search for the OPPOSITE
-4. If seed results are thin, try different search terms
+
+If pre-fetched articles appear in your history, they contain full text from \
+the highest-quality seed sources. Do NOT re-fetch those URLs. Focus your \
+tool calls on searching for angles, perspectives, or data points not \
+covered by the pre-fetched articles.
+
+1. If seed evidence leans one direction, counter-search for the OPPOSITE
+2. If seed results are thin, try different search terms
+3. Fetch full articles from promising URLs not already pre-fetched
 
 Identify the KEY DETAIL that makes this claim specific and verifiable, then \
 search for THAT. Don't just search for the people or topic in general — \
@@ -1071,8 +1076,9 @@ search for the specific event, action, number, or object mentioned.\
 #   searching for contradicting evidence too.
 #
 # Budget: 8-12 tool calls. The agent gets pre-gathered seed results
-# (~30 ranked URLs) so it spends its budget on deep-dive fetching and
-# targeted follow-up rather than initial broad discovery.
+# (~30 ranked URLs) plus pre-fetched full articles from the top-ranked
+# seeds, so it spends its budget on targeted follow-up searches and
+# fetching additional sources rather than reading seeds it already has.
 
 
 # =============================================================================

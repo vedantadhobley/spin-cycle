@@ -4,7 +4,7 @@
 
 Phase 1 — Programmatic seed search (~3-20s):
   1. _run_seed_searches(): Fire LLM-written queries + base queries (raw claim,
-     Wikipedia) to Serper/DuckDuckGo/SearXNG concurrently. Yields ~30-50 raw URLs.
+     Wikipedia) to Serper/DuckDuckGo concurrently. Yields ~30-50 raw URLs.
   2. _collect_domains() + await_ratings_parallel(): Warm MBFC cache for all
      seed domains (per-domain 15s httpx timeout).
   3. _enrich_parties_from_mbfc(): Extract owner names from MBFC ownership
@@ -13,7 +13,10 @@ Phase 1 — Programmatic seed search (~3-20s):
   4. _rank_and_filter_seeds(): Score URLs with score_url(), detect interested-party
      conflicts (affiliated media + publisher ownership), apply CONFLICT_PENALTY (-15)
      to conflicted sources, sort by adjusted score, keep top 30.
-  5. _build_seed_messages(): Package ranked seeds as synthetic AIMessage +
+  5. _prefetch_seed_pages(): Fetch full page content from top-ranked seeds
+     in parallel (~3-5s). Up to 10 pages, TIER 1/2 first. Saves the agent
+     3-4 tool calls that would otherwise go to reading predictable sources.
+  6. _build_seed_messages(): Package ranked seeds as synthetic AIMessage +
      ToolMessage pairs so the agent sees them as prior searches.
 
 Phase 2 — LangGraph ReAct agent (~60-90s):
@@ -26,9 +29,9 @@ Phase 2 — LangGraph ReAct agent (~60-90s):
                             ▼
                            END
 
-  The agent starts with seed results already in its history. It spends its
-  8-12 tool call budget on deep-dive fetching (full article reads) and
-  targeted follow-up searches rather than initial broad discovery.
+  The agent starts with seed results and pre-fetched articles in its history.
+  It spends its 8-12 tool call budget on targeted follow-up searches and
+  fetching additional sources rather than reading the top-ranked seeds.
 
   The pre_model hook injects a progress note each iteration: tool call count,
   unique URLs/domains, seed tier/conflict coverage, and queries used.
@@ -44,7 +47,6 @@ Phase 3 — Programmatic enrichment:
 Dynamically registered based on API keys:
   - serper_search: Google results via Serper API (primary, needs SERPER_API_KEY)
   - web_search: DuckDuckGo (fallback, always available)
-  - searxng_search: Self-hosted meta-search (optional padding, needs SEARXNG_URL)
   - brave_search: Brave Search index (optional, needs BRAVE_API_KEY)
   - wikipedia_search: Wikipedia API (always available)
   - fetch_page_content: Read full page text from URLs (always available)
@@ -71,7 +73,9 @@ from src.tools.wikipedia import get_wikipedia_tool
 from src.tools.page_fetcher import get_page_fetcher_tool
 from src.tools.serper import get_serper_tool, is_available as serper_available, search_serper
 from src.tools.brave import get_brave_tool, is_available as brave_available, search_brave
-from src.tools.searxng import get_searxng_tool, is_available as searxng_available
+# SearXNG disabled — multi-engine fan-out returns too much topically
+# irrelevant noise (DID pages for "did Pelosi", travel guides for "China").
+# Container stays running; re-enable after adding relevance filtering.
 from src.tools.legiscan import search_legislation, is_available as legiscan_available
 from src.schemas.interested_parties import InterestedPartiesDict
 from src.utils.evidence_ranker import score_url, tier_label
@@ -95,9 +99,10 @@ def _build_progress_note(messages: list) -> str | None:
     Returns a concise progress note for injection before the next LLM call,
     or None if there's nothing useful to report yet (first call).
     """
-    tool_calls = 0
+    tool_calls = 0  # Only real agent calls (not synthetic seed/prefetch)
     search_queries: list[str] = []
-    fetch_urls: list[str] = []
+    fetch_urls: list[str] = []  # Agent-initiated fetches
+    prefetch_urls: list[str] = []  # Programmatic pre-fetches
     evidence_urls: set[str] = set()
     evidence_domains: set[str] = set()
     tools_used: set[str] = set()
@@ -106,22 +111,29 @@ def _build_progress_note(messages: list) -> str | None:
         # Count tool calls from AIMessages
         if isinstance(msg, AIMessage) and msg.tool_calls:
             for tc in msg.tool_calls:
-                tool_calls += 1
+                tc_id = tc.get("id", "")
+                is_synthetic = tc_id.startswith(("seed_", "prefetch_"))
                 tool_name = tc.get("name", "")
-                tools_used.add(tool_name)
                 args = tc.get("args", {})
 
-                # Track search queries
-                if "search" in tool_name.lower():
+                if not is_synthetic:
+                    tool_calls += 1
+                    tools_used.add(tool_name)
+
+                # Track search queries (from real agent calls only)
+                if not is_synthetic and "search" in tool_name.lower():
                     query = args.get("query") or args.get("input") or ""
                     if query:
                         search_queries.append(query)
 
-                # Track page fetch URLs
+                # Track page fetch URLs (separate prefetch vs agent)
                 if "fetch" in tool_name.lower():
                     url = args.get("url", "")
                     if url:
-                        fetch_urls.append(url)
+                        if is_synthetic:
+                            prefetch_urls.append(url)
+                        else:
+                            fetch_urls.append(url)
 
         # Extract URLs from tool results
         if isinstance(msg, ToolMessage):
@@ -136,7 +148,7 @@ def _build_progress_note(messages: list) -> str | None:
                 except Exception:
                     pass
 
-    # Don't inject progress on the first call (no tool calls yet)
+    # Don't inject progress on the first call (no real agent tool calls yet)
     if tool_calls == 0:
         return None
 
@@ -174,14 +186,27 @@ def _build_progress_note(messages: list) -> str | None:
         tier_str = f", {' + '.join(tier_parts)} sources" if tier_parts else ""
         lines.append(f"Seed coverage: {seed_urls} URLs pre-gathered{tier_str}")
 
+    # Pre-fetch coverage
+    if prefetch_urls:
+        lines.append(f"Pre-fetched: {len(prefetch_urls)} full articles from top seeds")
+
     # Evidence inventory
     lines.append(
         f"Evidence: {len(evidence_urls)} unique URLs across "
         f"{len(evidence_domains)} domains"
     )
 
-    # Page fetches
-    lines.append(f"Full articles read: {len(fetch_urls)}")
+    # Page fetches (combined view)
+    total_fetches = len(prefetch_urls) + len(fetch_urls)
+    if prefetch_urls and fetch_urls:
+        lines.append(
+            f"Full articles read: {total_fetches} "
+            f"({len(prefetch_urls)} pre-fetched + {len(fetch_urls)} agent-fetched)"
+        )
+    elif prefetch_urls:
+        lines.append(f"Full articles read: {total_fetches} (all pre-fetched)")
+    else:
+        lines.append(f"Full articles read: {total_fetches}")
 
     # Queries used (so agent can avoid repeats)
     if search_queries:
@@ -199,7 +224,7 @@ def _build_progress_note(messages: list) -> str | None:
         if "serper" in tl:
             engine_names.append("Serper")
         elif "searxng" in tl:
-            engine_names.append("SearXNG")
+            engine_names.append("SearXNG")  # legacy: may appear from older runs
         elif "brave" in tl:
             engine_names.append("Brave")
         elif "web_search" in tl or "duckduckgo" in tl:
@@ -215,8 +240,7 @@ def _build_progress_note(messages: list) -> str | None:
     available_engines = {"DuckDuckGo", "Wikipedia"}
     if serper_available():
         available_engines.add("Serper")
-    if searxng_available():
-        available_engines.add("SearXNG")
+    # SearXNG disabled — too much topically irrelevant noise
     if brave_available():
         available_engines.add("Brave")
     unused_engines = available_engines - set(engine_names)
@@ -224,11 +248,11 @@ def _build_progress_note(messages: list) -> str | None:
         suggestions.append(
             f"try {', '.join(sorted(unused_engines))} for source diversity"
         )
-    if len(fetch_urls) == 0 and len(evidence_urls) >= 4:
+    if len(fetch_urls) == 0 and len(prefetch_urls) == 0 and len(evidence_urls) >= 4:
         suggestions.append(
             "fetch full articles from your best URLs — snippets may miss detail"
         )
-    if len(fetch_urls) >= 3 and tool_calls >= 8:
+    if total_fetches >= 3 and tool_calls >= 8:
         suggestions.append(
             "you have good depth — consider wrapping up if both sides are covered"
         )
@@ -297,10 +321,9 @@ def _build_tool_list() -> list:
     # DuckDuckGo — fallback, always available
     tools.append(get_web_search_tool())
 
-    # SearXNG — optional padding, adds coverage even with degraded engines
-    if searxng_available():
-        tools.append(get_searxng_tool())
-        log.info(logger, MODULE, "tool_enabled", "SearXNG meta-search enabled")
+    # SearXNG — disabled from agent tools (multi-engine fan-out returns
+    # too much topically irrelevant noise that pollutes seed ranking).
+    # Container stays running for potential future use with relevance filtering.
 
     # Brave — optional, independent index
     if brave_available():
@@ -551,7 +574,6 @@ async def _run_seed_searches(
     import asyncio
 
     from src.agent.claim_category import generate_seed_queries
-    from src.tools.searxng import search_searxng
     from src.tools.web_search import search_duckduckgo
     from src.tools.wikipedia import search_wikipedia
 
@@ -574,9 +596,9 @@ async def _run_seed_searches(
             if backend == "serper" and not serper_available():
                 resolved_backend = "duckduckgo"  # free fallback
             elif backend == "brave" and not brave_available():
-                resolved_backend = "searxng" if searxng_available() else None
-            elif backend == "searxng" and not searxng_available():
                 resolved_backend = None
+            elif backend == "searxng":
+                resolved_backend = None  # SearXNG disabled from seeds
             # duckduckgo is always available — no fallback needed
 
             if resolved_backend and resolved_backend != backend:
@@ -599,9 +621,6 @@ async def _run_seed_searches(
                         if be == "serper":
                             return (lbl, q, "web",
                                     await search_serper(q, max_results=mx))
-                        elif be == "searxng":
-                            return (lbl, q, "web",
-                                    await search_searxng(q, max_results=mx, categories=cat or "general"))
                         elif be == "brave":
                             return (lbl, q, "web",
                                     await search_brave(q, max_results=mx))
@@ -703,6 +722,148 @@ def _format_seed_results(results: list[dict]) -> str:
     return "\n\n---\n\n".join(parts)
 
 
+# ---------------------------------------------------------------------------
+# Pre-fetch: read full page content from top-ranked seeds before the agent
+# ---------------------------------------------------------------------------
+
+PREFETCH_MAX = 10
+PREFETCH_CONTENT_MAX = 5000  # chars per page (lower than page_fetcher's 8000)
+PREFETCH_CONCURRENCY = 5
+
+
+async def _prefetch_seed_pages(
+    ranked_seeds: list[dict],
+    max_pages: int = PREFETCH_MAX,
+) -> tuple[list, list[str]]:
+    """Pre-fetch full page content for top-ranked seeds.
+
+    Selects seeds with TIER 1/TIER 2 labels first, then fills from
+    remaining top-ranked seeds. Fetches in parallel using fetch_page()
+    directly (not the LangChain tool wrapper).
+
+    Returns (prefetch_messages, prefetched_urls):
+      - prefetch_messages: synthetic AIMessage + ToolMessage pairs
+        (same format as agent's fetch_page_content tool output)
+      - prefetched_urls: URLs that were successfully fetched
+    """
+    import asyncio
+    from src.tools.page_fetcher import fetch_page
+    from src.tools.source_filter import is_blocked
+
+    _t0 = _time.monotonic()
+
+    # --- Select candidates: tiered first, then remaining top-ranked ---
+    seen_urls: set[str] = set()
+    tiered: list[dict] = []
+    untiered: list[dict] = []
+
+    for seed in ranked_seeds:
+        url = seed.get("source_url", "")
+        if not url or url in seen_urls:
+            continue
+        if is_blocked(url):
+            continue
+        seen_urls.add(url)
+
+        tier = seed.get("_tier", "")
+        if tier:  # TIER 1 or TIER 2
+            tiered.append(seed)
+        else:
+            untiered.append(seed)
+
+    candidates = (tiered + untiered)[:max_pages]
+
+    if not candidates:
+        return [], []
+
+    # --- Parallel fetch ---
+    sem = asyncio.Semaphore(PREFETCH_CONCURRENCY)
+
+    async def _fetch_one(seed: dict) -> dict | None:
+        url = seed.get("source_url", "")
+        async with sem:
+            try:
+                result = await fetch_page(url)
+            except Exception:
+                return None
+        if result.get("error") or not result.get("content"):
+            return None
+        # Truncate to prefetch limit (tighter than page_fetcher's 8000)
+        content = result["content"]
+        if len(content) > PREFETCH_CONTENT_MAX:
+            content = content[:PREFETCH_CONTENT_MAX] + "\n\n[... content truncated ...]"
+        result["content"] = content
+        return result
+
+    fetch_results = await asyncio.gather(
+        *(_fetch_one(s) for s in candidates),
+        return_exceptions=True,
+    )
+
+    # --- Build synthetic messages ---
+    prefetch_messages: list = []
+    prefetched_urls: list[str] = []
+
+    for result in fetch_results:
+        if isinstance(result, Exception) or result is None:
+            continue
+
+        url = result["url"]
+        title = result.get("title", "")
+        content = result["content"]
+
+        # SpaCy NER on content (same as page fetcher tool does)
+        entities_line = ""
+        try:
+            from src.utils.ner import extract_entities
+            entities = extract_entities(content, labels={"PERSON", "ORG"})
+            if entities:
+                names = list(dict.fromkeys(e["text"] for e in entities))[:15]
+                entities_line = f"Entities mentioned: {', '.join(names)}\n"
+        except Exception:
+            pass  # NER failure is non-fatal
+
+        tool_call_id = f"prefetch_{_uuid.uuid4().hex[:12]}"
+
+        ai_msg = AIMessage(
+            content="",
+            tool_calls=[{
+                "name": "fetch_page_content",
+                "args": {"url": url},
+                "id": tool_call_id,
+                "type": "tool_call",
+            }],
+        )
+
+        header = f"Page: {title}\nURL: {url}\n"
+        if entities_line:
+            header += entities_line
+        header += "\n"
+        tool_msg = ToolMessage(
+            content=header + content,
+            tool_call_id=tool_call_id,
+            name="fetch_page_content",
+        )
+
+        prefetch_messages.append(ai_msg)
+        prefetch_messages.append(tool_msg)
+        prefetched_urls.append(url)
+
+    elapsed_ms = int((_time.monotonic() - _t0) * 1000)
+    candidate_urls = [s.get("source_url", "") for s in candidates]
+    failed_urls = [u for u in candidate_urls if u not in prefetched_urls]
+    log.info(logger, MODULE, "prefetch_complete",
+             "Pre-fetched top seed pages",
+             attempted=len(candidates),
+             succeeded=len(prefetched_urls),
+             failed=len(failed_urls),
+             latency_ms=elapsed_ms,
+             urls=prefetched_urls,
+             failed_urls=failed_urls)
+
+    return prefetch_messages, prefetched_urls
+
+
 def _build_seed_messages(seed_results: list[dict]) -> list:
     """Build synthetic AIMessage + ToolMessage pairs from seed results.
 
@@ -723,7 +884,7 @@ def _build_seed_messages(seed_results: list[dict]) -> list:
     for query, results in groups.items():
         # Determine tool name from source type
         is_wiki = all(r.get("source_type") == "wikipedia" for r in results)
-        tool_name = "wikipedia_search" if is_wiki else "searxng_search"
+        tool_name = "wikipedia_search" if is_wiki else "web_search"
 
         # Unique tool call ID
         tool_call_id = f"seed_{_uuid.uuid4().hex[:12]}"
@@ -1146,17 +1307,25 @@ async def research_claim(
         all_parties=all_parties,
     )
 
+    # Phase 1c: Pre-fetch full page content from top-ranked seeds.
+    # Parallel HTTP fetches (~3-5s) before the agent starts, so it sees
+    # full articles from the best sources without spending tool calls.
+    prefetch_messages, prefetched_urls = await _prefetch_seed_pages(seed_results)
+
     seed_messages = _build_seed_messages(seed_results)
 
     log.info(logger, MODULE, "seed_complete",
              "Seed phase complete, starting agent",
              seed_results=len(seed_results),
-             seed_messages=len(seed_messages))
+             seed_messages=len(seed_messages),
+             prefetched=len(prefetched_urls),
+             prefetched_urls=prefetched_urls)
 
     # Phase 2: Agentic deep dive — LLM decides what to fetch/follow-up.
     # Collect messages incrementally via streaming so we keep evidence
     # even if the agent hits recursion limit or times out.
-    collected_messages: list = list(seed_messages)
+    # Prefetch messages go after seeds so the agent sees them as prior fetches.
+    collected_messages: list = list(seed_messages) + list(prefetch_messages)
 
     try:
         agent = build_research_agent(wikidata_context)
@@ -1166,7 +1335,7 @@ async def research_claim(
 
         async def _run_stream():
             async for chunk in agent.astream(
-                {"messages": [input_msg] + seed_messages},
+                {"messages": [input_msg] + seed_messages + prefetch_messages},
                 config={"recursion_limit": max_steps},
                 stream_mode="updates",
             ):
@@ -1317,22 +1486,7 @@ async def _research_fallback(sub_claim: str) -> list[dict]:
                         "Serper fallback search failed",
                         error=str(e), error_type=type(e).__name__)
 
-    # Try SearXNG (self-hosted meta-search)
-    if searxng_available():
-        try:
-            from src.tools.searxng import search_searxng
-            results = await search_searxng(sub_claim, max_results=8)
-            for r in results:
-                evidence.append({
-                    "source_type": "web",
-                    "source_url": r.get("url"),
-                    "title": r.get("title", ""),
-                    "content": r.get("snippet", ""),
-                })
-        except Exception as e:
-            log.warning(logger, MODULE, "fallback_searxng_failed",
-                        "SearXNG fallback search failed",
-                        error=str(e), error_type=type(e).__name__)
+    # SearXNG fallback disabled — too much topically irrelevant noise
 
     # Try Brave (different index = different results)
     if brave_available():
