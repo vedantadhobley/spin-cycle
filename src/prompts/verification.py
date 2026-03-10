@@ -1122,6 +1122,19 @@ in context (e.g. "per item" vs "per package" — pick whichever a normal person 
 would mean).
   - Casual phrasing → verify the underlying factual claim, not whether the \
 wording is technically precise.
+  - Attribution ("X said Y") → the question is whether X spoke or wrote those \
+words in a documented setting. If the words are on the record, the attribution \
+is correct — even if X credited someone else, used a preamble like "as the \
+saying goes," or was paraphrasing. Do NOT downgrade an attribution because \
+the speaker acknowledged the idea wasn't originally theirs.
+  - Rhetorical quantifiers ("virtually every," "nearly all," "almost every") \
+are functionally equivalent. Verify the DIRECTION: did the thing happen to \
+the overwhelming majority? If yes, a rhetorical quantifier being slightly \
+imprecise does not flip the verdict.
+  - Understatement is not inaccuracy. If evidence shows the real figure is \
+HIGHER than claimed, the claim understates the truth — that supports the \
+claim, not undermines it. A conservative estimate that turns out to be even \
+more conservative than thought is still correct.
 If the substance is right but the phrasing is imprecise, that's "mostly_true" \
 not "mostly_false."
 
@@ -1158,6 +1171,14 @@ office denial is NOT proof something is false. A politician's claim is \
 NOT proof something is true. These are interested parties with motives \
 to spin — treat their statements as claims to be verified, not as \
 evidence that settles a question.
+   - OFFICIAL DENIALS DO NOT COUNTER PRIMARY EVIDENCE. When peer-reviewed \
+research, court proceedings, or investigative journalism with primary \
+documents establishes a finding, a corporate spokesperson or official \
+press statement disputing it does NOT constitute counter-evidence. Note \
+the denial exists, but do not let it downgrade a verdict that is \
+well-supported by primary sources. A company saying "we dispute the \
+findings" does not create genuine uncertainty when the findings come \
+from independent, methodologically sound research.
 3. Consider SOURCE BIAS when evidence conflicts. See the rating tags.
 4. Render a verdict based ONLY on the evidence provided. Do NOT use your \
 own knowledge. Do NOT introduce facts, dates, or claims that are not \
@@ -1456,10 +1477,26 @@ spirit of the claim holds. Use this when a reasonable person would say \
 "that's basically right."
 - "mixed" — some aspects are supported, others contradicted by evidence. \
 Not just a minor detail off — genuinely conflicting on substance.
-- "mostly_false" — the core assertion is wrong, even if minor peripheral \
-elements are accurate. The spirit of the claim does NOT hold.
-- "false" — evidence clearly contradicts the central claim
+- "mostly_false" — the core assertion is wrong or key specific claims \
+(quantities, superlatives, absolute statements) are wrong, but the \
+underlying topic or direction has some basis in reality. The claim \
+misleads but isn't fabricated. Use this when the DIRECTION is right but \
+the specific assertion overshoots (e.g., "highest in the world" when \
+it's actually top-5, or "every single one" when it's 94%).
+- "false" — the claim is fundamentally wrong at every level. No \
+reasonable interpretation makes it true. The claim isn't just imprecise \
+or exaggerated — it describes something that did not happen, attributes \
+something to the wrong source, or asserts a relationship that evidence \
+directly contradicts. Reserve this for claims with no meaningful truth \
+content.
 - "unverifiable" — not enough evidence to judge either way
+
+BOUNDARY RULE — mostly_false vs false:
+If the DIRECTION or spirit of the claim is supported by evidence but the \
+specific quantifiers, superlatives, or absolutes fail, that is mostly_false. \
+"False" requires that even a charitable, directional reading of the claim \
+is contradicted. When in doubt between false and mostly_false, ask: "Does \
+this claim have ANY meaningful truth content?" If yes → mostly_false.
 
 CONFIDENCE CALIBRATION — anchor to evidence quality (do NOT default to 0.9+):
 An EVIDENCE QUALITY SUMMARY appears at the top of the evidence. Use it \
@@ -1628,6 +1665,24 @@ Another example: "NASA landed on Mars in 2019"
 - Detail: year is 2019 → irrelevant since core is false
 → Verdict: "false" regardless of details.
 
+ENUMERATED CLAIMS — examples support a thesis, they ARE NOT the thesis:
+When a claim lists multiple examples, outlets, entities, or instances to \
+support a broader point, the examples are SUPPORTING DETAILS. Do not treat \
+them as co-equal core assertions where one failure flips the verdict.
+
+Example: "Organization X has a pattern of behavior Y across Division A, \
+Division B, and Division C"
+- Core assertion: Organization X has a pattern of behavior Y
+- Supporting: Division A → TRUE, Division B → TRUE, Division C → MOSTLY_FALSE
+→ If the core pattern is clearly established by A and B, the overall verdict \
+is mostly_true. C being partially wrong is a detail error, not a thesis failure.
+→ It would only be mostly_false if the pattern itself isn't established.
+
+Similarly, when a claim makes two parallel assertions joined by "and," weigh \
+each by how central it is to the claim's POINT. If one part is the notable \
+assertion and the other is a widely-known background fact, the notable part \
+drives the verdict.
+
 USING THE THESIS:
 If a SPEAKER'S THESIS is provided below the original claim, use it as \
 your primary rubric. The thesis captures the speaker's ACTUAL ARGUMENT — \
@@ -1662,9 +1717,17 @@ Verdict scale:
 - "true" — Core assertion AND key details are well-supported by evidence
 - "mostly_true" — Core assertion is right, minor details wrong or imprecise
 - "mixed" — Core assertion is genuinely split (not just detail errors)
-- "mostly_false" — Core assertion is wrong, even if some details are right
-- "false" — Core assertion AND details are clearly contradicted by evidence
+- "mostly_false" — Core assertion is wrong or key specifics (quantities, \
+superlatives, absolutes) are wrong, but the direction or topic has some \
+basis. The claim misleads but isn't fabricated.
+- "false" — The claim is fundamentally wrong at every level. No reasonable \
+interpretation makes it true. Reserve for claims with no meaningful truth \
+content — not for claims that overshoot or exaggerate.
 - "unverifiable" — Not enough evidence to judge either way
+
+When choosing between mostly_false and false: if the claim's DIRECTION is \
+right but the specifics fail, that's mostly_false. False requires that even \
+a charitable reading is contradicted.
 
 The overall confidence should reflect the weakest link — if one finding \
 is very uncertain, your overall confidence should be lower.

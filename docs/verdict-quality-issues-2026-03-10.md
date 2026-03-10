@@ -1,226 +1,403 @@
-# Verdict Quality Issues — 2026-03-10 Test Run
+# Verdict Quality Issues — 2026-03-10/11 Test Runs
 
-5 claims tested after SearXNG removal + prefetch enablement. 3 have verdict
-quality issues to address. 1 good result. 1 technically-correct-but-funny result.
+Initial 5-claim test after SearXNG removal + prefetch enablement, followed by
+full 40-claim regression + stress suite. Issues organized by root cause.
 
----
-
-## 1. SpaceX/DOGE — Decomposition Misinterprets Juxtaposition
-
-**Claim**: "Elon Musk's SpaceX has received over $15 billion in government contracts
-while he simultaneously runs DOGE, which aims to cut $2 trillion in government spending"
-
-**Verdict**: mostly_false (should be **mostly_true**)
-
-### Problem
-
-The claim is a juxtaposition/irony claim: Musk receives government money AND works
-to cut government spending. The point is the coexistence of these two facts, not
-whether DOGE actually succeeded at cutting $2T.
-
-The decomposer splits it into sub-claims including one evaluating whether DOGE has
-actually cut $2T in spending — which it hasn't (and the claim only says it "aims to").
-This drags the overall verdict to mostly_false.
-
-### Root Cause
-
-Decomposition instability — the same claim produces different sub-claims across runs.
-In some runs the decomposer correctly treats "aims to cut" as a stated goal (true —
-DOGE does aim for this). In other runs it treats it as an accomplished fact (false —
-DOGE hasn't achieved $2T in cuts).
-
-### Proposed Fix
-
-1. **Normalize "aims to" / "seeks to" / "plans to"**: The normalizer should preserve
-   intentional language. "Aims to cut $2T" should decompose as "DOGE's stated goal is
-   to cut $2T in spending" not "DOGE has cut $2T in spending."
-
-2. **Juxtaposition detection in decompose**: When a claim presents two facts joined
-   by "while" / "simultaneously" / "even as", the decomposer should recognize this
-   as a contrast/coexistence claim. The sub-claims should verify each fact
-   independently, not evaluate whether the juxtaposition implies a conclusion.
-
-3. **Decompose prompt guidance**: Add explicit rules for:
-   - Intentional verbs (aims, seeks, plans, proposes) → verify the INTENT, not the outcome
-   - Contrast connectors (while, simultaneously, even as, despite) → verify each side
-     independently
-
-### Priority: HIGH
-This pattern affects any claim about stated goals, aspirations, or contrasting facts.
+**Evidence quality note**: SearXNG removal dramatically improved evidence.
+2,990 evidence items across 40 claims (avg 75/claim), 0 unverifiable verdicts,
+0 garbage domains. Top sources: Wikipedia, LegiScan, Statista, PMC, NPR, BBC,
+NYT, Reuters. See "Evidence Quality" section at the end.
 
 ---
 
-## 2. Pelosi — Absolutist Language Over-Penalization
+## Root Cause 1: Synthesizer Counts Instead of Weighing
 
-**Claim**: "Nancy Pelosi has outperformed virtually every major hedge fund over the
-past two decades while serving as a member of Congress with access to insider
-information"
+The synthesize prompt says "WEIGH BY IMPORTANCE, NOT BY COUNT" but the model
+consistently defaults to counting subclaims. When any subclaim fails, the
+overall verdict is dragged down even when the core thesis is clearly supported.
 
-**Verdict**: mostly_false (should be **mostly_true**)
+**Affects 4 claims — all have flipped verdicts (wrong direction).**
 
-### Problem
+### 1a. Canada Coastline — mostly_false (0.90), should be **mostly_true**
 
-The judge treats the gap between "virtually every" and "almost every" as a
-meaningful factual distinction warranting a mostly_false verdict. The evidence
-shows Pelosi's stock returns significantly outperformed most major hedge funds
-(~65% annualized during some periods vs S&P average), which is the core claim.
+**Claim**: "Canada has more coastline than any other country and is the second
+largest country by land area"
 
-The judge also applies strict timeframe attribution — Pelosi's career-spanning
-trading record ($130M+ in reported trades) is questioned because some trades
-occurred outside her tenure as Speaker, even though the claim says "member of
-Congress" (which she's been since 1987).
+**Subclaims**:
+- "Canada has the longest coastline" → **true (0.95)** — correct, 202,080 km
+- "Canada is 2nd largest by total land area" → **mostly_false (0.85)** — pedantic:
+  Canada is 2nd by total area (land + water) but 3rd/4th by land-only area
 
-### Root Cause
+The coastline part (the more remarkable claim) is unambiguously true. The "2nd
+largest" part is how virtually everyone describes Canada — the land-vs-total-area
+distinction is a technicality. The synthesizer treats both as co-equal core
+assertions and lets the technicality flip the entire verdict.
 
-1. **Absolutist language sensitivity too high**: "Virtually every" ≈ "almost every"
-   ≈ "the vast majority of". The judge treats minor quantifier distinctions as
-   factual failures rather than rhetorical imprecision.
+### 1b. Murdoch Climate Skepticism — mostly_false (0.82), should be **mostly_true**
 
-2. **Timeframe over-strictness**: The claim says "member of Congress" but the judge
-   seems to anchor on her Speaker tenure for some trading data.
+**Claim**: "Rupert Murdoch's media empire has systematically promoted climate
+skepticism across Fox News, Sky News, and the New York Post"
 
-### Proposed Fix
+**Subclaims**:
+- Fox News → **mostly_true (0.85)** — well-documented (Media Matters, academic studies)
+- NY Post → **mostly_true (0.85)** — well-documented
+- Sky News → **mostly_false (0.72)** — UK Sky News was sold 2018; Sky News
+  Australia (still Murdoch-owned) IS a documented climate misinformation hub
 
-1. **Quantifier equivalence in judge prompt**: Add guidance that rhetorical
-   quantifiers like "virtually every", "almost every", "nearly all" are
-   equivalent for fact-checking purposes. The key question is whether the
-   DIRECTIONAL claim is true (did she outperform most hedge funds?), not
-   whether "virtually" vs "almost" is precisely correct.
+Core thesis: "Murdoch's empire systematically promotes climate skepticism."
+This is overwhelmingly supported. One of three named outlets is ambiguous (not
+wrong — Sky News Australia does exactly what the claim says). The synthesizer
+treated 2-of-3 as a failing grade instead of weighing the core thesis.
 
-2. **Normalizer quantifier softening**: During normalization, "virtually every" →
-   "almost every" or similar. Strip rhetorical amplification before decomposition
-   so the judge evaluates the substance, not the rhetoric.
+### 1c. Amazon Warehouse — mostly_false (0.82), should be **mostly_true**
 
-3. **Direction-first evaluation**: The judge prompt already has partial-data
-   guidance for quantitative claims. Extend this to comparative claims: if the
-   direction is clearly supported (outperformed most), that's mostly_true even
-   if the exact scope ("every" vs "most") is slightly off.
+**Claim**: "Amazon pays its warehouse workers a minimum of $15 per hour, but the
+company's warehouse injury rate is three times the industry average and Jeff
+Bezos personally blocked unionization efforts at the Bessemer, Alabama facility"
 
-### Priority: MEDIUM
-Affects claims with rhetorical quantifiers (common in political/economic claims).
+**Subclaims**:
+- $15/hr minimum → **mostly_true (0.85)** — confirmed
+- 3x injury rate → **mostly_true (0.78)** — confirmed (OSHA data, news investigations)
+- Bezos personally blocked union → **mostly_false (0.72)** — Amazon engaged in
+  illegal union-busting (NLRB ruling) but evidence doesn't support Bezos
+  *personally* directing it
 
----
+2 of 3 parts are true. The 3rd is an overstatement of corporate behavior
+attributed to an individual. The synthesis reasoning explicitly says "one of
+three is false, therefore overall cannot be true or mostly true."
 
-## 3. Google/Meta — Research Scope Too Narrow (Ireland-Focused)
+### 1d. Finland Education/Suicide — false (0.92), should be **mostly_false**
 
-**Claim**: "Google and Meta have collectively avoided paying over $50 billion in
-taxes worldwide through legal loopholes and offshore profit shifting"
+**Claim**: "Finland has the best education system in the world and the highest
+suicide rate in Europe"
 
-**Verdict**: mostly_true (0.72 confidence — weak)
+**Subclaims**:
+- Best education → **false (0.92)** — Singapore now #1 PISA, Finland ~#12
+- Highest suicide rate → **false (0.85)** — Lithuania now leads; Finland near EU average
 
-### Problem
+Both parts were historically true (Finland WAS #1 PISA for years, DID have the
+highest European suicide rate in the 1980s-90s). Present-tense assertions are
+wrong, but "false" implies fabrication. The synthesizer sees two "false"
+subclaims and goes to "false" overall, ignoring the historical grounding. This
+is a commonly-repeated folk-knowledge claim that WAS accurate — **mostly_false**
+better captures "outdated but not fabricated."
 
-The research phase found heavily Ireland-focused sources:
-- `finfacts-blog.com` — Irish financial analysis
-- Irish Data Protection Commission fine articles
-- Multiple articles about Ireland's corporate tax regime
+### Proposed Fix: Synthesizer Core-vs-Detail Identification
 
-While Ireland IS part of the tax avoidance story, the claim is about
-**worldwide** avoidance by **two specific companies**. The research should have
-found:
-- SEC filings / annual reports showing effective tax rates
-- Congressional/Senate hearing transcripts on tech company tax practices
-- EU Commission state aid decisions (Apple €13B, etc.)
-- OECD BEPS (Base Erosion and Profit Shifting) reports
-- US-specific data: TCJA impact, profit repatriation figures
+1. **Synthesize prompt strengthening**: Add explicit examples showing that when
+   a compound claim has a clear core thesis supported by most subclaims, the
+   failing subclaim is a detail error that belongs in the reasoning, not the
+   verdict. Example: "Murdoch promotes climate skepticism (core) across Fox,
+   Sky, NYPost (supporting details)" — if 2 of 3 outlets confirm the core
+   thesis, the verdict should reflect the core being true.
 
-### Root Cause
+2. **Core assertion extraction**: Have the synthesizer explicitly identify
+   the core assertion before counting subclaims. "What is this claim really
+   saying?" should be answered before "how many subclaims passed?"
 
-1. **Single combined sub-claim**: The claim was treated as one atomic sub-claim
-   rather than splitting into per-company facts. A per-company split would have
-   produced more targeted research:
-   - "Google has avoided paying over $25B in taxes through legal loopholes"
-   - "Meta has avoided paying over $25B in taxes through legal loopholes"
-   - "Combined avoidance exceeds $50B"
+3. **Historical grounding rule**: When claims use present tense for assertions
+   that were historically accurate, the verdict should be mostly_false (outdated)
+   rather than false (fabricated).
 
-2. **Seed query quality**: The LLM-generated seed queries may have been too
-   generic ("tech company tax avoidance") rather than targeted ("Google
-   effective tax rate SEC filing", "Meta offshore profit shifting EU ruling").
-
-3. **Source diversity not enforced geographically**: The ranker ensures domain
-   diversity but not geographic/topic diversity. Multiple Ireland-focused
-   articles from different domains all pass the diversity check.
-
-### Proposed Fix
-
-1. **Decompose multi-entity comparative claims**: When a claim names multiple
-   entities + "collectively" / "combined" / "together", decompose into
-   per-entity sub-claims + an aggregation fact.
-
-2. **Seed query specificity**: Add guidance to the decompose prompt that seed
-   queries for financial claims should target primary sources (SEC, EU
-   Commission, OECD) not just news coverage.
-
-3. **Geographic diversity in ranking** (future): Track geographic focus of
-   evidence and penalize over-concentration in one jurisdiction for claims
-   about "worldwide" phenomena.
-
-### Priority: MEDIUM
-Affects multi-entity claims and global-scope claims.
+**Priority: HIGH** — affects the most claims and produces the worst errors
+(fully flipped verdicts).
 
 ---
 
-## 4. China Renewables — Good Result
+## Root Cause 2: Judge Over-Pedantry
 
-**Claim**: "China has invested more in renewable energy than the United States
-and European Union combined over the past five years"
+The judge applies excessively literal standards to attribution, semantic
+precision, and edge-case technicalities, diverging from how a reasonable
+person would evaluate claims.
 
-**Verdict**: mostly_true (good confidence)
+**Affects 3 claims — all too conservative (should be one level higher).**
 
-### Notes
+### 2a. Churchill Quote — mostly_false (0.85), should be **mostly_true**
 
-This run correctly found the Energy Institute source (`seasia.co` article
-citing the data) after SearXNG removal. Previous run with SearXNG returned
-garbage results (travel guides, generic encyclopedia pages) that crowded out
-the key source.
+**Claim**: "Winston Churchill said that democracy is the worst form of
+government except for all the others"
 
-The prefetch feature successfully pre-loaded high-quality articles, saving
-agent tool budget for follow-up research.
+**Subclaims**:
+- "Churchill stated the quote" → **mostly_false (0.85)** — He DID say it in the
+  House of Commons (Nov 11, 1947, recorded in Hansard). Judge penalizes because
+  he prefaced with "it has been said that..." — treating a universally accepted
+  attribution as false because Churchill credited it as pre-existing.
+- "The quote is a comparative claim that democracy is inferior" → **mostly_false
+  (0.85)** — DECOMPOSITION ERROR. The original claim never asserts this
+  interpretation. The decomposer invented a straw-man subclaim about the
+  quote's meaning.
 
-**No action needed** — this is the desired behavior.
+Two compounding errors: (1) bogus second subclaim that the quality validator
+should have caught, (2) excessively literal attribution standard. The quote is
+universally attributed to Churchill by every quotation compendium.
+
+### 2b. ExxonMobil Climate — mostly_true (0.85), should be **true**
+
+**Claim**: "ExxonMobil's own scientists confirmed climate change was real in the
+1970s but the company spent decades funding climate denial"
+
+**Subclaims**:
+- Scientists confirmed in 1970s → **mostly_true (0.85)** — downgraded because
+  "Exxon spokespersons disputed the conclusiveness." PR denials are not
+  legitimate counter-evidence to peer-reviewed analysis (2023 Science journal,
+  Harvard/Potsdam study, Inside Climate News investigation).
+- Decades funding denial → **mostly_true (0.85)** — downgraded because funding
+  went to "think tanks" rather than "direct scientific research." The claim
+  says "funding climate denial" not "funding research" — this is hair-splitting.
+
+Both parts are among the most thoroughly documented corporate malfeasance
+stories in history, backed by court proceedings, peer-reviewed studies, and
+primary source documents.
+
+### 2c. IRA Climate Investment — mostly_true (0.85), should be **true**
+
+**Claim**: "The Inflation Reduction Act allocated $369 billion for climate and
+energy provisions, making it the largest climate investment in US history"
+
+**Subclaims**:
+- $369B allocation → **mostly_true (0.85)** — downgraded because actual spending
+  may exceed $800B-$1.2T due to uncapped tax credits. But "allocated $369B" is
+  the CBO-scored figure — exceeding it makes the claim a conservative
+  *understatement*, not an error.
+- Largest climate investment in US history → **mostly_true (0.85)** — confirmed
+  by CRS, Yale, RMI, every non-partisan analysis.
+
+The judge confused "the estimate might be exceeded" with "the estimate might
+be wrong." Understating the truth is not inaccuracy.
+
+### Proposed Fix: Judge Pedantry Calibration
+
+1. **Attribution standard**: "X said Y" is true if X spoke those words in a
+   documented setting, regardless of whether X claimed original authorship.
+   Add judge prompt guidance: "When evaluating attribution claims ('X said Y'),
+   the question is whether X spoke or wrote those words, not whether X claimed
+   to have originated them."
+
+2. **PR denials are not counter-evidence**: Add guidance that corporate/official
+   denials do not constitute evidence against findings from peer-reviewed
+   studies, court proceedings, or investigative journalism.
+
+3. **Understatement ≠ inaccuracy**: When evidence shows a claim's figure is
+   lower than reality, the claim understates the truth — this supports the
+   claim rather than undermining it.
+
+**Priority: HIGH** — conservative bias on well-documented facts undermines
+credibility of the pipeline.
 
 ---
 
-## 5. Musk/DOGE Subsidies — Technically Correct (Amusing)
+## Root Cause 3: False vs Mostly-False Threshold
 
-**Claim**: "Elon Musk's companies have received over $30 billion in government
-subsidies while he advocates for reducing government spending through DOGE"
+"False" should mean the claim is fundamentally fabricated or contradicted.
+The pipeline uses "false" for claims that have significant truth content but
+fail on specific superlatives or absolute quantifiers.
 
-**Verdict**: mostly_false
+**Affects 3 claims — all one level too harsh.**
 
-### Notes
+### 3a. Japan Elderly — false (0.85), should be **mostly_false**
 
-The judge determined that while Musk's companies have received substantial
-government support ($15.4B in contracts, plus subsidies), the evidence doesn't
-clearly support the "$30 billion" figure. The reasoning is technically sound —
-the specific dollar amount is likely inflated.
+**Claim**: "Japan has the oldest population in the world and spends more per
+capita on elderly care than any European country"
 
-However, the DIRECTIONAL claim (Musk receives government money while advocating
-spending cuts) is clearly true. This is the same juxtaposition/irony pattern as
-issue #1 above.
+**Subclaims**:
+- Oldest population → **mostly_false (0.78)** — Monaco has higher median age,
+  but Monaco is a microstate (pop ~39,000). Most mainstream sources (Reuters,
+  WEF) call Japan #1. Edge-case technicality.
+- Spending more than any European country → **false (0.85)** — France, Belgium,
+  Luxembourg all exceed Japan. This part is genuinely wrong.
 
-**Verdict should be**: mostly_true (the irony/juxtaposition is factual, the
-exact figure is debatable but the order of magnitude is correct).
+The spending part is wrong, but Japan IS extremely old and DOES spend heavily
+on elderly care. "False" implies the claim is fabricated — it's not. The
+directional claim (Japan = old + high elderly spending) is correct; the
+superlatives ("oldest" and "more than any") are wrong.
 
-This shares the same root cause as issue #1 and would be fixed by the same
-decomposition improvements.
+### 3b. Republican Insulin — false (0.95), should be **mostly_false**
+
+**Claim**: "Every single Republican voted against capping insulin prices at $35
+in the Inflation Reduction Act"
+
+**Subclaims**:
+- House Republicans → **mostly_false (0.85)** — 12 of 205 House Rs voted FOR
+- Senate Republicans → **mostly_false (0.85)** — 7 Senate Rs voted to keep the
+  $35 cap (but voted against the overall IRA)
+
+"Every single" is demonstrably wrong. But the directional claim is accurate:
+193 of 205 House Rs (94%) and nearly all Senate Rs opposed it. "False" at 0.95
+confidence implies fabrication. This is a true-in-spirit claim with an
+incorrect absolute quantifier — exactly what mostly_false is for.
+
+### 3c. Finland Education/Suicide — also affected (covered under Root Cause 1)
+
+### Proposed Fix: False/Mostly-False Boundary
+
+1. **Judge prompt threshold guidance**: Add explicit definition:
+   - **false**: The claim's core assertion is fabricated, invented, or
+     fundamentally contradicted. No reasonable interpretation makes it true.
+   - **mostly_false**: The claim has a kernel of truth or is directionally
+     grounded but makes specific assertions (superlatives, absolute quantifiers,
+     exact figures) that are wrong.
+
+2. **Directional truth rule**: When the direction/spirit of a claim is supported
+   but specific quantifiers fail ("every" → "94%", "highest" → "one of the
+   highest"), the verdict is mostly_false, not false.
+
+**Priority: MEDIUM** — affects claims with superlatives and absolute quantifiers
+(common in political rhetoric).
 
 ---
 
-## Summary of Fixes Needed
+## Root Cause 4: Decomposition Quality
 
-| Issue | Component | Priority | Effort |
-|-------|-----------|----------|--------|
-| Juxtaposition/irony decomposition | decompose prompt | HIGH | Medium |
-| Intentional verb handling (aims/seeks) | normalizer + decompose | HIGH | Small |
-| Quantifier equivalence (virtually≈almost) | judge prompt + normalizer | MEDIUM | Small |
-| Multi-entity claim splitting | decompose prompt | MEDIUM | Medium |
-| Seed query targeting for financial claims | decompose prompt | MEDIUM | Small |
-| Geographic diversity in ranking | evidence_ranker.py | LOW | Large |
+Bad subclaim generation that distorts the verdict.
+
+### 4a. Churchill Quote — Straw-Man Subclaim
+
+The decomposer created a second subclaim interpreting the quote's *meaning*
+("democracy is inferior to all other forms") — something the original claim
+never asserted. The claim simply says Churchill said X. The quality validator
+should have caught this as a non-verifiable interpretation, not a fact.
+
+### 4b. SpaceX/DOGE — Juxtaposition Misinterpretation (from initial 5-claim test)
+
+Decomposer sometimes treats "aims to cut $2T" as "has cut $2T." Inconsistent
+across runs. The 40-claim batch actually handled this correctly (mostly_true,
+0.85) — suggesting the decomposition instability is stochastic, not systematic.
+
+### 4c. Canada Coastline — Over-Specific Wording Preserved
+
+Decomposer preserved "by total land area" from the claim, creating a falsifiable
+technicality. Should have normalized to "by size" or "by area" since the common
+understanding of "second largest country" doesn't distinguish land-vs-total.
+
+### Proposed Fix: Decomposition Improvements
+
+1. **Quality validator enhancement**: Detect subclaims that interpret or
+   analyze the meaning of quoted text rather than verifying factual assertions.
+
+2. **Normalizer: strip pedantic precision**: When claims use informal language
+   ("land area" when they mean "area"), normalize to the commonly understood
+   meaning rather than preserving the technically-falsifiable wording.
+
+3. **Intentional verb handling**: (from initial test) "Aims to" / "seeks to"
+   → verify the intent, not the outcome.
+
+4. **Contrast connector handling**: "While" / "simultaneously" / "despite" →
+   verify each side independently.
+
+**Priority: MEDIUM** — affects specific claim patterns but decomposition
+instability means some runs handle these correctly.
+
+---
+
+## Previously Documented Issues (Initial 5-Claim Test)
+
+### Pelosi — Absolutist Language Over-Penalization
+**Verdict**: mostly_false, should be **mostly_true**
+
+Judge treats "virtually every" vs "almost every" as meaningful factual failure.
+Direction is clearly supported (Pelosi outperformed most hedge funds). See
+Root Cause 2 (judge pedantry) — same pattern.
+
+**Fix**: Quantifier equivalence guidance in judge prompt + normalizer softening.
+
+### Google/Meta — Research Scope Too Narrow
+**Verdict**: mostly_false (0.85) — weak confidence
+
+Research was Ireland-focused (finfacts-blog.com, Irish DPC fines). Claim is
+about worldwide tax avoidance by two companies.
+
+**Fix**: Decompose multi-entity claims into per-entity subclaims. Seed query
+guidance for financial claims targeting primary sources (SEC, EU Commission).
+
+### SpaceX/DOGE — Juxtaposition Handling
+Resolved in 40-claim batch (mostly_true, 0.85). Decomposition instability
+means this sometimes works and sometimes doesn't. Fix via explicit contrast
+connector rules in decompose prompt.
+
+---
+
+## Correctly Handled Claims (25 of 40)
+
+Notable successes:
+
+- **Counterfactual tax rate** → mostly_false (0.85): Excellent handling —
+  decomposed into verifiable premises + unverifiable counterfactual core,
+  then used historical trend data to evaluate directionality. One of the
+  best-handled claims.
+- **Bezos $1M to everyone** → false (0.92): Did the math correctly ($8
+  quadrillion needed vs $200B net worth).
+- **ECB rates 2025** → false (0.95): Found ECB actually cut rates in 2025.
+- **WHO lab leak** → false (0.95): Correctly identified misattribution.
+- **No president convicted** → true (0.95): Correct.
+- **Great Barrier Reef** → true (0.92): Well-sourced with ARC study data.
+- **Opioid/Purdue** → mostly_true (0.92): Clean 4-subclaim decomposition, all
+  well-sourced. Arguably should be true (the "withdrawals vs profits"
+  distinction for Sackler $10B is minor).
+- **NASA budget** → false (0.92): Correctly identified sequestration-year cuts.
+- **Great Wall of China** → false (0.92): Correctly debunked.
+- **Brazil deforestation** → mostly_false (0.78): Correctly distinguished
+  "rate" (Cambodia leads) vs "total area" (Brazil leads).
+- **US military spending** → mostly_true (0.85): Appropriate nuance on
+  "next ten" vs actual number.
+- **Population doubled** → mostly_true (0.85): Correctly handled approximate
+  truth (2.19x ≈ "doubled").
+- **G7 healthcare** → mostly_true (0.85): Correct.
+- **Sweden lockdowns** → mostly_false (0.82): Correctly identified later
+  restrictions despite early no-lockdown approach.
+- **Stanford remote work** → mostly_false (0.90): Correctly identified 13%
+  vs fabricated 70% figure.
+
+---
+
+## Evidence Quality — SearXNG Removal Impact
+
+### Before (with SearXNG)
+- Garbage results: psychologytoday.com DID articles for Pelosi queries,
+  history.state.gov 1917 diplomatic cables for SCOTUS queries,
+  travelchinaguide.com for China energy queries
+- Multiple unverifiable verdicts due to evidence noise
+- `.gov` over-scoring promoted irrelevant government pages
+
+### After (Serper + DDG only)
+- **2,990 evidence items** across 40 claims (avg 75/claim)
+- **0 unverifiable verdicts**
+- **0 garbage domains** — all evidence is topically relevant
+- **Minimum 20 evidence items** per claim, 9-26 unique domains per claim
+- Top domains: Wikipedia (155), LegiScan (85), Statista (45), PMC (45),
+  NPR (28), BBC (28), NYT (26), Reuters (21)
+
+### Data Hygiene Issue
+785 evidence items (26%) have NULL `source_url` — URLs exist embedded in
+content text (search snippets, failed fetches) but aren't extracted to the
+column. Doesn't affect verdicts but worth fixing.
+
+---
+
+## Summary of All Fixes Needed
+
+| Issue | Root Cause | Component | Priority | Effort |
+|-------|-----------|-----------|----------|--------|
+| Synthesizer counts vs weighs core thesis | RC1 | synthesize prompt | **HIGH** | Medium |
+| Core assertion extraction before subclaim counting | RC1 | synthesize prompt | **HIGH** | Medium |
+| Historical grounding rule (outdated ≠ fabricated) | RC1 | synthesize prompt | **HIGH** | Small |
+| Attribution standard (said ≠ originated) | RC2 | judge prompt | **HIGH** | Small |
+| PR denials not counter-evidence | RC2 | judge prompt | **HIGH** | Small |
+| Understatement ≠ inaccuracy | RC2 | judge prompt | **HIGH** | Small |
+| False/mostly-false threshold definition | RC3 | judge prompt | **MEDIUM** | Small |
+| Directional truth rule for quantifiers | RC3 | judge prompt | **MEDIUM** | Small |
+| Quantifier equivalence (virtually≈almost) | RC2 | judge prompt + normalizer | **MEDIUM** | Small |
+| Quality validator: detect meaning-interpretation subclaims | RC4 | decompose | **MEDIUM** | Medium |
+| Normalizer: strip pedantic precision | RC4 | normalizer prompt | **MEDIUM** | Small |
+| Intentional verb handling (aims/seeks) | RC4 | decompose prompt | **MEDIUM** | Small |
+| Contrast connector handling (while/despite) | RC4 | decompose prompt | **MEDIUM** | Small |
+| Multi-entity claim splitting | — | decompose prompt | **MEDIUM** | Medium |
+| Seed query targeting for financial claims | — | decompose prompt | **MEDIUM** | Small |
+| NULL source_url data hygiene | — | research.py | **LOW** | Small |
+| Geographic diversity in ranking | — | evidence_ranker.py | **LOW** | Large |
 
 ## Related Documentation
 
 - `docs/seed-relevance-filtering.md` — proposed keyword gate + embedding
-  similarity for topical relevance filtering (addresses garbage search results)
+  similarity for topical relevance filtering
 - `.gov` scoring adjustment also proposed there (GOV_TLD_SCORE 15→5,
   FACTUAL_UNRATED_GOV 20→12)
