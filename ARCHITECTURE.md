@@ -125,7 +125,7 @@ A claim enters the system (via API or extraction) and is processed as a **flat p
 
 ### Model Assignment
 
-All steps use the same **Qwen3.5-35B-A3B** instance on the LLM server, running on **ROCm** for improved AMD GPU performance (~38 tok/s sustained throughput).
+All steps use the same **Qwen3.5-122B-A10B** (MoE, 10B active) instance on the LLM server, running on **ROCm** for AMD GPU acceleration. Quantized to Q4_K_M (~76.5GB).
 
 Thinking mode is toggled per-request via `chat_template_kwargs`, but currently **disabled for all steps**:
 
@@ -827,10 +827,10 @@ One unified model running via llama.cpp, with thinking toggled per-request:
 
 | Port | Model | Mode | Used By |
 |------|-------|------|--------|
-| `:3101` | Qwen3.5-35B-A3B | `enable_thinking=False` | decompose, research, judge, synthesize |
-| `:3103` | (embeddings — not yet used) | — | planned: evidence caching |
+| `:3101` | Qwen3.5-122B-A10B | `enable_thinking=False` | decompose, research, judge, synthesize |
+| `:3103` | Qwen3-Embedding-8B | — | planned: evidence caching |
 
-30B params, 3B active MoE. Thinking mode is toggled via `chat_template_kwargs` in the request body. When thinking is enabled, the model produces `<think>...</think>` blocks that are stripped before parsing.
+122B MoE, 10B active params per token, Q4_K_M quantization. Thinking mode is toggled via `chat_template_kwargs` in the request body. When thinking is enabled, the model produces `<think>...</think>` blocks that are stripped before parsing.
 
 ### Connection Path
 
@@ -855,7 +855,7 @@ from langchain_openai import ChatOpenAI
 def get_llm(temperature=0):            # temperature=0 for deterministic fact-checking
     return ChatOpenAI(
         base_url=f"{LLAMA_URL}/v1",     # :3101
-        model="Qwen3.5-35B-A3B",
+        model="Qwen3.5-122B-A10B",
         temperature=temperature,
         max_tokens=8192,
         api_key="not-needed",
@@ -958,7 +958,7 @@ spin-cycle-dev-adminer           :4502  ← Postgres web UI (Dracula theme)
 
 ### External Services
 
-- `LLAMA_URL` — LLM API (llama.cpp Qwen3.5-35B-A3B, unified thinking/non-thinking, via Tailscale)
+- `LLAMA_URL` — LLM API (llama.cpp Qwen3.5-122B-A10B, via Tailscale)
 - `LLAMA_EMBED_URL` — LLM embeddings API (llama.cpp, via Tailscale)
 - Serper — primary search (Google results via API, requires `SERPER_API_KEY`)
 - DuckDuckGo — fallback search (free, always available)

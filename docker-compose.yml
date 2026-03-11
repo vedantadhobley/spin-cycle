@@ -6,7 +6,7 @@
 #   3502: Adminer (Postgres web UI)
 #
 # External services (LLM API via LLAMA_URL / LLAMA_EMBED_URL in .env):
-#   - LLM API (llama.cpp Qwen3.5-35B-A3B, unified thinking/non-thinking)
+#   - LLM API (llama.cpp Qwen3.5-122B-A10B)
 #   - LLM embeddings API
 #
 # Internal ports (not exposed):

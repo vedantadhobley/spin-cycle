@@ -4,10 +4,9 @@
 #   4500: FastAPI (with hot reload)
 #   4501: Temporal UI
 #   4502: Adminer (Postgres web UI)
-#   4503: SearXNG (meta-search engine)
 #
 # External services (LLM API via LLAMA_URL / LLAMA_EMBED_URL in .env):
-#   - LLM API (llama.cpp Qwen3.5-35B-A3B, unified thinking/non-thinking)
+#   - LLM API (llama.cpp Qwen3.5-122B-A10B)
 #   - LLM embeddings API
 #
 # Internal ports (not exposed):
@@ -42,7 +41,6 @@ services:
       SERPER_API_KEY: ${SERPER_API_KEY:-}
       BRAVE_API_KEY: ${BRAVE_API_KEY:-}
       LEGISCAN_API_KEY: ${LEGISCAN_API_KEY:-}
-      SEARXNG_URL: http://spin-cycle-dev-searxng:8080
       LOG_FORMAT: ${LOG_FORMAT:-pretty}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes:
@@ -51,8 +49,6 @@ services:
       postgres:
         condition: service_healthy
       temporal:
-        condition: service_healthy
-      searxng:
         condition: service_healthy
     restart: unless-stopped
     networks:
@@ -81,7 +77,6 @@ services:
       SERPER_API_KEY: ${SERPER_API_KEY:-}
       BRAVE_API_KEY: ${BRAVE_API_KEY:-}
       LEGISCAN_API_KEY: ${LEGISCAN_API_KEY:-}
-      SEARXNG_URL: http://spin-cycle-dev-searxng:8080
       LOG_FORMAT: ${LOG_FORMAT:-pretty}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes:
@@ -186,26 +181,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    restart: unless-stopped
-    networks:
-      - spin-cycle-dev
-
-  # SEARXNG - self-hosted meta-search engine (free, aggregates 70+ search engines)
-  searxng:
-    image: searxng/searxng:latest
-    container_name: spin-cycle-dev-searxng
-    ports:
-      - "4503:8080"
-    volumes:
-      - ./config/searxng/settings.yml:/etc/searxng/settings.yml:ro
-    environment:
-      SEARXNG_BASE_URL: http://localhost:4503/
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/healthz"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
     restart: unless-stopped
     networks:
       - spin-cycle-dev
