@@ -46,7 +46,6 @@ from src.prompts.linguistic_patterns import get_linguistic_patterns
 from src.tools.wikidata import get_ownership_chain, collect_all_connected_parties
 from src.schemas.interested_parties import InterestedPartiesDict
 from src.utils.logging import log, get_logger
-from src.utils.text_cleanup import cleanup_text
 
 MODULE = "decompose"
 logger = get_logger()
@@ -387,7 +386,7 @@ async def decompose(claim_text: str) -> dict:
             temperature=0,
             activity_name="normalize",
         )
-        normalized = cleanup_text(norm_output.normalized_claim) or norm_output.normalized_claim
+        normalized = norm_output.normalized_claim
         if norm_output.changes:
             log.info(logger, MODULE, "normalized",
                      "Claim normalized", original=claim_text,
@@ -443,17 +442,14 @@ async def decompose(claim_text: str) -> dict:
                     log.warning(logger, MODULE, "decompose_retry_failed",
                                 "Decompose retry failed, using original output")
 
-        # Clean up LLM output text using LanguageTool
         facts = [
             {
-                "text": cleanup_text(f.text.strip()) or f.text.strip(),
+                "text": f.text.strip(),
                 "categories": f.categories,
                 "seed_queries": f.seed_queries,
             }
             for f in output.facts if f and f.text and f.text.strip()
         ]
-        if output.thesis:
-            output.thesis = cleanup_text(output.thesis) or output.thesis
 
         # Normalize interested parties from LLM output
         raw_parties = normalize_interested_parties(output.interested_parties)

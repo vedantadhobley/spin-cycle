@@ -538,7 +538,7 @@ def format_wikidata_result(result: dict) -> str:
     return "\n".join(lines)
 
 
-def collect_all_connected_parties(result: dict) -> dict:
+def collect_all_connected_parties(result: dict, *, skip_family_expanded: bool = False) -> dict:
     """Extract all connected party names from a Wikidata result.
 
     Returns a flat structure ready for interested_parties expansion:
@@ -567,17 +567,20 @@ def collect_all_connected_parties(result: dict) -> dict:
             people.add(name)
 
     # 2nd-hop family → people + orgs from corporate roles
-    for member_name, rels in result.get("family_expanded", {}).items():
-        for rel_type, names_or_dict in rels.items():
-            if rel_type == "media_holdings":
-                media.update(names_or_dict)
-            elif rel_type == "corporate_roles":
-                # Orgs that family members lead/founded/own
-                # e.g., Person A → founder: ["Org X", "Org Y"]
-                for role_name, org_names in names_or_dict.items():
-                    orgs.update(org_names)
-            else:
-                people.update(names_or_dict)
+    # skip_family_expanded=True keeps 1st-hop family but drops 2nd-hop
+    # (prevents chains like Murdoch → Jerry Hall → Mick Jagger → Georgia May Jagger)
+    if not skip_family_expanded:
+        for member_name, rels in result.get("family_expanded", {}).items():
+            for rel_type, names_or_dict in rels.items():
+                if rel_type == "media_holdings":
+                    media.update(names_or_dict)
+                elif rel_type == "corporate_roles":
+                    # Orgs that family members lead/founded/own
+                    # e.g., Person A → founder: ["Org X", "Org Y"]
+                    for role_name, org_names in names_or_dict.items():
+                        orgs.update(org_names)
+                else:
+                    people.update(names_or_dict)
 
     # Corporate connections → orgs
     # Directional properties — always few results, uncapped

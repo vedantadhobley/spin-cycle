@@ -80,7 +80,6 @@ from src.tools.legiscan import search_legislation, is_available as legiscan_avai
 from src.schemas.interested_parties import InterestedPartiesDict
 from src.utils.evidence_ranker import score_url, tier_label
 from src.utils.logging import log, get_logger
-from src.utils.text_cleanup import cleanup_text
 
 MODULE = "research"
 logger = get_logger()
@@ -539,12 +538,6 @@ def extract_evidence(messages: list) -> list[dict]:
                     deduped_count += 1
                     continue
                 seen_urls.add(url)
-            # Clean up evidence text — catches grammar oddities from
-            # web content and LLM-generated snippets
-            if item.get("content"):
-                item["content"] = cleanup_text(item["content"]) or item["content"]
-            if item.get("title"):
-                item["title"] = cleanup_text(item["title"]) or item["title"]
             evidence.append(item)
 
     log.info(logger, MODULE, "evidence_dedup",
@@ -997,7 +990,7 @@ async def _enrich_parties_from_mbfc(
             if result.get("error"):
                 return
 
-            connected = collect_all_connected_parties(result)
+            connected = collect_all_connected_parties(result, skip_family_expanded=True)
 
             # MBFC ownership is authoritative — add unconditionally
             if owner not in enriched_parties:
@@ -1024,6 +1017,14 @@ async def _enrich_parties_from_mbfc(
                         owner=owner, error=str(e))
 
     await asyncio.gather(*[_expand_owner(o) for o in new_owners[:6]])
+
+    # Hard cap to prevent party explosion
+    MAX_ALL_PARTIES = 40
+    if len(enriched_parties) > MAX_ALL_PARTIES:
+        log.warning(logger, MODULE, "parties_capped",
+                    "Capping all_parties to prevent explosion",
+                    before=len(enriched_parties), after=MAX_ALL_PARTIES)
+        enriched_parties = enriched_parties[:MAX_ALL_PARTIES]
 
     log.info(logger, MODULE, "mbfc_enrichment_done",
              "MBFC→Wikidata enrichment complete",
@@ -1110,6 +1111,14 @@ async def _enrich_parties_from_evidence_content(
                         entity=entity, error=str(e))
 
     await asyncio.gather(*[_expand_entity(e) for e in new_entities[:8]])
+
+    # Hard cap to prevent party explosion
+    MAX_ALL_PARTIES = 40
+    if len(enriched_parties) > MAX_ALL_PARTIES:
+        log.warning(logger, MODULE, "parties_capped",
+                    "Capping all_parties to prevent explosion",
+                    before=len(enriched_parties), after=MAX_ALL_PARTIES)
+        enriched_parties = enriched_parties[:MAX_ALL_PARTIES]
 
     log.info(logger, MODULE, "evidence_ner_enrichment_done",
              "Evidence NER→Wikidata enrichment complete",

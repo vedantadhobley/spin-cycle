@@ -22,7 +22,6 @@ from src.utils.logging import log, get_logger
 from src.utils.quote_detection import detect_claim_subject_quotes
 from src.utils.ner import extract_quoted_entities
 from src.schemas.interested_parties import InterestedPartiesDict
-from src.utils.text_cleanup import cleanup_text
 
 MODULE = "judge"
 logger = get_logger()
@@ -298,9 +297,6 @@ async def judge(
         verdict = "unverifiable"
         confidence = 0.0
         reasoning = f"Failed to parse LLM judgment after {e.attempts} attempts"
-
-    # Clean up reasoning text using LanguageTool
-    reasoning = cleanup_text(reasoning)
 
     log.info(logger, MODULE, "done", "Sub-claim judged",
              sub_claim=sub_claim, verdict=verdict, confidence=confidence)

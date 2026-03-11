@@ -203,8 +203,15 @@ class VerifyClaimWorkflow:
                     merged_affiliated_media.update(enriched.get("affiliated_media", []))
 
         # Build merged interested parties for the judge phase
+        MAX_ALL_PARTIES = 40
+        merged_parties_list = list(merged_all_parties)
+        if len(merged_parties_list) > MAX_ALL_PARTIES:
+            log.warning(workflow.logger, MODULE, "parties_capped",
+                        "Capping merged all_parties to prevent explosion",
+                        before=len(merged_parties_list), after=MAX_ALL_PARTIES)
+            merged_parties_list = merged_parties_list[:MAX_ALL_PARTIES]
         merged_parties = dict(interested_parties)
-        merged_parties["all_parties"] = list(merged_all_parties)
+        merged_parties["all_parties"] = merged_parties_list
         merged_parties["affiliated_media"] = list(merged_affiliated_media)
 
         _research_ms = round((workflow.time() - _t0) * 1000)
@@ -261,7 +268,7 @@ class VerifyClaimWorkflow:
             result = await workflow.execute_activity(
                 synthesize_verdict,
                 args=[claim_text, sub_results, thesis_info],
-                start_to_close_timeout=timedelta(seconds=60),
+                start_to_close_timeout=timedelta(seconds=180),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
 

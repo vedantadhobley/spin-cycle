@@ -11,7 +11,6 @@ from src.llm import invoke_llm, LLMInvocationError, validate_synthesize
 from src.prompts.verification import SYNTHESIZE_SYSTEM, SYNTHESIZE_USER
 from src.schemas.llm_outputs import SynthesizeOutput
 from src.utils.logging import log, get_logger
-from src.utils.text_cleanup import cleanup_text
 
 MODULE = "synthesize"
 logger = get_logger()
@@ -132,9 +131,6 @@ async def synthesize(
         verdict = "unverifiable"
         confidence = 0.0
         reasoning = f"Failed to synthesize verdict after {e.attempts} attempts"
-
-    # Clean up reasoning text using LanguageTool
-    reasoning = cleanup_text(reasoning)
 
     log.info(logger, MODULE, "done", "Verdict synthesized",
              claim=claim_text, verdict=verdict, confidence=confidence)
