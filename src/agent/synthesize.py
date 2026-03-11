@@ -85,6 +85,46 @@ async def synthesize(
         confidence = output.confidence
         reasoning = output.reasoning
 
+        # Log rubric steps — INFO level for key decisions, DEBUG for details
+        core_indices = [
+            w.subclaim_index for w in output.subclaim_weights
+            if w.role == "core_assertion"
+        ]
+        supporting_indices = [
+            w.subclaim_index for w in output.subclaim_weights
+            if w.role == "supporting_detail"
+        ]
+        background_indices = [
+            w.subclaim_index for w in output.subclaim_weights
+            if w.role == "background_context"
+        ]
+        log.info(logger, MODULE, "rubric_summary",
+                 "Synthesize rubric completed",
+                 claim=claim_text,
+                 thesis=output.thesis_restatement[:150],
+                 core_assertions=core_indices,
+                 supporting_details=supporting_indices,
+                 background_context=background_indices,
+                 thesis_survives=output.thesis_survives,
+                 verdict=output.verdict,
+                 confidence=output.confidence)
+        log.debug(logger, MODULE, "rubric_classification_detail",
+                  "Subclaim classification reasoning",
+                  claim=claim_text,
+                  weights=[
+                      {"idx": w.subclaim_index, "role": w.role,
+                       "reason": w.brief_reason}
+                      for w in output.subclaim_weights
+                  ])
+
+        # Programmatic consistency check (permissive — log only)
+        consistency_warnings = _validate_synthesize_consistency(output)
+        for warning in consistency_warnings:
+            log.warning(logger, MODULE, "rubric_inconsistency",
+                        warning, claim=claim_text,
+                        thesis_survives=output.thesis_survives,
+                        verdict=output.verdict)
+
     except LLMInvocationError as e:
         log.warning(logger, MODULE, "invocation_failed",
                     "LLM invocation failed after retries",
@@ -108,3 +148,22 @@ async def synthesize(
         "child_results": child_results,
         "reasoning_chain": [sub.get("reasoning", "") for sub in child_results],
     }
+
+
+def _validate_synthesize_consistency(output: SynthesizeOutput) -> list[str]:
+    """Check for contradictions between rubric steps (permissive — log only)."""
+    warnings = []
+
+    if output.thesis_survives and output.verdict in ("mostly_false", "false"):
+        warnings.append(
+            "thesis_survives=True but verdict is negative. "
+            "If the thesis holds, verdict should be true/mostly_true."
+        )
+
+    if not output.thesis_survives and output.verdict in ("true", "mostly_true"):
+        warnings.append(
+            "thesis_survives=False but verdict is positive. "
+            "If the thesis fails, verdict should be mostly_false/false."
+        )
+
+    return warnings

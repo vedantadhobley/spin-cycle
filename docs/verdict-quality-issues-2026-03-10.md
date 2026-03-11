@@ -10,6 +10,70 @@ NYT, Reuters. See "Evidence Quality" section at the end.
 
 ---
 
+## Rubric Restructure Results (2026-03-10)
+
+Replaced prose-based judge prompt (26.4K chars) with 5-step rubric (8.5K chars)
+and prose-based synthesize prompt (8.3K chars) with 4-step rubric (4.4K chars).
+See `docs/rubric-restructure-plan.md` for the plan and rationale.
+
+**Core idea**: Force structured output steps (interpret → triage → direction →
+precision → verdict) so the model can't skip evaluation steps. The `is_independent`
+field on each evidence assessment embeds self-serving detection in the output
+structure instead of 3K chars of prose guidance.
+
+### 9-Claim Retest Results
+
+| Claim | Before Rubric | After Rubric | Expected | Result |
+|-------|--------------|-------------|----------|--------|
+| Canada coastline + 2nd largest | mostly_false | mostly_false | mostly_true | Same |
+| Murdoch climate skepticism | mostly_false | **true** | mostly_true | **Improved** |
+| Amazon warehouse | mostly_false | mostly_false | mostly_true | Same |
+| Finland education/suicide | false | **mostly_false** | mostly_false | **Fixed** |
+| Churchill quote | mostly_false | **true** | true | **Fixed** |
+| ExxonMobil climate | mostly_true | **true** | true | **Fixed** |
+| Insulin price cap | mostly_false | mostly_false | mostly_true | Same |
+| Japan elderly care | mostly_false | mostly_false | mostly_true | Same |
+| Google/Meta EU fines | mostly_false | **unverifiable** | mostly_false | **Improved** |
+
+**5 of 9 improved, 0 regressions.**
+
+### What the rubric fixed (root causes resolved)
+
+- **RC1 (synthesizer counting)**: Murdoch went from mostly_false→true. The rubric
+  forced the synthesizer to classify Fox/NYPost as core_assertion and Sky News as
+  supporting_detail, then evaluate whether the thesis survives.
+- **RC2 (judge pedantry)**: Churchill went from mostly_false→true. The rubric's
+  precision step explicitly handles attribution ("Did X say these words? Yes →
+  correct") instead of the model inventing a standard about original authorship.
+  ExxonMobil also improved (mostly_true→true) — the direction assessment step
+  ignores PR denials as non-independent evidence.
+- **RC3 (false/mostly_false threshold)**: Finland went from false→mostly_false.
+  The boundary rule in the rubric ("ANY meaningful truth content → mostly_false")
+  worked correctly for historically-accurate claims.
+- **Google/Meta**: Improved from mostly_false→unverifiable. The independence check
+  correctly identified that EU corporate tax data for specific companies isn't
+  publicly available, making the comparison genuinely unverifiable.
+
+### What the rubric didn't fix (remaining issues)
+
+- **Canada, Amazon**: Both subclaims classified as core_assertion, so the
+  synthesizer still lets one failure drag the verdict. The rubric's classification
+  step works when there's a clear thesis vs supporting detail, but parallel
+  assertions joined by "and" get treated as co-equal cores.
+- **Insulin**: "Every single Republican" is an absolute that genuinely fails.
+  mostly_false is arguably correct — 94% opposition with an incorrect absolute.
+- **Japan**: Both subclaims are genuinely wrong (Monaco #1 median age, European
+  countries outspend Japan). mostly_false is correct.
+
+### Schema validation issue found
+
+The LLM sometimes puts parenthetical qualifiers in Literal fields:
+`"supports (historical)"` instead of `"supports"`. Fixed by stripping
+parentheticals in the `EvidenceAssessment.normalize_assessment` validator.
+Without this fix, ~10% of judge calls needed retries.
+
+---
+
 ## Root Cause 1: Synthesizer Counts Instead of Weighing
 
 The synthesize prompt says "WEIGH BY IMPORTANCE, NOT BY COUNT" but the model
@@ -373,30 +437,34 @@ column. Doesn't affect verdicts but worth fixing.
 
 ---
 
-## Summary of All Fixes Needed
+## Summary of All Fixes
 
-| Issue | Root Cause | Component | Priority | Effort |
-|-------|-----------|-----------|----------|--------|
-| Synthesizer counts vs weighs core thesis | RC1 | synthesize prompt | **HIGH** | Medium |
-| Core assertion extraction before subclaim counting | RC1 | synthesize prompt | **HIGH** | Medium |
-| Historical grounding rule (outdated ≠ fabricated) | RC1 | synthesize prompt | **HIGH** | Small |
-| Attribution standard (said ≠ originated) | RC2 | judge prompt | **HIGH** | Small |
-| PR denials not counter-evidence | RC2 | judge prompt | **HIGH** | Small |
-| Understatement ≠ inaccuracy | RC2 | judge prompt | **HIGH** | Small |
-| False/mostly-false threshold definition | RC3 | judge prompt | **MEDIUM** | Small |
-| Directional truth rule for quantifiers | RC3 | judge prompt | **MEDIUM** | Small |
-| Quantifier equivalence (virtually≈almost) | RC2 | judge prompt + normalizer | **MEDIUM** | Small |
-| Quality validator: detect meaning-interpretation subclaims | RC4 | decompose | **MEDIUM** | Medium |
-| Normalizer: strip pedantic precision | RC4 | normalizer prompt | **MEDIUM** | Small |
-| Intentional verb handling (aims/seeks) | RC4 | decompose prompt | **MEDIUM** | Small |
-| Contrast connector handling (while/despite) | RC4 | decompose prompt | **MEDIUM** | Small |
-| Multi-entity claim splitting | — | decompose prompt | **MEDIUM** | Medium |
-| Seed query targeting for financial claims | — | decompose prompt | **MEDIUM** | Small |
-| NULL source_url data hygiene | — | research.py | **LOW** | Small |
-| Geographic diversity in ranking | — | evidence_ranker.py | **LOW** | Large |
+| Issue | Root Cause | Component | Status |
+|-------|-----------|-----------|--------|
+| Synthesizer counts vs weighs core thesis | RC1 | synthesize rubric | **FIXED** — rubric Step 2 forces classification |
+| Core assertion extraction before counting | RC1 | synthesize rubric | **FIXED** — thesis_survives field |
+| Historical grounding rule (outdated ≠ fabricated) | RC1 | judge rubric | **FIXED** — boundary rule in Step 5 |
+| Attribution standard (said ≠ originated) | RC2 | judge rubric | **FIXED** — Step 4 precision check |
+| PR denials not counter-evidence | RC2 | judge rubric | **FIXED** — is_independent field in Step 2 |
+| Understatement ≠ inaccuracy | RC2 | judge rubric | **FIXED** — Step 4 precision check |
+| False/mostly-false threshold | RC3 | judge rubric | **FIXED** — boundary rule in Step 5 |
+| Directional truth rule for quantifiers | RC3 | judge rubric | **FIXED** — Step 4 precision check |
+| Quantifier equivalence (virtually≈almost) | RC2 | judge rubric | **FIXED** — Step 4 precision check |
+| Parallel "and" assertions treated as co-equal cores | RC1 | synthesize rubric | **OPEN** — model classifies both as core |
+| Quality validator: meaning-interpretation subclaims | RC4 | decompose | **OPEN** — not addressed by rubric |
+| Normalizer: strip pedantic precision | RC4 | normalizer prompt | **OPEN** — not addressed by rubric |
+| Intentional verb handling (aims/seeks) | RC4 | decompose prompt | **OPEN** — stochastic, sometimes works |
+| Contrast connector handling (while/despite) | RC4 | decompose prompt | **OPEN** — stochastic, sometimes works |
+| Multi-entity claim splitting | — | decompose prompt | **OPEN** |
+| Seed query targeting for financial claims | — | decompose prompt | **OPEN** |
+| NULL source_url data hygiene | — | research.py | **OPEN** — low priority |
+| `.gov` over-scoring | — | evidence_ranker.py | **OPEN** — see seed-relevance-filtering.md |
+| Seed relevance filtering | — | evidence_ranker.py | **OPEN** — see seed-relevance-filtering.md |
 
 ## Related Documentation
 
+- `docs/rubric-restructure-plan.md` — rubric design plan, content audit,
+  new schemas, implementation sequence (Phase 1 COMPLETE)
 - `docs/seed-relevance-filtering.md` — proposed keyword gate + embedding
   similarity for topical relevance filtering
 - `.gov` scoring adjustment also proposed there (GOV_TLD_SCORE 15→5,

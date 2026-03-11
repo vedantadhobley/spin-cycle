@@ -248,6 +248,49 @@ async def judge(
         confidence = output.confidence
         reasoning = output.reasoning
 
+        # Log rubric steps — INFO level for key decisions, DEBUG for details
+        independent_count = sum(
+            1 for e in output.key_evidence if e.is_independent
+        )
+        non_independent_count = len(output.key_evidence) - independent_count
+        log.info(logger, MODULE, "rubric_summary",
+                 "Judge rubric completed",
+                 sub_claim=sub_claim,
+                 direction=output.evidence_direction,
+                 evidence_assessed=len(output.key_evidence),
+                 independent=independent_count,
+                 non_independent=non_independent_count,
+                 verdict=output.verdict,
+                 confidence=output.confidence)
+        log.debug(logger, MODULE, "rubric_step1",
+                  "Claim interpretation",
+                  sub_claim=sub_claim,
+                  interpretation=output.claim_interpretation)
+        log.debug(logger, MODULE, "rubric_step2_detail",
+                  "Evidence assessment detail",
+                  sub_claim=sub_claim,
+                  assessments=[
+                      {"idx": e.source_index, "assessment": e.assessment,
+                       "independent": e.is_independent}
+                      for e in output.key_evidence
+                  ])
+        log.debug(logger, MODULE, "rubric_step3",
+                  "Direction reasoning",
+                  sub_claim=sub_claim,
+                  direction_reasoning=output.direction_reasoning)
+        log.debug(logger, MODULE, "rubric_step4",
+                  "Precision assessment",
+                  sub_claim=sub_claim,
+                  precision=output.precision_assessment[:300])
+
+        # Programmatic consistency check (permissive — log only)
+        consistency_warnings = _validate_judge_consistency(output)
+        for warning in consistency_warnings:
+            log.warning(logger, MODULE, "rubric_inconsistency",
+                        warning, sub_claim=sub_claim,
+                        direction=output.evidence_direction,
+                        verdict=output.verdict)
+
     except LLMInvocationError as e:
         log.warning(logger, MODULE, "invocation_failed",
                     "LLM invocation failed after retries",
@@ -269,6 +312,49 @@ async def judge(
         "reasoning": reasoning,
         "evidence": evidence,
     }
+
+
+def _validate_judge_consistency(output: JudgeOutput) -> list[str]:
+    """Check for contradictions between rubric steps (permissive — log only).
+
+    These are consistency warnings, not hard rejections. The model may have
+    good reasons for apparent inconsistencies, but we want to track them.
+    """
+    warnings = []
+
+    supports = {"clearly_supports", "leans_supports"}
+    contradicts = {"leans_contradicts", "clearly_contradicts"}
+
+    # Direction-verdict consistency
+    if output.evidence_direction in supports and output.verdict in (
+        "false", "mostly_false"
+    ):
+        warnings.append(
+            f"Direction '{output.evidence_direction}' but verdict "
+            f"'{output.verdict}'. If independent evidence supports the "
+            f"claim's direction, verdict should not be false/mostly_false."
+        )
+
+    if output.evidence_direction in contradicts and output.verdict in (
+        "true", "mostly_true"
+    ):
+        warnings.append(
+            f"Direction '{output.evidence_direction}' but verdict "
+            f"'{output.verdict}'. If independent evidence contradicts "
+            f"the claim, verdict should not be true/mostly_true."
+        )
+
+    # Independence check — strong verdict without independent evidence
+    independent_evidence = [
+        e for e in output.key_evidence if e.is_independent
+    ]
+    if not independent_evidence and output.verdict in ("true", "false"):
+        warnings.append(
+            "No independent evidence identified but strong verdict given. "
+            "Consider 'unverifiable' if all evidence is from interested parties."
+        )
+
+    return warnings
 
 
 def _rank_evidence(source_evidence: list[dict]) -> list[dict]:

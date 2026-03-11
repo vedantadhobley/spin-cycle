@@ -99,58 +99,59 @@ def validate_decompose(output: DecomposeOutput) -> tuple[bool, str]:
 
 def validate_judge(output: JudgeOutput) -> tuple[bool, str]:
     """Validate judge output semantically.
-    
-    Checks:
-    1. Confidence and verdict are consistent
-       - "true" with confidence < 0.3 is suspicious
-       - "unverifiable" with confidence > 0.8 is suspicious
-    2. Reasoning is not empty/trivial
-    
-    Args:
-        output: The judge output to validate
-        
-    Returns:
-        (is_valid, error_message) tuple
+
+    Checks rubric completeness + confidence/verdict consistency.
     """
-    # Check 1: Confidence/verdict consistency
-    # These are warnings, not hard failures — LLM might have good reasons
+    # Check 1: Rubric fields are populated
+    if not output.claim_interpretation or len(output.claim_interpretation.strip()) < 5:
+        return False, "claim_interpretation is empty or too short"
+
+    if not output.key_evidence:
+        return False, "key_evidence is empty — must assess at least one evidence item"
+
+    if not output.direction_reasoning or len(output.direction_reasoning.strip()) < 10:
+        return False, "direction_reasoning is empty or too short"
+
+    if not output.precision_assessment or len(output.precision_assessment.strip()) < 10:
+        return False, "precision_assessment is empty or too short"
+
+    # Check 2: Reasoning exists
+    if not output.reasoning or len(output.reasoning.strip()) < 10:
+        return False, "Reasoning is empty or too short"
+
+    # Check 3: Confidence/verdict consistency (warnings, not hard failures)
     if output.verdict in ("true", "false") and output.confidence < 0.3:
         log.warning(logger, MODULE, "low_confidence_strong_verdict",
                    f"Strong verdict '{output.verdict}' with low confidence {output.confidence}",
                    verdict=output.verdict, confidence=output.confidence)
-    
+
     if output.verdict == "unverifiable" and output.confidence > 0.8:
         log.warning(logger, MODULE, "high_confidence_unverifiable",
                    f"Unverifiable verdict with high confidence {output.confidence}",
                    verdict=output.verdict, confidence=output.confidence)
-    
-    # Check 2: Reasoning exists
-    if not output.reasoning or len(output.reasoning.strip()) < 10:
-        return False, "Reasoning is empty or too short"
-    
+
     return True, ""
 
 
 def validate_synthesize(output: SynthesizeOutput) -> tuple[bool, str]:
     """Validate synthesize output semantically.
-    
-    Checks:
-    1. Reasoning is not empty/trivial
-    2. Confidence/verdict consistency
-    
-    Args:
-        output: The synthesize output to validate
-        
-    Returns:
-        (is_valid, error_message) tuple
+
+    Checks rubric completeness + confidence/verdict consistency.
     """
-    # Check 1: Reasoning exists
+    # Check 1: Rubric fields are populated
+    if not output.thesis_restatement or len(output.thesis_restatement.strip()) < 5:
+        return False, "thesis_restatement is empty or too short"
+
+    if not output.subclaim_weights:
+        return False, "subclaim_weights is empty — must classify at least one subclaim"
+
+    # Check 2: Reasoning exists
     if not output.reasoning or len(output.reasoning.strip()) < 10:
         return False, "Reasoning is empty or too short"
-    
-    # Check 2: Same confidence/verdict checks as judge
+
+    # Check 3: Confidence/verdict consistency
     if output.verdict in ("true", "false") and output.confidence < 0.3:
         log.warning(logger, MODULE, "low_confidence_strong_verdict",
                    f"Strong verdict '{output.verdict}' with low confidence {output.confidence}")
-    
+
     return True, ""

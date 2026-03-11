@@ -221,27 +221,102 @@ class SubclaimQualityCheck(BaseModel):
 
 
 # =============================================================================
-# JUDGE OUTPUT
+# JUDGE OUTPUT (rubric-based with explicit reasoning chain)
 # =============================================================================
 
+# Direction of evidence assessment (Step 3)
+EvidenceDirection = Literal[
+    "clearly_supports",
+    "leans_supports",
+    "genuinely_mixed",
+    "leans_contradicts",
+    "clearly_contradicts",
+    "insufficient",
+]
+
+
+class EvidenceAssessment(BaseModel):
+    """Assessment of a key evidence item (Step 2 of judge rubric)."""
+    source_index: int = Field(
+        ..., description="Evidence item number from the provided list"
+    )
+    assessment: Literal["supports", "contradicts", "neutral"] = Field(
+        ..., description="Does this evidence support or contradict the claim?"
+    )
+    is_independent: bool = Field(
+        ..., description="Is this source independent from the claim subject? "
+        "False if source IS the claim subject, quotes the claim subject, "
+        "or has ownership ties to the claim subject."
+    )
+    key_point: str = Field(
+        ..., description="1-2 sentences: what does this evidence say?"
+    )
+
+    @field_validator("assessment", mode="before")
+    @classmethod
+    def normalize_assessment(cls, v: str) -> str:
+        if isinstance(v, str):
+            v = v.lower().strip()
+            # Strip parenthetical qualifiers: "supports (historical)" → "supports"
+            if "(" in v:
+                v = v[:v.index("(")].strip()
+            # Handle common variations
+            mapping = {
+                "support": "supports",
+                "contradict": "contradicts",
+                "neither": "neutral",
+                "irrelevant": "neutral",
+                "n/a": "neutral",
+            }
+            return mapping.get(v, v)
+        return v
+
+
 class JudgeOutput(BaseModel):
-    """Output from the judge_subclaim activity.
-    
-    Contains the verdict for a single sub-claim based on gathered evidence.
+    """Rubric-based judge output with explicit reasoning chain.
+
+    Five-step rubric:
+      1. Interpret the claim (charitable restatement)
+      2. Triage key evidence (3-5 items with independence check)
+      3. Assess direction (based on independent evidence only)
+      4. Assess precision (attribution, quantifiers, arithmetic)
+      5. Render verdict (derived from steps 3+4)
     """
+
+    # Step 1 — Interpret the claim
+    claim_interpretation: str = Field(
+        ..., description="Charitable restatement of what the claim is asking"
+    )
+
+    # Step 2 — Triage key evidence
+    key_evidence: list[EvidenceAssessment] = Field(
+        ..., description="Assessment of the 3-5 most relevant evidence items"
+    )
+
+    # Step 3 — Assess direction
+    evidence_direction: EvidenceDirection = Field(
+        ..., description="Overall direction of independent evidence"
+    )
+    direction_reasoning: str = Field(
+        ..., description="2-3 sentences explaining the direction assessment"
+    )
+
+    # Step 4 — Assess precision
+    precision_assessment: str = Field(
+        ..., description="How precise is the claim? Where do specifics "
+        "match or diverge from evidence?"
+    )
+
+    # Step 5 — Render verdict
     verdict: Verdict = Field(
-        ...,
-        description="The verdict for this sub-claim"
+        ..., description="The verdict for this sub-claim"
     )
     confidence: float = Field(
-        ...,
-        ge=0.0,
-        le=1.0,
+        ..., ge=0.0, le=1.0,
         description="Confidence in the verdict (0.0-1.0)"
     )
     reasoning: str = Field(
-        ...,
-        description="Explanation of how the evidence supports the verdict, including any important context"
+        ..., description="Public-facing explanation of the verdict"
     )
 
     @field_validator("confidence")
@@ -249,16 +324,14 @@ class JudgeOutput(BaseModel):
     def clamp_confidence(cls, v: float) -> float:
         """Ensure confidence is within valid range."""
         return max(0.0, min(1.0, v))
-    
+
     @field_validator("verdict", mode="before")
     @classmethod
     def normalize_verdict(cls, v: str) -> str:
         """Handle common verdict variations."""
         if isinstance(v, str):
             v = v.lower().strip()
-            # Handle underscores vs spaces
             v = v.replace(" ", "_")
-            # Handle common typos/variations
             variations = {
                 "partially_true": "mostly_true",
                 "partially_false": "mostly_false",
@@ -269,29 +342,99 @@ class JudgeOutput(BaseModel):
             return variations.get(v, v)
         return v
 
+    @field_validator("evidence_direction", mode="before")
+    @classmethod
+    def normalize_direction(cls, v: str) -> str:
+        """Handle common direction variations."""
+        if isinstance(v, str):
+            v = v.lower().strip().replace(" ", "_").replace("-", "_")
+            mapping = {
+                "supports": "clearly_supports",
+                "contradicts": "clearly_contradicts",
+                "mixed": "genuinely_mixed",
+                "unclear": "insufficient",
+                "unknown": "insufficient",
+                "not_enough": "insufficient",
+            }
+            return mapping.get(v, v)
+        return v
+
 
 # =============================================================================
-# SYNTHESIZE OUTPUT
+# SYNTHESIZE OUTPUT (rubric-based with thesis evaluation)
 # =============================================================================
+
+# Subclaim role classification (Step 2)
+SubclaimRole = Literal["core_assertion", "supporting_detail", "background_context"]
+
+
+class SubclaimWeight(BaseModel):
+    """Classification of a subclaim's importance (Step 2 of synthesize rubric)."""
+    subclaim_index: int = Field(
+        ..., description="Which sub-verdict this refers to (1-indexed)"
+    )
+    role: SubclaimRole = Field(
+        ..., description="Role of this subclaim in the overall argument"
+    )
+    brief_reason: str = Field(
+        ..., description="Why this classification (1 sentence)"
+    )
+
+    @field_validator("role", mode="before")
+    @classmethod
+    def normalize_role(cls, v: str) -> str:
+        if isinstance(v, str):
+            v = v.lower().strip().replace(" ", "_").replace("-", "_")
+            mapping = {
+                "core": "core_assertion",
+                "main": "core_assertion",
+                "primary": "core_assertion",
+                "supporting": "supporting_detail",
+                "detail": "supporting_detail",
+                "secondary": "supporting_detail",
+                "background": "background_context",
+                "context": "background_context",
+            }
+            return mapping.get(v, v)
+        return v
+
 
 class SynthesizeOutput(BaseModel):
-    """Output from the synthesize_verdict activity.
-    
-    Contains the combined verdict for multiple sub-claims.
+    """Rubric-based synthesis with explicit thesis evaluation.
+
+    Four-step rubric:
+      1. Identify the thesis (one-sentence restatement)
+      2. Classify each subclaim (core/supporting/background)
+      3. Does the thesis survive? (based on core assertion verdicts)
+      4. Render verdict (derived from steps 2+3)
     """
+
+    # Step 1 — Identify the thesis
+    thesis_restatement: str = Field(
+        ..., description="One sentence: what is the speaker arguing?"
+    )
+
+    # Step 2 — Classify each subclaim
+    subclaim_weights: list[SubclaimWeight] = Field(
+        ..., description="Role classification for each subclaim"
+    )
+
+    # Step 3 — Does the thesis survive?
+    thesis_survives: bool = Field(
+        ..., description="Does the thesis hold given core assertion verdicts?"
+    )
+
+    # Step 4 — Render verdict
     verdict: Verdict = Field(
-        ...,
-        description="The combined verdict"
+        ..., description="The combined verdict"
     )
     confidence: float = Field(
-        ...,
-        ge=0.0,
-        le=1.0,
+        ..., ge=0.0, le=1.0,
         description="Confidence in the combined verdict (0.0-1.0)"
     )
     reasoning: str = Field(
-        ...,
-        description="Explanation of how the sub-verdicts combine, including any important context"
+        ..., description="Public-facing explanation (never reference "
+        "sub-claim numbers or internal process)"
     )
 
     @field_validator("confidence")
@@ -299,7 +442,7 @@ class SynthesizeOutput(BaseModel):
     def clamp_confidence(cls, v: float) -> float:
         """Ensure confidence is within valid range."""
         return max(0.0, min(1.0, v))
-    
+
     @field_validator("verdict", mode="before")
     @classmethod
     def normalize_verdict(cls, v: str) -> str:

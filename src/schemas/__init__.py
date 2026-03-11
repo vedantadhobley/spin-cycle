@@ -18,8 +18,12 @@ from src.schemas.llm_outputs import (
     DecomposeOutput,
     # Judge
     Verdict,
+    EvidenceDirection,
+    EvidenceAssessment,
     JudgeOutput,
     # Synthesize
+    SubclaimRole,
+    SubclaimWeight,
     SynthesizeOutput,
 )
 
@@ -40,7 +44,11 @@ __all__ = [
     "AtomicFact",
     "DecomposeOutput",
     "Verdict",
+    "EvidenceDirection",
+    "EvidenceAssessment",
     "JudgeOutput",
+    "SubclaimRole",
+    "SubclaimWeight",
     "SynthesizeOutput",
     # API
     "ClaimSubmit",
