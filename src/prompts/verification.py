@@ -621,6 +621,39 @@ group; the judge evaluates whether the assertion holds across members.
 For unnamed ad-hoc groups ("both Google and Meta"), rule 1 applies — split \
 into individual entity facts.
 
+13. POLARITY PRESERVATION (CRITICAL):
+   NEVER invert the polarity of the original claim when creating subclaims.
+   If the claim says "X never happens", the subclaim MUST be "X never happens" \
+— NOT "X has been documented to happen." If the claim says "No country does X", \
+the subclaim MUST be "No country does X" — NOT "Countries have been found to do X."
+   The judge evaluates the ORIGINAL assertion. If you rephrase a negative claim \
+as a positive one, the judge will evaluate the positive version and the final \
+verdict will be INVERTED — giving a completely wrong result.
+   BAD:  "Lightning never strikes the same place twice"
+         → "There are documented cases of lightning striking the same place twice"
+   GOOD: "Lightning never strikes the same place twice"
+         → "Lightning never strikes the same location more than once"
+   BAD:  "No president has been convicted while in office"
+         → "A president has been convicted while in office"
+   GOOD: "No sitting US president has been convicted of a crime while in office"
+
+14. QUALIFIER PRESERVATION (CRITICAL):
+   NEVER add qualifiers, hedges, or scope limiters not present in the original \
+claim. Absolute language ("never", "any", "all", "every", "no", "none") is \
+precision-critical. The judge needs to evaluate the claim's actual strength, not \
+a weakened version.
+   BAD:  "Sweden never implemented any lockdown measures"
+         → "Sweden did not implement NATIONWIDE lockdown measures" (added "nationwide")
+   GOOD: "Sweden never implemented any lockdown measures"
+         → "Sweden never implemented any lockdown measures during the COVID-19 pandemic"
+   BAD:  "Every single Republican voted against X"
+         → "Most Republicans voted against X" (weakened quantifier)
+   GOOD: "Every single Republican voted against X"
+         → "All Republican members of Congress voted against X"
+   The claim chose its language deliberately. If it says "any" and you soften \
+to "nationwide", you've changed a falsifiable absolute into a defensible hedge. \
+Preserve the original scope exactly.
+
 SIMPLICITY GUIDANCE:
 - Simple factual claims stay as single facts
 - Complex claims with multiple entities/actions get multiple facts
@@ -1178,6 +1211,21 @@ If direction contradicted → mostly_false. Use unverifiable ONLY when evidence 
 doesn't address direction at all.
 - Superlatives: "highest in the world" when actually top-5 = direction right, \
 specific fails → mostly_false, not false.
+- Predictions with deadlines: If a claim predicts "X will happen by [date]" and \
+X has ALREADY happened before that date, the claim is TRUE — the prediction was \
+fulfilled ahead of schedule. Do NOT rate it false because "the timeline was \
+wrong." The claim set an upper bound, and reality beat it.
+- Explicit numbers: When evidence provides specific figures (areas, populations, \
+dollar amounts), SHOW THE NUMBERS in your precision assessment and compare \
+directly. Do not rely on intuition or general knowledge to interpret rankings. \
+If the evidence says "Canada: 9,093,507 km²" and "Russia: 16,377,742 km²", \
+state both numbers and draw the comparison explicitly.
+- Distinguishing related findings: When evidence presents apparently conflicting \
+results, determine whether they address the SAME specific question or DIFFERENT \
+aspects of a broader topic. "Nuclear workers have lower overall mortality" and \
+"radiation increases specific cancer risk" are BOTH true simultaneously — they \
+measure different things. Conflicting findings on different questions do not \
+contradict each other.
 → Output: "precision_assessment" (string — show work for quantitative claims)
 
 STEP 5 — RENDER VERDICT
@@ -1212,6 +1260,27 @@ CONFIDENCE CALIBRATION (anchor to evidence, do NOT default to 0.9+):
 A single primary document (vote record, court filing) CAN justify high \
 confidence — but explain why.
 → Output: "verdict", "confidence" (0.0-1.0), "reasoning" (public-facing)
+
+CONTESTED CATEGORIES:
+For claims involving contested legal, political, or academic classifications \
+(e.g., apartheid, genocide, terrorism, recession) where authoritative bodies \
+disagree or no binding judicial/regulatory determination exists: prefer \
+mostly_true/mostly_false over true/false, and cap confidence at 0.85. Expert \
+consensus ≠ settled fact when the classification itself is debated.
+
+BOUNDARY TECHNICALITIES:
+When a temporal claim ("since 1815", "for the past decade") is substantially \
+true across the claimed period but technically violated by a minor boundary \
+case, weigh the MATERIALITY of the exception. A 200-year record broken by \
+an event in the boundary month is mostly_true, not false. Ask: "Would a \
+reasonable, informed person consider this claim true?" If yes, the verdict \
+should reflect that, with the technicality noted in reasoning.
+
+APPROXIMATE COMPARATIVES:
+For claims like "more than the next N combined" where the exact number \
+fluctuates by year/source: if the DIRECTION is clearly true and the claim \
+is in the right ballpark, use mostly_true. Reserve true for cases where \
+the specific comparison holds exactly against current data.
 
 === REFERENCE: RHETORICAL TRAPS ===
 Note in reasoning if detected:
