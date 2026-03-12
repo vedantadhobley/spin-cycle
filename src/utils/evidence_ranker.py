@@ -93,6 +93,11 @@ def _content_score(content: str) -> int:
     return 0
 
 
+def _is_wikipedia(url: str) -> bool:
+    """Check if URL is a Wikipedia article."""
+    return "wikipedia.org/wiki/" in (url or "")
+
+
 def score_url(url: str) -> tuple[int, dict]:
     """Score a URL on source quality signals (no content needed).
 
@@ -110,6 +115,9 @@ def score_url(url: str) -> tuple[int, dict]:
     factual = rating.get("factual_reporting") if rating else None
     if factual and factual in FACTUAL_SCORES:
         breakdown["factual"] = FACTUAL_SCORES[factual]
+    elif _is_wikipedia(url):
+        # Wikipedia is unrated by MBFC but is a high-quality encyclopedic source
+        breakdown["factual"] = FACTUAL_SCORES["high"]  # 24
     elif _tld_score(domain) > 0:
         breakdown["factual"] = FACTUAL_UNRATED_GOV
     else:
