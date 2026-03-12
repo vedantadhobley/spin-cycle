@@ -8,6 +8,8 @@ The LangChain tool returns formatted text (for the LLM to read), while the
 raw function returns dicts (for programmatic use).
 """
 
+import re
+
 import httpx
 from langchain_core.tools import tool
 
@@ -45,9 +47,12 @@ async def search_wikipedia(query: str, max_results: int = 3) -> list[dict]:
 
         results = []
         for item in data.get("query", {}).get("search", []):
+            snippet = item.get("snippet", "")
+            # Wikipedia search API returns HTML-highlighted snippets — strip tags
+            snippet = re.sub(r"<[^>]+>", "", snippet)
             results.append({
                 "title": item["title"],
-                "summary": item.get("snippet", ""),
+                "summary": snippet,
                 "url": f"https://en.wikipedia.org/wiki/{item['title'].replace(' ', '_')}",
             })
 

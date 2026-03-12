@@ -1423,22 +1423,59 @@ async def research_claim(
         return fallback_evidence, enriched_parties
 
 
+_US_LEGISLATION_SIGNALS = {
+    "congress", "senate", "house of representatives", "bill", "legislation",
+    "act", "law", "federal", "statute", "amendment", "voted", "vote",
+    "bipartisan", "republican", "democrat", "gop", "capitol hill",
+    "signed into law", "executive order", "inflation reduction",
+    "affordable care", "appropriations", "filibuster",
+}
+
+_NON_US_SIGNALS = {
+    "eu", "european", "parliament", "brexit", "nato",
+    "switzerland", "swiss", "germany", "france", "china", "india",
+    "japan", "australia", "canada", "brazil", "russia", "uk",
+    "united kingdom", "african", "asia", "latin america",
+}
+
+
+def _is_us_legislation_relevant(sub_claim: str) -> bool:
+    """Check if a subclaim is likely related to US legislation.
+
+    LegiScan only covers US bills. Searching non-US claims returns
+    irrelevant matches on common words (e.g., "military" → random US bills).
+    """
+    lower = sub_claim.lower()
+
+    # If it contains US-specific legislative terms, search
+    if any(signal in lower for signal in _US_LEGISLATION_SIGNALS):
+        # But not if it's clearly about another country
+        if not any(signal in lower for signal in _NON_US_SIGNALS):
+            return True
+        # US legislative terms + non-US country → could still be about US
+        # (e.g., "US trade bill with China"), check for explicit US mention
+        return "united states" in lower or "u.s." in lower or "american" in lower
+
+    return False
+
+
 async def _enrich_with_legislation(
     evidence: list[dict], sub_claim: str
 ) -> list[dict]:
-    """Programmatic LegiScan enrichment: search for matching legislation.
+    """Programmatic LegiScan enrichment: search for matching US legislation.
 
-    Runs after the agent finishes gathering web evidence. If the subclaim
-    matches any legislation, appends bill details, roll call votes, and
-    bill text as additional evidence items.
-
-    Like Wikidata (decompose) and MBFC (source_filter), this is NOT an
-    agent tool — it runs deterministically for every subclaim. LegiScan
-    queries that don't match return empty, so there's no harm searching.
+    Runs after the agent finishes gathering web evidence. Only searches
+    if the subclaim appears related to US legislation (keyword check).
 
     Deduplicates against URLs already in the evidence set.
     """
     if not legiscan_available():
+        return evidence
+
+    if not _is_us_legislation_relevant(sub_claim):
+        log.debug(logger, MODULE, "legiscan_skipped",
+                  "Subclaim not US-legislation-relevant, skipping LegiScan",
+                  sub_claim=sub_claim[:80])
         return evidence
 
     try:
