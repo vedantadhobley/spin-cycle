@@ -637,9 +637,13 @@ verdict will be INVERTED — giving a completely wrong result.
          → "A president has been convicted while in office"
    GOOD: "No sitting US president has been convicted of a crime while in office"
 
-14. QUALIFIER PRESERVATION (CRITICAL):
-   NEVER add qualifiers, hedges, or scope limiters not present in the original \
-claim. Absolute language ("never", "any", "all", "every", "no", "none") is \
+14. QUALIFIER AND CONTENT PRESERVATION (CRITICAL):
+   NEVER add qualifiers, hedges, scope limiters, or actors not present in the \
+original claim. If the claim doesn't name specific organizations, do NOT inject \
+them from your training knowledge. Do NOT convert a substantive assertion ("X \
+meets the definition of Y") into a meta-claim about who said so ("organizations \
+have concluded X meets Y") — that changes what the judge evaluates.
+   Absolute language ("never", "any", "all", "every", "no", "none") is \
 precision-critical. The judge needs to evaluate the claim's actual strength, not \
 a weakened version.
    BAD:  "Sweden never implemented any lockdown measures"
@@ -1165,6 +1169,21 @@ STEP 1 — INTERPRET THE CLAIM
 Restate the sub-claim charitably. Consider the original claim context. \
 If language is colloquial (rounded figures, informal shorthand, casual \
 phrasing), state what a reasonable person would understand.
+
+DEADLINE LANGUAGE: "By [date]" and "before [date]" express an upper bound, not \
+a specific prediction. Interpret "X will happen by 2030" as "X will happen no \
+later than 2030." If X already happened, the deadline was met — the claim is \
+true, not misleading. Do NOT reinterpret deadline language as a specific \
+temporal prediction.
+
+ABSOLUTE LANGUAGE: When the claim uses absolute terms ("never", "any", "all", \
+"every", "no", "none"), you MUST evaluate the EXACT scope of those words. \
+Pay close attention to MODIFIERS — "any X measures" is broader than "an X." \
+For example, "never did any [action] measures" includes partial, limited, or \
+targeted instances, not just full-scale ones. Do NOT narrow the scope during \
+interpretation. If sources confirm "no full-scale X" but the claim asserts \
+"no X measures of any kind," those are different assertions. Evaluate what \
+was actually claimed, not a narrower version that happens to be true.
 → Output: "claim_interpretation" (string)
 
 STEP 2 — TRIAGE KEY EVIDENCE
@@ -1211,15 +1230,18 @@ If direction contradicted → mostly_false. Use unverifiable ONLY when evidence 
 doesn't address direction at all.
 - Superlatives: "highest in the world" when actually top-5 = direction right, \
 specific fails → mostly_false, not false.
-- Predictions with deadlines: If a claim predicts "X will happen by [date]" and \
-X has ALREADY happened before that date, the claim is TRUE — the prediction was \
-fulfilled ahead of schedule. Do NOT rate it false because "the timeline was \
-wrong." The claim set an upper bound, and reality beat it.
+- Predictions with deadlines: "X will happen by [date]" means "X will happen \
+at some point before or on [date]." If X has ALREADY happened before that date, \
+the prediction is TRUE — fulfilled ahead of schedule. Do NOT rate it false or \
+mostly_false because the timing was "off" or "misleading." The claim set an \
+upper bound, and reality beat it. "By [year]" does NOT mean "in [year]" — it \
+means "no later than [year]." If the event occurred earlier, the upper bound \
+was satisfied.
 - Explicit numbers: When evidence provides specific figures (areas, populations, \
 dollar amounts), SHOW THE NUMBERS in your precision assessment and compare \
 directly. Do not rely on intuition or general knowledge to interpret rankings. \
-If the evidence says "Canada: 9,093,507 km²" and "Russia: 16,377,742 km²", \
-state both numbers and draw the comparison explicitly.
+If the evidence provides figures for two entities, state both numbers and draw \
+the comparison explicitly before concluding which is larger/smaller.
 - Distinguishing related findings: When evidence presents apparently conflicting \
 results, determine whether they address the SAME specific question or DIFFERENT \
 aspects of a broader topic. "Nuclear workers have lower overall mortality" and \
@@ -1259,16 +1281,19 @@ CONFIDENCE CALIBRATION (anchor to evidence, do NOT default to 0.9+):
 (inherently unverifiable).
 A single primary document (vote record, court filing) CAN justify high \
 confidence — but explain why.
-→ Output: "verdict", "confidence" (0.0-1.0), "reasoning" (public-facing)
 
-CONTESTED CATEGORIES:
-For claims involving contested legal, political, or academic classifications \
+CONTESTED CATEGORIES (check BEFORE rendering verdict):
+If this claim involves a contested legal, political, or academic classification \
 (e.g., apartheid, genocide, terrorism, recession) where authoritative bodies \
-disagree or no binding judicial/regulatory determination exists: prefer \
-mostly_true/mostly_false over true/false, and cap confidence at 0.85. Expert \
-consensus ≠ settled fact when the classification itself is debated.
+disagree or no binding judicial/regulatory determination exists: you MUST use \
+mostly_true or mostly_false — NEVER true or false. Cap confidence at 0.85. \
+Even if multiple respected organizations agree, expert consensus on a contested \
+classification ≠ settled fact when the classification itself is actively debated. \
+A claim that "X meets the legal definition of Y" requires a BINDING legal \
+determination, not just expert reports. Without one, the strongest possible \
+verdict is mostly_true. An ICJ advisory opinion is advisory, not binding.
 
-BOUNDARY TECHNICALITIES:
+BOUNDARY TECHNICALITIES (check BEFORE rendering verdict):
 When a temporal claim ("since 1815", "for the past decade") is substantially \
 true across the claimed period but technically violated by a minor boundary \
 case, weigh the MATERIALITY of the exception. A 200-year record broken by \
@@ -1281,6 +1306,8 @@ For claims like "more than the next N combined" where the exact number \
 fluctuates by year/source: if the DIRECTION is clearly true and the claim \
 is in the right ballpark, use mostly_true. Reserve true for cases where \
 the specific comparison holds exactly against current data.
+
+→ Output: "verdict", "confidence" (0.0-1.0), "reasoning" (public-facing)
 
 === REFERENCE: RHETORICAL TRAPS ===
 Note in reasoning if detected:

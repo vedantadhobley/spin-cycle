@@ -127,7 +127,10 @@ async def synthesize(
     except LLMInvocationError as e:
         log.warning(logger, MODULE, "invocation_failed",
                     "LLM invocation failed after retries",
-                    error=str(e), attempts=e.attempts)
+                    error=str(e), attempts=e.attempts,
+                    parse_error=e.parse_error,
+                    validation_error=e.validation_error,
+                    raw_output_tail=e.raw_output[-500:] if e.raw_output else None)
         verdict = "unverifiable"
         confidence = 0.0
         reasoning = f"Failed to synthesize verdict after {e.attempts} attempts"

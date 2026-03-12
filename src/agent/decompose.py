@@ -286,23 +286,72 @@ SUB-CLAIMS:
 {numbered_list}"""
 
 
+def _normalize_text(text: str) -> str:
+    """Normalize subclaim text for deduplication comparison."""
+    import re
+    # Strip trailing/leading punctuation and whitespace, collapse internal whitespace
+    t = text.strip().rstrip(".!?,;:")
+    t = re.sub(r"\s+", " ", t)
+    return t.lower()
+
+
+def _dedup_facts(facts: list[AtomicFact]) -> tuple[list[AtomicFact], list[str]]:
+    """Remove near-duplicate subclaims programmatically before LLM check.
+
+    Catches trivial duplicates (punctuation-only differences, whitespace,
+    case) that the LLM quality checker sometimes misses.
+
+    Returns:
+        (deduped_facts, issues) — issues describes what was removed.
+    """
+    seen: dict[str, int] = {}  # normalized text → first index
+    keep = []
+    issues = []
+
+    for i, f in enumerate(facts):
+        norm = _normalize_text(f.text)
+        if norm in seen:
+            issues.append(
+                f"Sub-claims {seen[norm]} and {i} are near-identical "
+                f"(\"{facts[seen[norm]].text}\" ≡ \"{f.text}\"). Removed duplicate."
+            )
+        else:
+            seen[norm] = i
+            keep.append(f)
+
+    return keep, issues
+
+
 async def _validate_subclaim_quality(
     facts: list[AtomicFact],
     claim_text: str,
-) -> tuple[bool, list[str]]:
+) -> tuple[list[AtomicFact], list[str]]:
     """Check decomposed sub-claims for semantic duplicates and group enumeration.
 
-    Makes an LLM call to detect list-level structural issues
-    the decomposer can't self-enforce during generation.
+    Two-pass approach:
+    1. Programmatic: catch trivial near-duplicates (punctuation, case, whitespace)
+    2. LLM: catch semantic duplicates and group enumeration the code can't detect
 
     Returns:
-        (is_valid, issues) — if is_valid is False, issues contains natural-language
-        descriptions for constructing a retry prompt.
+        (clean_facts, issues) — clean_facts has trivial dupes removed.
+        If issues is non-empty, caller should retry decompose with LLM-detected issues.
     """
     if len(facts) < 2:
-        return True, []
+        return facts, []
 
-    numbered = "\n".join(f"{i}. {f.text}" for i, f in enumerate(facts))
+    # Pass 1: programmatic dedup (handles punctuation/whitespace/case dupes)
+    deduped, dedup_issues = _dedup_facts(facts)
+    if dedup_issues:
+        log.info(logger, MODULE, "programmatic_dedup",
+                 "Removed near-duplicate subclaims",
+                 removed=len(facts) - len(deduped), issues=dedup_issues)
+
+    # If only 1 fact left after dedup, no need for LLM check
+    if len(deduped) < 2:
+        return deduped, []
+
+    # Pass 2: LLM check for semantic duplicates and group enumeration
+    numbered = "\n".join(f"{i}. {f.text}" for i, f in enumerate(deduped))
 
     try:
         result = await invoke_llm(
@@ -318,38 +367,36 @@ async def _validate_subclaim_quality(
     except LLMInvocationError as e:
         log.warning(logger, MODULE, "quality_check_failed",
                     "Subclaim quality check failed, skipping", error=str(e))
-        return True, []
+        return deduped, []
 
-    issues: list[str] = []
+    llm_issues: list[str] = []
 
     if result.has_duplicates and result.duplicate_pairs:
         for pair in result.duplicate_pairs:
-            if len(pair) == 2 and all(0 <= idx < len(facts) for idx in pair):
-                issues.append(
+            if len(pair) == 2 and all(0 <= idx < len(deduped) for idx in pair):
+                llm_issues.append(
                     f"Sub-claims {pair[0]} and {pair[1]} are semantically equivalent "
-                    f"(\"{facts[pair[0]].text}\" ≡ \"{facts[pair[1]].text}\"). "
+                    f"(\"{deduped[pair[0]].text}\" ≡ \"{deduped[pair[1]].text}\"). "
                     "Keep only one."
                 )
 
     if result.has_enumeration and result.enumerated_indices:
-        valid_indices = [i for i in result.enumerated_indices if 0 <= i < len(facts)]
+        valid_indices = [i for i in result.enumerated_indices if 0 <= i < len(deduped)]
         if len(valid_indices) >= 2:
-            texts = [f"\"{facts[i].text}\"" for i in valid_indices[:4]]
-            issues.append(
+            texts = [f"\"{deduped[i].text}\"" for i in valid_indices[:4]]
+            llm_issues.append(
                 f"Sub-claims {valid_indices} enumerate individual group members "
                 f"({', '.join(texts)}, ...). Consolidate into a single group-level claim."
             )
 
-    is_valid = len(issues) == 0
-
-    if not is_valid:
+    if llm_issues:
         log.info(logger, MODULE, "quality_issues",
                  "Subclaim quality issues detected",
-                 issue_count=len(issues), reasoning=result.reasoning)
+                 issue_count=len(llm_issues), reasoning=result.reasoning)
     else:
         log.debug(logger, MODULE, "quality_ok", "Subclaim quality check passed")
 
-    return is_valid, issues
+    return deduped, llm_issues
 
 
 async def decompose(claim_text: str) -> dict:
@@ -414,12 +461,15 @@ async def decompose(claim_text: str) -> dict:
         )
 
         # Post-validation: check for semantic duplicates / group enumeration
+        # Returns deduped facts (trivial dupes removed) + LLM-detected issues
+        clean_facts = output.facts
         if len(output.facts) >= 2:
-            is_valid, issues = await _validate_subclaim_quality(
+            clean_facts, llm_issues = await _validate_subclaim_quality(
                 output.facts, normalized,
             )
-            if not is_valid:
-                feedback = "\n".join(f"- {issue}" for issue in issues)
+            if llm_issues:
+                # LLM found semantic dupes or group enumeration — retry decompose
+                feedback = "\n".join(f"- {issue}" for issue in llm_issues)
                 retry_prompt = (
                     DECOMPOSE_USER.format(claim_text=normalized)
                     + f"\n\nYOUR PREVIOUS OUTPUT HAD STRUCTURAL ISSUES:\n{feedback}\n"
@@ -435,12 +485,13 @@ async def decompose(claim_text: str) -> dict:
                         temperature=0.1,
                         activity_name="decompose_retry",
                     )
+                    clean_facts = output.facts
                     log.info(logger, MODULE, "decompose_retry_success",
                              "Decompose retry succeeded after quality feedback",
                              fact_count=len(output.facts))
                 except LLMInvocationError:
                     log.warning(logger, MODULE, "decompose_retry_failed",
-                                "Decompose retry failed, using original output")
+                                "Decompose retry failed, using deduped output")
 
         facts = [
             {
@@ -448,7 +499,7 @@ async def decompose(claim_text: str) -> dict:
                 "categories": f.categories,
                 "seed_queries": f.seed_queries,
             }
-            for f in output.facts if f and f.text and f.text.strip()
+            for f in clean_facts if f and f.text and f.text.strip()
         ]
 
         # Normalize interested parties from LLM output
