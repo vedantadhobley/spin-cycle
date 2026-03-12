@@ -240,8 +240,8 @@ class EvidenceAssessment(BaseModel):
     source_index: int = Field(
         ..., description="Evidence item number from the provided list"
     )
-    assessment: Literal["supports", "contradicts", "neutral"] = Field(
-        ..., description="Does this evidence support or contradict the claim?"
+    assessment: Literal["supports", "contradicts", "mixed", "neutral"] = Field(
+        ..., description="Does this evidence support, contradict, or give mixed signals about the claim?"
     )
     is_independent: bool = Field(
         ..., description="Is this source independent from the claim subject? "
