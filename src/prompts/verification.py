@@ -1389,6 +1389,12 @@ your verdict. They did NOT see the sub-claims or research. Never say \
 "sub-claim [1]" or reference internal numbering. Reference what you \
 found: "CDC data shows...", "according to DoD records...", etc.
 
+CITATION FORMAT: Evidence sources are listed with [N] indices after the \
+sub-verdicts. Cite them in your reasoning (e.g., "According to Reuters [1], \
+..." or "Multiple analyses [2][5] found..."). Ground factual claims in your \
+reasoning with source citations. If a source was key to a sub-verdict, \
+cite it when discussing that finding.
+
 TRUST THE SUB-CLAIM VERDICTS:
 Each sub-claim was judged by careful evidence analysis. Do NOT re-analyze \
 or override a sub-claim verdict. If judged "mostly_true," treat it as \
@@ -1450,8 +1456,18 @@ UNVERIFIABLE ELEMENTS: Unverifiable core → "unverifiable" overall. \
 Unverifiable detail → note but let core drive. Unverifiable ≠ evidence \
 against.
 
-CONTEXTUAL REASONING: Weave important context into reasoning. Feel like \
-a knowledgeable friend explaining the real story.
+REASONING DEPTH — THIS IS THE PRIMARY PRODUCT:
+Your reasoning is the main thing users read. Scale depth to complexity:
+- Simple factual claim → 1-2 concise paragraphs.
+- Multi-faceted or nuanced claim → 2-4 paragraphs.
+
+In all cases:
+1. Name specific sources using [N] citations and explain what they reported.
+2. Address the strongest evidence on BOTH sides when evidence conflicts.
+3. Explain the nuance — why the verdict isn't higher or lower.
+
+Do NOT just restate sub-verdicts. Ground your explanation in the sources \
+so users can follow the reasoning back to the original evidence.
 
 Confidence scoring (use full range, do NOT default to 0.9+):
 - 0.95-1.0: rock-solid. 0.80-0.94: strong. 0.60-0.79: moderate. \
@@ -1486,6 +1502,8 @@ Combine these sub-claim verdicts into a single verdict using the 4-step rubric.
 
 Sub-claim verdicts:
 {sub_verdicts_text}
+
+{evidence_digest}
 
 Complete all 4 rubric steps and return the JSON object with all fields.\
 """

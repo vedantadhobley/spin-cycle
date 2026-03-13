@@ -5,6 +5,7 @@ Combines child sub-verdicts into a final overall verdict.
 The Temporal activity wrapper in verify_activities.py calls synthesize() here.
 """
 
+import re
 from datetime import date
 
 from src.llm import invoke_llm, LLMInvocationError, validate_synthesize
@@ -55,6 +56,15 @@ async def synthesize(
         sub_verdict_parts.append(part)
     sub_verdicts_text = "\n\n".join(sub_verdict_parts)
 
+    # Build unified evidence digest from judge-cited sources
+    evidence_digest = _build_evidence_digest(child_results)
+    evidence_digest_text = _format_evidence_digest(evidence_digest)
+
+    log.info(logger, MODULE, "evidence_digest",
+             "Built unified evidence digest from judge citations",
+             claim=claim_text, digest_size=len(evidence_digest),
+             child_count=len(child_results))
+
     synthesis_context = (
         "This is the FINAL OVERALL verdict for the original claim. "
         "Your verdict is the definitive assessment."
@@ -80,6 +90,7 @@ async def synthesize(
             user_prompt=SYNTHESIZE_USER.format(
                 synthesis_framing=synthesis_framing,
                 sub_verdicts_text=sub_verdicts_text,
+                evidence_digest=evidence_digest_text,
             ),
             schema=SynthesizeOutput,
             semantic_validator=validate_synthesize,
@@ -146,8 +157,14 @@ async def synthesize(
     log.info(logger, MODULE, "done", "Verdict synthesized",
              claim=claim_text, verdict=verdict, confidence=confidence)
 
-    # Extract citations: match domain/title mentions in reasoning against child evidence
-    citations = _extract_synthesize_citations(reasoning, child_results)
+    # Extract [N] citations from reasoning, mapped to evidence digest
+    citations = _extract_synthesize_citations(reasoning, evidence_digest)
+
+    log.info(logger, MODULE, "citations_extracted",
+             "Extracted citations from synthesis reasoning",
+             claim=claim_text, citation_count=len(citations),
+             digest_size=len(evidence_digest),
+             cited_indices=[c["index"] for c in citations])
 
     return {
         "sub_claim": claim_text,
@@ -161,29 +178,89 @@ async def synthesize(
     }
 
 
-def _extract_synthesize_citations(reasoning: str, child_results: list[dict]) -> list[dict]:
-    """Match source mentions in reasoning to evidence URLs from child results."""
-    all_evidence = []
+def _build_evidence_digest(child_results: list[dict]) -> list[dict]:
+    """Build unified evidence list from judge-cited sources across all sub-claims.
+
+    Only includes sources the judges actually cited in [N] notation —
+    typically 3-5 per sub-claim, ~10-20 total after dedup.
+    """
+    digest = []
+    seen_urls: set[str] = set()
+
     for child in child_results:
+        # Build URL → metadata lookup for this sub-claim's evidence
+        ev_by_url = {
+            ev.get("source_url"): ev
+            for ev in child.get("evidence", [])
+            if ev.get("source_url")
+        }
+
         for c in child.get("citations", []):
-            all_evidence.append(c)
+            url = c.get("url")
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            meta = ev_by_url.get(url, {})
+            digest.append({
+                "source_url": url,
+                "title": c.get("title") or meta.get("title"),
+                "domain": c.get("domain") or meta.get("domain"),
+                "tier": meta.get("tier"),
+                "assessment": meta.get("assessment"),
+                "key_point": meta.get("key_point"),
+                "bias": meta.get("bias"),
+                "factual": meta.get("factual"),
+            })
 
-    citations = []
-    seen_urls = set()
-    reasoning_lower = reasoning.lower()
-    for ev in all_evidence:
-        url = ev.get("url")
-        if not url or url in seen_urls:
-            continue
-        domain = ev.get("domain", "")
+    return digest
+
+
+def _format_evidence_digest(digest: list[dict]) -> str:
+    """Format evidence digest as numbered reference list for the prompt."""
+    if not digest:
+        return ""
+
+    lines = ["=== EVIDENCE SOURCES ===",
+             "Cite these using [N] in your reasoning.\n"]
+    for i, ev in enumerate(digest, 1):
+        domain = ev.get("domain", "?")
         title = ev.get("title", "")
-        if domain and domain in reasoning_lower:
-            citations.append(ev)
-            seen_urls.add(url)
-        elif title and len(title) > 10 and title.lower() in reasoning_lower:
-            citations.append(ev)
-            seen_urls.add(url)
+        tier = ev.get("tier", "")
 
+        header = f"[{i}] {domain}"
+        if title:
+            header += f' — "{title}"'
+        if tier:
+            header += f" — {tier}"
+        lines.append(header)
+
+        # Add key finding if the judge assessed this source
+        if ev.get("key_point"):
+            assessment = ev.get("assessment", "")
+            finding = f"    Finding: {ev['key_point']}"
+            if assessment:
+                finding += f" ({assessment})"
+            lines.append(finding)
+
+    return "\n".join(lines)
+
+
+def _extract_synthesize_citations(
+    reasoning: str,
+    evidence_digest: list[dict],
+) -> list[dict]:
+    """Extract [N] citation indices from reasoning and map to evidence digest."""
+    indices = sorted(set(int(m) for m in re.findall(r'\[(\d+)\]', reasoning)))
+    citations = []
+    for idx in indices:
+        if 1 <= idx <= len(evidence_digest):
+            ev = evidence_digest[idx - 1]
+            citations.append({
+                "index": idx,
+                "url": ev.get("source_url"),
+                "title": ev.get("title"),
+                "domain": ev.get("domain"),
+            })
     return citations
 
 
