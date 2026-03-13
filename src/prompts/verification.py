@@ -1307,6 +1307,10 @@ fluctuates by year/source: if the DIRECTION is clearly true and the claim \
 is in the right ballpark, use mostly_true. Reserve true for cases where \
 the specific comparison holds exactly against current data.
 
+CITATION FORMAT: In your reasoning, cite evidence using [N] notation matching \
+the evidence numbers above (e.g., "Multiple sources [1][3] confirm..."). \
+Every factual assertion in your reasoning must cite at least one source.
+
 → Output: "verdict", "confidence" (0.0-1.0), "reasoning" (public-facing)
 
 === REFERENCE: RHETORICAL TRAPS ===

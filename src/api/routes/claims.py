@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from temporalio.client import Client as TemporalClient
 
-from src.schemas import ClaimSubmit, ClaimBatchSubmit, ClaimBatchResponse, ClaimResponse, VerdictResponse, ClaimListResponse, SubClaimResponse
+from src.schemas import ClaimSubmit, ClaimBatchSubmit, ClaimBatchResponse, ClaimResponse, VerdictResponse, ClaimListResponse, SubClaimResponse, EvidenceResponse, CitationResponse
 from src.db.models import Claim, SubClaim, Verdict
 from src.db.session import get_session
 from src.utils.logging import log, get_logger
@@ -47,6 +47,21 @@ async def count_queued_claims(session: AsyncSession) -> int:
 router = APIRouter()
 
 
+def _build_citations(verdict) -> list[CitationResponse]:
+    """Build CitationResponse list from Verdict JSONB citations."""
+    if not verdict or not verdict.citations:
+        return []
+    return [
+        CitationResponse(
+            index=c.get("index", 0),
+            url=c.get("url"),
+            title=c.get("title"),
+            domain=c.get("domain"),
+        )
+        for c in verdict.citations
+    ]
+
+
 def _build_sub_claim_tree(sub_claims) -> list[SubClaimResponse]:
     """Build a nested tree of SubClaimResponse from flat DB rows with parent_id.
 
@@ -61,13 +76,29 @@ def _build_sub_claim_tree(sub_claims) -> list[SubClaimResponse]:
 
     # Index all sub-claims
     for sc in sub_claims:
+        evidence_list = []
+        if sc.evidence:
+            for e in sorted(sc.evidence, key=lambda e: e.judge_index or 999):
+                evidence_list.append(EvidenceResponse(
+                    judge_index=e.judge_index,
+                    url=e.source_url,
+                    title=e.title,
+                    domain=e.domain,
+                    source_type=e.source_type or "web",
+                    bias=e.bias,
+                    factual=e.factual,
+                    tier=e.tier,
+                    assessment=e.assessment,
+                    is_independent=e.is_independent,
+                    key_point=e.key_point,
+                ))
         node = SubClaimResponse(
             text=sc.text,
             is_leaf=sc.is_leaf,
             verdict=sc.verdict,
             confidence=sc.confidence,
             reasoning=sc.reasoning,
-            evidence_count=len(sc.evidence) if sc.evidence else 0,
+            evidence=evidence_list,
             children=[],
         )
         by_id[sc.id] = (node, sc.parent_id)
@@ -246,6 +277,7 @@ async def get_claim(
         verdict=claim.verdict.verdict if claim.verdict else None,
         confidence=claim.verdict.confidence if claim.verdict else None,
         reasoning=claim.verdict.reasoning if claim.verdict else None,
+        citations=_build_citations(claim.verdict),
         sub_claims=sub_claim_responses,
         created_at=claim.created_at,
         updated_at=claim.updated_at,
@@ -289,6 +321,7 @@ async def list_claims(
                 verdict=c.verdict.verdict if c.verdict else None,
                 confidence=c.verdict.confidence if c.verdict else None,
                 reasoning=c.verdict.reasoning if c.verdict else None,
+                citations=_build_citations(c.verdict),
                 sub_claims=_build_sub_claim_tree(c.sub_claims),
                 created_at=c.created_at,
                 updated_at=c.updated_at,

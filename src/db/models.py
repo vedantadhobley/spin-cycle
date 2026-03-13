@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, String, Float, Boolean, DateTime, ForeignKey, Text, Enum
+from sqlalchemy import Column, String, Float, Boolean, DateTime, ForeignKey, Integer, Text, Enum
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import DeclarativeBase, relationship
 
@@ -64,6 +64,15 @@ class Evidence(Base):
     )
     source_url = Column(String(2048), nullable=True)
     content = Column(Text, nullable=True)
+    title = Column(String(512), nullable=True)
+    domain = Column(String(256), nullable=True)
+    bias = Column(String(64), nullable=True)
+    factual = Column(String(64), nullable=True)
+    tier = Column(String(64), nullable=True)
+    judge_index = Column(Integer, nullable=True)
+    assessment = Column(String(32), nullable=True)
+    is_independent = Column(Boolean, nullable=True)
+    key_point = Column(Text, nullable=True)
     retrieved_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     sub_claim = relationship("SubClaim", back_populates="evidence")
@@ -81,6 +90,7 @@ class Verdict(Base):
     confidence = Column(Float, nullable=False)
     reasoning = Column(Text, nullable=True)
     reasoning_chain = Column(JSONB, nullable=True)
+    citations = Column(JSONB, nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     claim = relationship("Claim", back_populates="verdict")

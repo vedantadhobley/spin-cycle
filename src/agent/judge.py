@@ -6,6 +6,7 @@ This module contains the judgment logic extracted from verify_activities.py.
 The Temporal activity wrapper in verify_activities.py calls judge() here.
 """
 
+import re
 from datetime import date
 from urllib.parse import urlparse
 
@@ -217,7 +218,12 @@ async def judge(
     )
 
     # Format evidence for LLM prompt with annotations
-    evidence_text, quality_summary = _annotate_evidence(
+    # Run in thread pool — _annotate_evidence does 20+ synchronous DB queries
+    # (get_source_rating_sync, _find_rating_by_name) which block the event loop
+    # and prevent the Temporal worker from polling for other activity tasks.
+    import asyncio
+    evidence_text, quality_summary, evidence_metadata = await asyncio.to_thread(
+        _annotate_evidence,
         source_evidence, all_parties, affiliated_media, interested_parties,
     )
     full_evidence = (
@@ -226,6 +232,7 @@ async def judge(
     )
 
     # Invoke the judge LLM
+    citations = []
     try:
         output = await invoke_llm(
             system_prompt=JUDGE_SYSTEM.format(
@@ -246,6 +253,32 @@ async def judge(
         verdict = output.verdict
         confidence = output.confidence
         reasoning = output.reasoning
+
+        # Merge LLM evidence assessments into metadata
+        assessment_map = {}
+        for ea in output.key_evidence:
+            assessment_map[ea.source_index] = {
+                "assessment": ea.assessment,
+                "is_independent": ea.is_independent,
+                "key_point": ea.key_point,
+            }
+        for ev_meta in evidence_metadata:
+            lm = assessment_map.get(ev_meta["judge_index"])
+            if lm:
+                ev_meta.update(lm)
+
+        # Extract [N] citations from reasoning
+        cited_indices = _extract_citation_indices(reasoning)
+        citations = []
+        for idx in cited_indices:
+            if 1 <= idx <= len(evidence_metadata):
+                meta = evidence_metadata[idx - 1]
+                citations.append({
+                    "index": idx,
+                    "url": meta.get("source_url"),
+                    "title": meta.get("title"),
+                    "domain": meta.get("domain"),
+                })
 
         # Log rubric steps — INFO level for key decisions, DEBUG for details
         independent_count = sum(
@@ -309,7 +342,8 @@ async def judge(
         "verdict": verdict,
         "confidence": confidence,
         "reasoning": reasoning,
-        "evidence": evidence,
+        "evidence": evidence_metadata,
+        "citations": citations,
     }
 
 
@@ -354,6 +388,11 @@ def _validate_judge_consistency(output: JudgeOutput) -> list[str]:
         )
 
     return warnings
+
+
+def _extract_citation_indices(text: str) -> list[int]:
+    """Extract [N] citation indices from reasoning text."""
+    return sorted(set(int(m) for m in re.findall(r'\[(\d+)\]', text)))
 
 
 def _rank_evidence(source_evidence: list[dict]) -> list[dict]:
@@ -465,7 +504,7 @@ def _annotate_evidence(
     all_parties: list[str],
     affiliated_media: list[str],
     interested_parties: dict,
-) -> tuple[str, str]:
+) -> tuple[str, str, list[dict]]:
     """Format evidence with MBFC ratings, interest checks, and bias tracking.
 
     Four interest checks per evidence item:
@@ -474,9 +513,12 @@ def _annotate_evidence(
     3. Publisher owned by interested party
     4. Sub-source references with poor ratings
 
-    Returns (evidence_text, quality_summary) for injection into the judge prompt.
+    Returns (evidence_text, quality_summary, evidence_metadata) for injection
+    into the judge prompt. evidence_metadata is a list of dicts with structured
+    data for each evidence item (for DB persistence and citation mapping).
     """
     evidence_parts = []
+    evidence_metadata = []
     bias_distribution = {"left": 0, "center": 0, "right": 0, "unrated": 0}
     interested_party_count = 0
     affiliated_media_count = 0
@@ -499,13 +541,29 @@ def _annotate_evidence(
         rating_tag = _format_source_tag(rating)
 
         # Track tier and domain for quality summary
+        ev_domain = None
+        ev_tier = None
         if url != "N/A":
-            domain = extract_domain(url)
-            if domain:
-                unique_domains.add(domain)
-            tier = tier_label(url)
-            tier_key = tier if tier else "unrated"
+            ev_domain = extract_domain(url)
+            if ev_domain:
+                unique_domains.add(ev_domain)
+            ev_tier = tier_label(url)
+            tier_key = ev_tier if ev_tier else "unrated"
             tier_counts[tier_key] = tier_counts.get(tier_key, 0) + 1
+
+        # Build structured metadata for this evidence item
+        ev_meta = {
+            "judge_index": i,
+            "source_url": url if url != "N/A" else None,
+            "title": title or None,
+            "domain": ev_domain,
+            "source_type": source,
+            "bias": rating.get("bias") if rating else None,
+            "factual": rating.get("factual_reporting") if rating else None,
+            "tier": ev_tier,
+            "content": content or None,
+        }
+        evidence_metadata.append(ev_meta)
 
         interest_warnings = []
 
@@ -724,4 +782,4 @@ def _annotate_evidence(
         "EVIDENCE QUALITY SUMMARY:\n" + "\n".join(quality_lines)
     )
 
-    return evidence_text, quality_summary
+    return evidence_text, quality_summary, evidence_metadata

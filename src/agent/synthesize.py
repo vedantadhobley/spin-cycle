@@ -44,6 +44,14 @@ async def synthesize(
             f"    Confidence: {sub['confidence']}\n"
             f"    Reasoning: {sub['reasoning']}"
         )
+        # Add key cited sources so synthesizer can reference them
+        if sub.get("citations"):
+            cited = sub["citations"][:5]
+            source_lines = []
+            for c in cited:
+                label = c.get("title") or c.get("domain", "?")
+                source_lines.append(f"      - {label} ({c.get('url', '')})")
+            part += "\n    Key sources:\n" + "\n".join(source_lines)
         sub_verdict_parts.append(part)
     sub_verdicts_text = "\n\n".join(sub_verdict_parts)
 
@@ -138,6 +146,9 @@ async def synthesize(
     log.info(logger, MODULE, "done", "Verdict synthesized",
              claim=claim_text, verdict=verdict, confidence=confidence)
 
+    # Extract citations: match domain/title mentions in reasoning against child evidence
+    citations = _extract_synthesize_citations(reasoning, child_results)
+
     return {
         "sub_claim": claim_text,
         "verdict": verdict,
@@ -146,7 +157,34 @@ async def synthesize(
         "evidence": [],
         "child_results": child_results,
         "reasoning_chain": [sub.get("reasoning", "") for sub in child_results],
+        "citations": citations,
     }
+
+
+def _extract_synthesize_citations(reasoning: str, child_results: list[dict]) -> list[dict]:
+    """Match source mentions in reasoning to evidence URLs from child results."""
+    all_evidence = []
+    for child in child_results:
+        for c in child.get("citations", []):
+            all_evidence.append(c)
+
+    citations = []
+    seen_urls = set()
+    reasoning_lower = reasoning.lower()
+    for ev in all_evidence:
+        url = ev.get("url")
+        if not url or url in seen_urls:
+            continue
+        domain = ev.get("domain", "")
+        title = ev.get("title", "")
+        if domain and domain in reasoning_lower:
+            citations.append(ev)
+            seen_urls.add(url)
+        elif title and len(title) > 10 and title.lower() in reasoning_lower:
+            citations.append(ev)
+            seen_urls.add(url)
+
+    return citations
 
 
 def _validate_synthesize_consistency(output: SynthesizeOutput) -> list[str]:

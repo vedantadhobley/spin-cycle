@@ -187,12 +187,28 @@ async def store_result(claim_id: str, result: dict) -> None:
                 for ev in sub.get("evidence", []):
                     source_type = ev.get("source_type", "web")
                     if source_type not in ("web", "wikipedia", "news_api"):
-                        continue
+                        source_type = "web"
+                    # Truncate string fields to fit DB column limits
+                    title = ev.get("title")
+                    if title and len(title) > 512:
+                        title = title[:509] + "..."
+                    domain = ev.get("domain")
+                    if domain and len(domain) > 256:
+                        domain = domain[:256]
                     evidence = Evidence(
                         sub_claim_id=sub_claim.id,
                         source_type=source_type,
                         source_url=ev.get("source_url"),
                         content=ev.get("content"),
+                        title=title,
+                        domain=domain,
+                        bias=ev.get("bias"),
+                        factual=ev.get("factual"),
+                        tier=ev.get("tier"),
+                        judge_index=ev.get("judge_index"),
+                        assessment=ev.get("assessment"),
+                        is_independent=ev.get("is_independent"),
+                        key_point=ev.get("key_point"),
                     )
                     session.add(evidence)
 
@@ -218,6 +234,7 @@ async def store_result(claim_id: str, result: dict) -> None:
                 confidence=result.get("confidence", 0.0),
                 reasoning=result.get("reasoning"),
                 reasoning_chain=result.get("reasoning_chain"),
+                citations=result.get("citations"),
             )
             session.add(verdict_row)
 

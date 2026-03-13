@@ -37,6 +37,29 @@ class ClaimResponse(BaseModel):
     created_at: datetime
 
 
+class EvidenceResponse(BaseModel):
+    """A single evidence item with source quality metadata."""
+    judge_index: Optional[int] = None
+    url: Optional[str] = None
+    title: Optional[str] = None
+    domain: Optional[str] = None
+    source_type: str = "web"
+    bias: Optional[str] = None
+    factual: Optional[str] = None
+    tier: Optional[str] = None
+    assessment: Optional[str] = None
+    is_independent: Optional[bool] = None
+    key_point: Optional[str] = None
+
+
+class CitationResponse(BaseModel):
+    """A citation reference linking reasoning text to evidence."""
+    index: int
+    url: Optional[str] = None
+    title: Optional[str] = None
+    domain: Optional[str] = None
+
+
 class SubClaimResponse(BaseModel):
     """A verified sub-claim (leaf) or group node in the response."""
     text: str  # leaf: verifiable assertion, group: label
@@ -47,7 +70,7 @@ class SubClaimResponse(BaseModel):
     ]] = None
     confidence: Optional[float] = None
     reasoning: Optional[str] = None
-    evidence_count: int = 0
+    evidence: list[EvidenceResponse] = []
     children: list["SubClaimResponse"] = []
 
 
@@ -65,6 +88,7 @@ class VerdictResponse(BaseModel):
     verdict: Optional[Literal["true", "mostly_true", "mixed", "mostly_false", "false", "unverifiable"]] = None
     confidence: Optional[float] = None
     reasoning: Optional[str] = None
+    citations: list[CitationResponse] = []
     sub_claims: list[SubClaimResponse] = []
     created_at: datetime
     updated_at: datetime

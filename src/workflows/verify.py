@@ -29,7 +29,7 @@ each research agent a dedicated inference slot.
 import asyncio
 from datetime import timedelta
 from temporalio import workflow
-from temporalio.common import RetryPolicy
+from temporalio.common import RetryPolicy, SearchAttributeKey
 
 with workflow.unsafe.imports_passed_through():
     from src.activities.verify_activities import (
@@ -53,6 +53,14 @@ MAX_FACTS = 10
 # the LLM server's Qwen3.5 instance — each agent gets a dedicated inference slot.
 MAX_CONCURRENT = 2
 
+# Search attribute keys for Temporal UI visibility
+SA_PHASE = SearchAttributeKey.for_keyword("Phase")
+SA_FACT_COUNT = SearchAttributeKey.for_int("FactCount")
+SA_RESEARCH_PROGRESS = SearchAttributeKey.for_keyword("ResearchProgress")
+SA_JUDGE_PROGRESS = SearchAttributeKey.for_keyword("JudgeProgress")
+SA_VERDICT = SearchAttributeKey.for_keyword("Verdict")
+SA_CONFIDENCE = SearchAttributeKey.for_float("Confidence")
+
 
 @workflow.defn
 class VerifyClaimWorkflow:
@@ -66,6 +74,54 @@ class VerifyClaimWorkflow:
     5. Store result in database + start next queued claim
     """
 
+    def __init__(self) -> None:
+        # Workflow state — exposed via @workflow.query for Temporal UI
+        self._phase = "initializing"
+        self._claim_text = ""
+        self._fact_count = 0
+        self._facts: list[str] = []
+        self._thesis = ""
+        self._interested_parties_count = 0
+        self._research_done = 0
+        self._research_failed = 0
+        self._evidence_counts: dict[str, int] = {}
+        self._judge_done = 0
+        self._judge_failed = 0
+        self._sub_verdicts: list[dict] = []
+        self._verdict = ""
+        self._confidence = 0.0
+
+    @workflow.query
+    def status(self) -> dict:
+        """Current workflow state — queryable from Temporal UI."""
+        return {
+            "phase": self._phase,
+            "claim": self._claim_text,
+            "fact_count": self._fact_count,
+            "facts": self._facts,
+            "thesis": self._thesis,
+            "interested_parties": self._interested_parties_count,
+            "research": {
+                "done": self._research_done,
+                "failed": self._research_failed,
+                "total": self._fact_count,
+                "evidence_per_fact": self._evidence_counts,
+            },
+            "judge": {
+                "done": self._judge_done,
+                "failed": self._judge_failed,
+                "total": self._fact_count,
+                "sub_verdicts": self._sub_verdicts,
+            },
+            "verdict": self._verdict,
+            "confidence": self._confidence,
+        }
+
+    def _set_phase(self, phase: str) -> None:
+        """Update phase in state and search attributes."""
+        self._phase = phase
+        workflow.upsert_search_attributes([SA_PHASE.value_set(phase)])
+
     @workflow.run
     async def run(self, claim_id: str | None, claim_text: str) -> dict:
         """Run the verification pipeline.
@@ -75,8 +131,11 @@ class VerifyClaimWorkflow:
                       When None, the workflow creates the claim record itself.
             claim_text: The claim to verify.
         """
+        self._claim_text = claim_text
+
         # Step 0: Create claim record if we don't have one
         if not claim_id:
+            self._set_phase("creating_claim")
             claim_id = await workflow.execute_activity(
                 create_claim,
                 args=[claim_text],
@@ -89,8 +148,9 @@ class VerifyClaimWorkflow:
         log.info(workflow.logger, MODULE, "started", "Starting verification pipeline",
                  claim_id=claim_id, claim=claim_text)
 
-        # Step 1: Normalize + Decompose — normalize claim, then extract atomic facts + thesis
-        # Budget: normalize (~5s) + decompose (~25s) + quality validator (~30s) + potential retry (~15s)
+        # Step 1: Normalize + Decompose
+        self._set_phase("decomposing")
+
         decomposition = await workflow.execute_activity(
             decompose_claim,
             args=[claim_text],
@@ -101,10 +161,8 @@ class VerifyClaimWorkflow:
         atomic_facts = decomposition["facts"]
         thesis_info = decomposition.get("thesis_info", {})
 
-        # interested_parties is now an object with all_parties, direct, institutional, affiliated_media
         interested_parties = thesis_info.get("interested_parties", {})
         if isinstance(interested_parties, list):
-            # Legacy format - convert to new structure
             interested_parties = {
                 "all_parties": interested_parties,
                 "direct": interested_parties,
@@ -120,6 +178,17 @@ class VerifyClaimWorkflow:
                         original=len(atomic_facts), capped=MAX_FACTS)
             atomic_facts = atomic_facts[:MAX_FACTS]
 
+        # Update state after decompose
+        self._fact_count = len(atomic_facts)
+        self._facts = [f["text"] for f in atomic_facts]
+        self._thesis = thesis_info.get("thesis", "")
+        self._interested_parties_count = len(
+            interested_parties.get("all_parties", [])
+        )
+        workflow.upsert_search_attributes([
+            SA_FACT_COUNT.value_set(self._fact_count),
+        ])
+
         log.info(workflow.logger, MODULE, "decomposed",
                  "Claim decomposed into atomic facts",
                  claim_id=claim_id, fact_count=len(atomic_facts),
@@ -128,9 +197,8 @@ class VerifyClaimWorkflow:
                  structure=thesis_info.get("structure"),
                  interested_parties=interested_parties)
 
-        # Step 2: Research all facts first (thinking=off, fast)
-        # Then judge all facts (thinking=on, slow)
-        # This prevents slow judge calls from starving faster research agents.
+        # Step 2: Research all facts (thinking=off, fast)
+        self._set_phase("researching")
 
         async def _research(fact: dict) -> tuple[str, list, dict]:
             """Research a single fact, return (fact_text, evidence, enriched_parties)."""
@@ -149,21 +217,18 @@ class VerifyClaimWorkflow:
                 start_to_close_timeout=timedelta(seconds=300),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
+            # Update progress
+            ev_count = len(result.get("evidence", []))
+            self._research_done += 1
+            self._evidence_counts[fact_text] = ev_count
+            workflow.upsert_search_attributes([
+                SA_RESEARCH_PROGRESS.value_set(
+                    f"{self._research_done}/{self._fact_count}",
+                ),
+            ])
             return (fact_text, result["evidence"], result.get("enriched_parties", {}))
 
-        async def _judge(fact_text: str, evidence: list,
-                         merged_parties: dict) -> dict:
-            """Judge a single fact given its evidence."""
-            return await workflow.execute_activity(
-                judge_subclaim,
-                args=[claim_text, fact_text, evidence, merged_parties],
-                start_to_close_timeout=timedelta(seconds=300),
-                retry_policy=RetryPolicy(maximum_attempts=3),
-            )
-
-        # Phase 1: Research all facts with sliding window concurrency
-        # Uses semaphore to maintain MAX_CONCURRENT tasks at all times.
-        # As soon as one finishes, the next starts immediately (no batch waiting).
+        # Sliding window concurrency
         research_semaphore = asyncio.Semaphore(MAX_CONCURRENT)
 
         async def _research_with_limit(fact: dict) -> tuple[str, list, dict]:
@@ -181,9 +246,8 @@ class VerifyClaimWorkflow:
             return_exceptions=True
         )
 
-        # Filter out failures and merge enriched parties across sub-claims
+        # Filter out failures and merge enriched parties
         all_evidence = []
-        research_failures = 0
         merged_all_parties = set(interested_parties.get("all_parties", []))
         merged_affiliated_media = set(interested_parties.get("affiliated_media", []))
 
@@ -193,11 +257,10 @@ class VerifyClaimWorkflow:
                             "Research failed for fact, skipping",
                             claim_id=claim_id, fact=atomic_facts[i]["text"],
                             error=str(result))
-                research_failures += 1
+                self._research_failed += 1
             else:
                 fact_text, evidence, enriched = result
                 all_evidence.append((fact_text, evidence))
-                # Merge enriched parties from each sub-claim
                 if enriched:
                     merged_all_parties.update(enriched.get("all_parties", []))
                     merged_affiliated_media.update(enriched.get("affiliated_media", []))
@@ -214,15 +277,44 @@ class VerifyClaimWorkflow:
         merged_parties["all_parties"] = merged_parties_list
         merged_parties["affiliated_media"] = list(merged_affiliated_media)
 
+        self._interested_parties_count = len(merged_parties_list)
+
         _research_ms = round((workflow.time() - _t0) * 1000)
         log.info(workflow.logger, MODULE, "research_phase_done",
                  "Research phase completed",
                  claim_id=claim_id, latency_ms=_research_ms,
-                 succeeded=len(all_evidence), failed=research_failures,
+                 succeeded=len(all_evidence), failed=self._research_failed,
                  merged_parties=len(merged_all_parties),
                  merged_media=len(merged_affiliated_media))
 
-        # Phase 2: Judge all facts with sliding window concurrency
+        # Step 3: Judge all facts (thinking=on, slow)
+        self._set_phase("judging")
+
+        async def _judge(fact_text: str, evidence: list,
+                         merged_p: dict) -> dict:
+            """Judge a single fact given its evidence."""
+            result = await workflow.execute_activity(
+                judge_subclaim,
+                args=[claim_text, fact_text, evidence, merged_p],
+                start_to_close_timeout=timedelta(seconds=300),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+            # Update progress
+            self._judge_done += 1
+            self._sub_verdicts.append({
+                "fact": fact_text,
+                "verdict": result.get("verdict"),
+                "confidence": result.get("confidence"),
+                "evidence_count": len(result.get("evidence", [])),
+                "citations": len(result.get("citations", [])),
+            })
+            workflow.upsert_search_attributes([
+                SA_JUDGE_PROGRESS.value_set(
+                    f"{self._judge_done}/{self._fact_count}",
+                ),
+            ])
+            return result
+
         judge_semaphore = asyncio.Semaphore(MAX_CONCURRENT)
 
         async def _judge_with_limit(fact_text: str, evidence: list) -> dict:
@@ -242,7 +334,6 @@ class VerifyClaimWorkflow:
 
         # Filter out failures
         sub_results = []
-        judge_failures = 0
         for i, result in enumerate(judge_results):
             if isinstance(result, Exception):
                 fact_text, _ = all_evidence[i]
@@ -250,7 +341,7 @@ class VerifyClaimWorkflow:
                             "Judge failed for fact, skipping",
                             claim_id=claim_id, fact=fact_text,
                             error=str(result))
-                judge_failures += 1
+                self._judge_failed += 1
             else:
                 sub_results.append(result)
 
@@ -258,11 +349,12 @@ class VerifyClaimWorkflow:
         log.info(workflow.logger, MODULE, "judge_phase_done",
                  "Judge phase completed",
                  claim_id=claim_id, latency_ms=_judge_ms,
-                 succeeded=len(sub_results), failed=judge_failures)
+                 succeeded=len(sub_results), failed=self._judge_failed)
 
-        # Step 3: Synthesize all verdicts into final result
+        # Step 4: Synthesize all verdicts into final result
+        self._set_phase("synthesizing")
+
         if len(sub_results) == 1:
-            # Single fact — no synthesis needed, just use the verdict directly
             result = sub_results[0]
         else:
             result = await workflow.execute_activity(
@@ -272,6 +364,9 @@ class VerifyClaimWorkflow:
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
 
+        self._verdict = result.get("verdict", "")
+        self._confidence = result.get("confidence", 0.0)
+
         log.info(workflow.logger, MODULE, "verdict",
                  "Final verdict reached",
                  claim_id=claim_id,
@@ -279,7 +374,9 @@ class VerifyClaimWorkflow:
                  confidence=result.get("confidence"),
                  fact_count=len(atomic_facts))
 
-        # Step 4: Store the result
+        # Step 5: Store the result
+        self._set_phase("storing")
+
         await workflow.execute_activity(
             store_result,
             args=[claim_id, result],
@@ -287,13 +384,18 @@ class VerifyClaimWorkflow:
             retry_policy=RetryPolicy(maximum_attempts=3),
         )
 
-        # Step 5: Start next queued claim (if any)
-        # This ensures claims process sequentially - one at a time
+        # Step 6: Start next queued claim (if any)
         await workflow.execute_activity(
             start_next_queued_claim,
             start_to_close_timeout=timedelta(seconds=30),
             retry_policy=RetryPolicy(maximum_attempts=2),
         )
+
+        self._set_phase("complete")
+        workflow.upsert_search_attributes([
+            SA_VERDICT.value_set(self._verdict),
+            SA_CONFIDENCE.value_set(self._confidence),
+        ])
 
         log.info(workflow.logger, MODULE, "complete", "Verification complete",
                  claim_id=claim_id, verdict=result.get("verdict"),

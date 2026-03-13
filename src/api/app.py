@@ -91,6 +91,38 @@ async def lifespan(app: FastAPI):
     # Create DB tables if they don't exist
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+    # Migrate: add new nullable columns to existing tables
+    from sqlalchemy import text, inspect as sa_inspect
+    async with engine.begin() as conn:
+        def _migrate(sync_conn):
+            inspector = sa_inspect(sync_conn)
+            # Evidence table: new metadata columns
+            ev_cols = {c["name"] for c in inspector.get_columns("evidence")}
+            migrations = {
+                "title": "VARCHAR(512)",
+                "domain": "VARCHAR(256)",
+                "bias": "VARCHAR(64)",
+                "factual": "VARCHAR(64)",
+                "tier": "VARCHAR(64)",
+                "judge_index": "INTEGER",
+                "assessment": "VARCHAR(32)",
+                "is_independent": "BOOLEAN",
+                "key_point": "TEXT",
+            }
+            for col, dtype in migrations.items():
+                if col not in ev_cols:
+                    sync_conn.execute(text(
+                        f"ALTER TABLE evidence ADD COLUMN {col} {dtype}"
+                    ))
+            # Verdicts table: citations JSONB
+            v_cols = {c["name"] for c in inspector.get_columns("verdicts")}
+            if "citations" not in v_cols:
+                sync_conn.execute(text(
+                    "ALTER TABLE verdicts ADD COLUMN citations JSONB"
+                ))
+        await conn.run_sync(_migrate)
+
     log.info(logger, MODULE, "db_ready", "Database tables ready")
 
     # Bootstrap MBFC index from REST API if needed
