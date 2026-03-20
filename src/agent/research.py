@@ -931,17 +931,23 @@ async def _enrich_parties_from_mbfc(
     all_parties: list[str],
     affiliated_media: list[str],
 ) -> tuple[list[str], list[str]]:
-    """Expand MBFC ownership data via Wikidata to discover new interested parties.
+    """Check MBFC ownership for connections to existing interested parties.
 
     After await_ratings_parallel(), every seed domain has a cached MBFC rating
     with an 'ownership' field (e.g., "Owned by Rupert Murdoch's News Corporation").
     This function extracts owner names via SpaCy NER, then Wikidata-expands them
-    to discover their networks, media holdings, and family connections.
+    to check if they connect to EXISTING interested parties.
 
-    MBFC ownership is authoritative — all discoveries are added unconditionally
-    (unlike evidence NER which requires Wikidata overlap).
+    Overlap-gated: only adds to parties/media when an MBFC owner's Wikidata
+    graph intersects with the claim's known interested parties. This prevents
+    unrelated corporate trees (e.g., Thomson Reuters subsidiaries) from
+    polluting the parties list on claims that have nothing to do with them.
 
-    Runs BEFORE seed scoring so new parties/media influence conflict detection.
+    When overlap IS found, only the owner + their MEDIA HOLDINGS are added —
+    not all subsidiaries, board members, or unrelated orgs. The purpose is
+    conflict detection on news sources, not corporate graph exploration.
+
+    Runs BEFORE seed scoring so discovered media influence conflict detection.
 
     Returns new (all_parties, affiliated_media) lists — does NOT mutate inputs.
     """
@@ -984,6 +990,9 @@ async def _enrich_parties_from_mbfc(
              new_owners=new_owners[:10])
 
     # Wikidata-expand new owners in parallel, capped at 6
+    # Only add if owner's graph overlaps with existing interested parties
+    existing_parties_lower = {p.lower() for p in enriched_parties}
+
     async def _expand_owner(owner: str) -> None:
         try:
             result = await get_ownership_chain(owner)
@@ -992,39 +1001,41 @@ async def _enrich_parties_from_mbfc(
 
             connected = collect_all_connected_parties(result, skip_family_expanded=True)
 
-            # MBFC ownership is authoritative — add unconditionally
+            # Check if this owner connects to any existing interested party
+            all_connected_lower = {n.lower() for n in (
+                connected["people"] + connected["orgs"] + connected["media"]
+                + [owner]
+            )}
+            overlap = all_connected_lower & existing_parties_lower
+
+            if not overlap:
+                log.debug(logger, MODULE, "mbfc_owner_no_overlap",
+                          "MBFC owner has no connection to interested parties, skipping",
+                          owner=owner)
+                return
+
+            # Overlap found — this owner is connected to the claim's parties.
+            # Add the owner to all_parties for conflict detection.
             if owner not in enriched_parties:
                 enriched_parties.append(owner)
-            for person in connected["people"]:
-                if person not in enriched_parties:
-                    enriched_parties.append(person)
-            for org in connected["orgs"]:
-                if org not in enriched_parties:
-                    enriched_parties.append(org)
+
+            # Add media holdings only — these are the outlets we need to
+            # flag as conflicted. Not subsidiaries, not board members.
             for media in connected["media"]:
                 if media not in enriched_media:
                     enriched_media.append(media)
 
-            log.info(logger, MODULE, "mbfc_owner_expanded",
-                     "MBFC owner Wikidata-expanded",
+            log.info(logger, MODULE, "mbfc_owner_connected",
+                     "MBFC owner connects to interested party",
                      owner=owner,
-                     people=len(connected["people"]),
-                     media=len(connected["media"]),
-                     orgs=len(connected["orgs"]))
+                     overlap=list(overlap)[:5],
+                     media_added=len(connected["media"]))
         except Exception as e:
             log.warning(logger, MODULE, "mbfc_owner_expand_failed",
                         "MBFC owner Wikidata expansion failed",
                         owner=owner, error=str(e))
 
     await asyncio.gather(*[_expand_owner(o) for o in new_owners[:6]])
-
-    # Hard cap to prevent party explosion
-    MAX_ALL_PARTIES = 40
-    if len(enriched_parties) > MAX_ALL_PARTIES:
-        log.warning(logger, MODULE, "parties_capped",
-                    "Capping all_parties to prevent explosion",
-                    before=len(enriched_parties), after=MAX_ALL_PARTIES)
-        enriched_parties = enriched_parties[:MAX_ALL_PARTIES]
 
     log.info(logger, MODULE, "mbfc_enrichment_done",
              "MBFC→Wikidata enrichment complete",
@@ -1221,7 +1232,7 @@ async def research_claim(
     sub_claim: str,
     interested_parties: InterestedPartiesDict | None = None,
     max_steps: int = 38,
-    timeout_secs: int = 120,
+    timeout_secs: int = 300,
     categories: list[str] | None = None,
     seed_queries: list[str] | None = None,
 ) -> tuple[list[dict], InterestedPartiesDict]:
@@ -1246,7 +1257,7 @@ async def research_claim(
                    steps (pre_model + agent deciding no more tools).
         timeout_secs: Soft timeout in seconds. If the agent exceeds this,
                       we return whatever evidence was gathered so far.
-                      Default 120s (2 min).
+                      Default 300s (5 min).
         categories: Evidence-need categories from decompose (e.g. ["QUANTITATIVE",
                     "LEGISLATIVE"]). Determines SearXNG category routing for
                     seed queries. None defaults to ["GENERAL"].

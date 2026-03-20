@@ -658,6 +658,25 @@ a weakened version.
 to "nationwide", you've changed a falsifiable absolute into a defensible hedge. \
 Preserve the original scope exactly.
 
+15. EMBEDDED CONCLUSIONS — SEPARATE FACT FROM INFERENCE:
+   When a claim contains BOTH a factual assertion AND a causal/logical \
+conclusion drawn from it, decompose into separate subclaims: one for the \
+factual assertion, one for the conclusion.
+   The judge must evaluate the conclusion independently — otherwise a true \
+fact carries a false inference to a positive verdict.
+   BAD:  "Nuclear workers had lower cancer rates, proving low-level radiation \
+is safe" → 1 fact (bundles true stat with non-sequitur)
+   GOOD: → ["Nuclear workers had lower cancer rates than the general \
+population", "The lower cancer rates prove that low-level radiation exposure \
+is safe"] (judge can reject the causal leap independently)
+   BAD:  "Crime dropped 20% after the law passed, showing it works" → 1 fact
+   GOOD: → ["Crime dropped 20% after the law passed", "The drop in crime was \
+caused by the new law"] (correlation ≠ causation — judge evaluates separately)
+   TRIGGER WORDS: "proving", "showing", "demonstrating", "confirming", \
+"which means", "therefore", "thus", "hence", "so", "because of this".
+   When you see these words connecting a factual observation to a conclusion, \
+SPLIT. The factual observation may be true while the conclusion is false.
+
 SIMPLICITY GUIDANCE:
 - Simple factual claims stay as single facts
 - Complex claims with multiple entities/actions get multiple facts
@@ -1306,6 +1325,34 @@ For claims like "more than the next N combined" where the exact number \
 fluctuates by year/source: if the DIRECTION is clearly true and the claim \
 is in the right ballpark, use mostly_true. Reserve true for cases where \
 the specific comparison holds exactly against current data.
+
+ABSENCE-OF-EVIDENCE CLAIMS ("no evidence exists", "no X has ever Y"):
+These claims assert that something does NOT exist or has NEVER happened. \
+They require a different evaluation approach than positive assertions:
+1. Evaluate the QUALITY OF THE SEARCH, not just counter-examples. If \
+systematic reviews, meta-analyses, or authoritative bodies (WHO, CDC, NAS, \
+major medical associations) conclude no evidence exists for a link, that \
+conclusion IS evidence supporting the absence claim.
+2. A single disputed study with methodological concerns does NOT negate a \
+consensus of absence. Scientific consensus that "no causal link has been \
+established" means the absence claim is supported, not refuted.
+3. For historical universals ("no president has ever", "no country has"), \
+treat exhaustive, well-documented historical records as sufficient evidence. \
+If comprehensive records exist and show no instance, the absence claim is \
+supported. Tangentially related events (e.g., a "former" president being \
+convicted does not counter "no sitting president has been convicted") are \
+NOT counterexamples.
+4. The verdict for a SUPPORTED absence claim is "true" or "mostly_true" — \
+not "unverifiable." Absence claims become unverifiable only when the topic \
+itself lacks systematic investigation.
+
+VIRAL/CIRCULAR STATISTICS:
+When a specific statistic appears across many sources but all trace to the \
+same unverified original claim (no primary study, no government dataset, no \
+institutional measurement), treat it as unverified regardless of how many \
+secondary sources repeat it. Repetition is not verification. Ask: "Is there \
+a primary study or institutional dataset that independently measured this?" \
+If every source cites the same unverified figure, the claim is unverifiable.
 
 CITATION FORMAT: In your reasoning, cite evidence using [N] notation matching \
 the evidence numbers above (e.g., "Multiple sources [1][3] confirm..."). \

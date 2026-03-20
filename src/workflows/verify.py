@@ -214,7 +214,7 @@ class VerifyClaimWorkflow:
                 research_subclaim,
                 args=[fact_text, interested_parties,
                       fact_categories, fact_seed_queries],
-                start_to_close_timeout=timedelta(seconds=300),
+                start_to_close_timeout=timedelta(seconds=420),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
             # Update progress
@@ -360,7 +360,7 @@ class VerifyClaimWorkflow:
             result = await workflow.execute_activity(
                 synthesize_verdict,
                 args=[claim_text, sub_results, thesis_info],
-                start_to_close_timeout=timedelta(seconds=180),
+                start_to_close_timeout=timedelta(seconds=300),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
 
