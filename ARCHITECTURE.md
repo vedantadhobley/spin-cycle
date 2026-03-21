@@ -26,7 +26,7 @@ There are three major technologies in play, each doing a different job. Understa
 LangChain is the **toolbox**. It provides:
 
 - **`ChatOpenAI`** — the LLM client that talks to the LLM server's OpenAI-compatible API. Every LLM call in the project goes through this class. It handles message formatting, streaming, structured output, and tool calling.
-- **LangChain tools** — standardised interfaces for external services. Serper (Google), DuckDuckGo, Wikipedia, SearXNG, Brave, and page fetching are all wrapped as LangChain tools with a common `.invoke()` / `.ainvoke()` API.
+- **LangChain tools** — standardised interfaces for external services. Serper (Google), DuckDuckGo, Wikipedia, Brave, and page fetching are all wrapped as LangChain tools with a common `.invoke()` / `.ainvoke()` API.
 - **Message types** — `SystemMessage`, `HumanMessage`, `AIMessage`, `ToolMessage`. These are the primitives that make up an LLM conversation.
 
 LangChain does NOT handle orchestration, retries, scheduling, or state persistence. It's the building blocks.
@@ -84,14 +84,15 @@ The key insight: **LangGraph runs inside Temporal activities, not instead of the
 
 ```
 Temporal Workflow
-└── Activity: research_subclaim (retryable, timeout: 300s)
+└── Activity: research_subclaim (retryable, timeout: 420s)
     ├── Phase 1a: Programmatic seed search (no LLM, ~3-8s)
     │   ├── claim_category.py routes LLM-written queries + base queries
-    │   └── Fire to DuckDuckGo/SearXNG/Wikipedia concurrently (~30-50 URLs)
+    │   └── Fire to Serper/DuckDuckGo/Wikipedia concurrently (~30-50 URLs)
     ├── Phase 1b: MBFC + party enrichment + ranking (~15-50s cold, ~0s cached)
     │   ├── _collect_domains() + await_ratings_parallel() — bounded MBFC lookups
     │   ├── _enrich_parties_from_mbfc() — SpaCy NER extracts owners from MBFC
-    │   │   ownership strings → Wikidata-expand (parallel, cap 6) → new parties/media
+    │   │   ownership strings → Wikidata-expand (parallel, cap 6) → overlap-gated:
+    │   │   only adds owner + media holdings when graph intersects existing parties
     │   ├── score_url() — quality scoring with real MBFC data + enriched parties
     │   ├── media_matching.py — conflict detection (affiliated media + ownership)
     │   ├── CONFLICT_PENALTY (-15) for conflicted sources
@@ -99,7 +100,7 @@ Temporal Workflow
     ├── Phase 2: LangGraph ReAct Agent (seeds pre-loaded as prior searches)
     │   ├── pre_model_hook (progress: tool calls, URLs, tier/conflict coverage)
     │   ├── LLM call (sees seed results + progress, decides what to fetch/follow-up)
-    │   ├── DuckDuckGo/SearXNG search (filtered by source_filter)
+    │   ├── Serper/DuckDuckGo search (filtered by source_filter)
     │   ├── Wikipedia search, Page fetcher (full article reads)
     │   └── ... (8-12 tool calls, then agent stops)
     └── Phase 3: Programmatic enrichment
@@ -243,6 +244,7 @@ These patterns are appended to `DECOMPOSE_SYSTEM` at runtime.
 | **7. Extract underlying question** | Loaded phrasing → factual question being asked | ClaimDecomp (Chen et al. EMNLP 2022) |
 | **8. Entity disambiguation** | Add minimum context for unique identification | Molecular Facts (Gunjal et al. 2024) |
 | **9. Operationalize comparisons** | Define comparison groups by shared trait, not vague similarity | — |
+| **15. Embedded conclusions** | Separate factual assertions from causal/logical inferences drawn from them. Trigger words: "proving", "showing", "therefore", etc. | — |
 
 The **decomposition checklist** now includes action directives (not just detection prompts) for vagueness operationalization, implicature extraction, speech act separation, causation preservation, and a new decontextualization quality check.
 
@@ -299,7 +301,7 @@ This is where the LangGraph ReAct agent runs. For each **atomic fact**:
 5. Loop back to pre_model → agent. Progress note updates each iteration
 6. LLM reads results + progress → decides if it needs more → calls another tool or stops
 7. Typically: 8-12 tool calls per sub-claim, 38 max agent steps
-8. Agent timeout: 120s (soft), 300s (Temporal hard limit)
+8. Agent timeout: 300s (soft), 420s (Temporal hard limit)
 9. Max steps: 38 (each tool call costs ~3 steps: pre_model + agent + tools)
 
 **Streaming evidence collection:** The agent uses `astream()` with `stream_mode="updates"` instead of `ainvoke()`. Messages are collected incrementally as the agent works. If the agent hits its step limit (`GraphRecursionError`) or times out, we keep ALL evidence gathered up to that point instead of losing everything. This replaced a direct `ainvoke()` call that would return nothing on interruption.
@@ -315,9 +317,11 @@ The research agent uses **thinking=off**. The ReAct loop is pure tool-routing �
 - `page_fetcher` — Fetches and extracts text from URLs found in search results.
 
 **Programmatic enrichment (NOT agent tools):**
-- **MBFC → Wikidata enrichment** (runs BEFORE seed ranking) — After `await_ratings_parallel()` warms the MBFC cache, `_enrich_parties_from_mbfc()` extracts PERSON/ORG names from MBFC ownership strings via SpaCy NER (e.g., "Owned by Rupert Murdoch's News Corporation" → ["Rupert Murdoch", "News Corporation"]), then Wikidata-expands them in parallel (capped at 6). MBFC ownership is authoritative — all discoveries are added unconditionally. New parties/media influence conflict detection in subsequent seed ranking.
+- **MBFC → Wikidata enrichment** (runs BEFORE seed ranking) — After `await_ratings_parallel()` warms the MBFC cache, `_enrich_parties_from_mbfc()` extracts PERSON/ORG names from MBFC ownership strings via SpaCy NER (e.g., "Owned by Rupert Murdoch's News Corporation" → ["Rupert Murdoch", "News Corporation"]), then Wikidata-expands them in parallel (capped at 6). **Overlap-gated:** only adds when an MBFC owner's Wikidata graph intersects existing interested parties. When overlap is found, only the owner + their media holdings are added — not all subsidiaries, board members, or unrelated orgs. This prevents unrelated corporate trees (e.g., Thomson Reuters subsidiaries) from polluting the parties list on claims that have nothing to do with them. New parties/media influence conflict detection in subsequent seed ranking.
 - **LegiScan** (runs after the agent finishes) — US legislation search. If the subclaim matches any legislation, appends bill details (sponsors, status, history), roll call votes (individual member positions), and bill text (the actual legislative language). The bill text enables the judge to detect "poison pills" — provisions slipped into otherwise popular bills that explain otherwise puzzling voting patterns. Requires `LEGISCAN_API_KEY`.
-- **Evidence NER → Wikidata enrichment** (runs after LegiScan) — `_enrich_parties_from_evidence_content()` runs SpaCy NER on concatenated evidence article content, then Wikidata-expands new entities in parallel (capped at 8). Unlike MBFC enrichment, evidence mentions are only added if their Wikidata graph **overlaps** with existing interested parties (less authoritative).
+- **Evidence NER → Wikidata enrichment** (runs after LegiScan) — `_enrich_parties_from_evidence_content()` runs SpaCy NER on concatenated evidence article content, then Wikidata-expands new entities in parallel (capped at 8). **Overlap-gated** (same as MBFC enrichment): only adds if their Wikidata graph overlaps with existing interested parties.
+
+**Design principle — overlap-gated enrichment:** Enrichment flows FROM claim parties OUTWARD, never from random sources inward. Both MBFC and evidence NER enrichment only add entities when their Wikidata graph intersects the claim's existing interested parties. This prevents unrelated corporate trees from polluting the parties list — e.g., Thomson Reuters subsidiaries appearing on a claim about Taiwan sovereignty because Reuters happened to be a seed source. When overlap IS found, only the owner + their media holdings are added (for conflict detection on news sources), not all subsidiaries, board members, or unrelated orgs.
 
 **Return type:** `research_claim()` returns `tuple[list[dict], InterestedPartiesDict]` — both the evidence and enriched interested parties. The workflow merges enriched parties across all sub-claims and passes the merged set to the judge phase.
 
@@ -414,6 +418,17 @@ The judge uses a **7-level verdict scale** with spirit-vs-substance guidance (th
 
 If there's no evidence, we short-circuit to "unverifiable" without calling the LLM.
 
+**Special claim-type guidance in the judge prompt:**
+
+| Guidance | What it handles |
+|----------|----------------|
+| **Quantitative claims** | Direction-based partial-data reasoning — if evidence supports the direction but exact figure is missing, use mostly_true not unverifiable |
+| **Approximate comparatives** | Rankings that fluctuate by year/source — if direction is correct and claim is in the right ballpark, mostly_true |
+| **Absence-of-evidence claims** | "No evidence exists", "no X has ever Y" — evaluate quality of search, not just counter-examples. Systematic reviews/authoritative body consensus IS evidence supporting absence. Supported absence → true/mostly_true, not unverifiable |
+| **Viral/circular statistics** | Statistics repeated across many sources but all tracing to the same unverified original — repetition is not verification, treat as unverifiable |
+| **Regulatory anomaly detection** | 5 patterns: carve-out suspicion, enforcement asymmetry, regulatory capture, letter vs spirit, precedent inconsistency |
+| **Rhetorical trap detection** | Cherry-picking, correlation≠causation, definition games |
+
 ### Step 4: synthesize_verdict (thesis-aware synthesis)
 
 **File:** `src/activities/verify_activities.py`
@@ -457,7 +472,7 @@ Evidence records with `source_type` not in the DB enum (`web`, `wikipedia`, `new
 
 ### Workflow Orchestration (flat pipeline)
 
-The workflow processes claims in a flat pipeline — decompose once, then research ALL facts (Phase 1), then judge ALL facts (Phase 2), then synthesize. Research and judge are separate phases to prevent slow judge calls (thinking=on) from starving faster research agents (thinking=off).
+The workflow processes claims in a flat pipeline — decompose once, then research ALL facts (Phase 1), then judge ALL facts (Phase 2), then synthesize. Research and judge are separate phases to prevent longer judge calls (structured rubric evaluation) from starving faster research agents.
 
 ```
 VerifyClaimWorkflow
@@ -487,7 +502,7 @@ VerifyClaimWorkflow
 │       └── LLM verdict (6-level scale)
 │
 ├── IF 1 fact: skip synthesis, use judgment directly
-├── IF 2+ facts: synthesize_verdict (60s timeout, thesis_info passed)
+├── IF 2+ facts: synthesize_verdict (300s timeout, thesis_info passed)
 │
 ├── store_result (30s timeout)
 └── start_next_queued_claim (30s timeout)
@@ -495,7 +510,7 @@ VerifyClaimWorkflow
 
 Key properties:
 - **Flat, not recursive** — one decompose call produces flat facts + thesis. Follows SAFE/FActScore.
-- **Separate research + judge phases** — research all facts first (thinking=off, fast), then judge all (thinking=on, slow). Prevents mutual starvation.
+- **Separate research + judge phases** — research all facts first, then judge all. Both use thinking=off. Separated to prevent the longer judge calls (structured rubric evaluation) from starving faster research agents.
 - **Sliding window concurrency** — semaphore-based, not batch-based. As one task finishes, the next starts immediately.
 - **MAX_FACTS = 10** — caps decomposition output to prevent runaway processing.
 - **MAX_CONCURRENT = 2** — matched to GPU `--parallel 2`. Each agent gets a dedicated inference slot.

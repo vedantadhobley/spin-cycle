@@ -5,19 +5,18 @@ Flat pipeline — no recursion:
   1. Decompose claim into atomic facts (2 LLM calls: normalize + extract)
      — each fact gets categories, seed_queries from the LLM
      — interested parties expanded via Wikidata (programmatic)
-  2. Research all facts (separate phase, thinking=off — fast)
+  2. Research all facts (separate phase)
      — full interested_parties dict passed for conflict detection
-     — MBFC ownership → Wikidata enrichment discovers new parties/media
-     — evidence NER → Wikidata enrichment discovers connected entities
+     — MBFC ownership → Wikidata enrichment (overlap-gated)
+     — evidence NER → Wikidata enrichment (overlap-gated)
      — enriched parties merged across sub-claims for judge phase
-  3. Judge all facts (separate phase, thinking=on — slow)
+  3. Judge all facts (separate phase)
      — receives merged interested parties from all research sub-claims
   4. Synthesize all verdicts into a final result
   5. Store result + start next queued claim
 
-Research and judge are SEPARATE PHASES to prevent slow judge calls
-(thinking=on, generating thousands of tokens) from starving the
-faster research agents (thinking=off).
+Research and judge are SEPARATE PHASES to prevent longer judge calls
+(structured rubric evaluation) from starving the faster research agents.
 
 Follows Google's SAFE (NeurIPS 2024) and FActScore:
 extract all facts in one pass, verify each independently, aggregate.
