@@ -122,13 +122,16 @@ class VerifyClaimWorkflow:
         workflow.upsert_search_attributes([SA_PHASE.value_set(phase)])
 
     @workflow.run
-    async def run(self, claim_id: str | None, claim_text: str) -> dict:
+    async def run(self, claim_id: str | None, claim_text: str,
+                  speaker: str | None = None) -> dict:
         """Run the verification pipeline.
 
         Args:
             claim_id: Existing claim UUID from the database, or None.
                       When None, the workflow creates the claim record itself.
             claim_text: The claim to verify.
+            speaker: Optional name of the person making the claim.
+                     Automatically added as an interested party.
         """
         self._claim_text = claim_text
 
@@ -152,7 +155,7 @@ class VerifyClaimWorkflow:
 
         decomposition = await workflow.execute_activity(
             decompose_claim,
-            args=[claim_text],
+            args=[claim_text, speaker],
             start_to_close_timeout=timedelta(seconds=180),
             retry_policy=RetryPolicy(maximum_attempts=3),
         )
@@ -212,7 +215,7 @@ class VerifyClaimWorkflow:
             result = await workflow.execute_activity(
                 research_subclaim,
                 args=[fact_text, interested_parties,
-                      fact_categories, fact_seed_queries],
+                      fact_categories, fact_seed_queries, speaker],
                 start_to_close_timeout=timedelta(seconds=420),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
@@ -294,7 +297,7 @@ class VerifyClaimWorkflow:
             """Judge a single fact given its evidence."""
             result = await workflow.execute_activity(
                 judge_subclaim,
-                args=[claim_text, fact_text, evidence, merged_p],
+                args=[claim_text, fact_text, evidence, merged_p, speaker],
                 start_to_close_timeout=timedelta(seconds=300),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )

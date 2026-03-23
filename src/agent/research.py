@@ -746,6 +746,8 @@ async def _prefetch_seed_pages(
     _t0 = _time.monotonic()
 
     # --- Select candidates: tiered first, then remaining top-ranked ---
+    # Skip conflicted sources — don't waste pre-fetch slots on pages that
+    # just quote interested parties. Independent sources get priority.
     seen_urls: set[str] = set()
     tiered: list[dict] = []
     untiered: list[dict] = []
@@ -755,6 +757,8 @@ async def _prefetch_seed_pages(
         if not url or url in seen_urls:
             continue
         if is_blocked(url):
+            continue
+        if seed.get("_conflict_flags"):
             continue
         seen_urls.add(url)
 
@@ -1235,6 +1239,7 @@ async def research_claim(
     timeout_secs: int = 300,
     categories: list[str] | None = None,
     seed_queries: list[str] | None = None,
+    speaker: str | None = None,
 ) -> tuple[list[dict], InterestedPartiesDict]:
     """Run the research agent to gather evidence for a sub-claim.
 
@@ -1332,11 +1337,20 @@ async def research_claim(
     # full articles from the best sources without spending tool calls.
     prefetch_messages, prefetched_urls = await _prefetch_seed_pages(seed_results)
 
-    seed_messages = _build_seed_messages(seed_results)
+    # Cap conflicted seeds shown to the agent — independent sources should
+    # dominate what the agent sees so it doesn't spend tool calls on pages
+    # that just quote interested parties.
+    MAX_CONFLICTED_SEEDS = 5
+    independent_seeds = [s for s in seed_results if not s.get("_conflict_flags")]
+    conflicted_seeds = [s for s in seed_results if s.get("_conflict_flags")]
+    agent_seeds = independent_seeds + conflicted_seeds[:MAX_CONFLICTED_SEEDS]
+    seed_messages = _build_seed_messages(agent_seeds)
 
     log.info(logger, MODULE, "seed_complete",
              "Seed phase complete, starting agent",
              seed_results=len(seed_results),
+             agent_seeds=len(agent_seeds),
+             conflicted_hidden=len(conflicted_seeds) - min(len(conflicted_seeds), MAX_CONFLICTED_SEEDS),
              seed_messages=len(seed_messages),
              prefetched=len(prefetched_urls),
              prefetched_urls=prefetched_urls)
@@ -1350,7 +1364,10 @@ async def research_claim(
     try:
         agent = build_research_agent(wikidata_context)
         input_msg = HumanMessage(
-            content=RESEARCH_USER.format(sub_claim=sub_claim)
+            content=RESEARCH_USER.format(
+                sub_claim=sub_claim,
+                speaker_line=f"\nSpeaker: {speaker}" if speaker else "",
+            )
         )
 
         async def _run_stream():

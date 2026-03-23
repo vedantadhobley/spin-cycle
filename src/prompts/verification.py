@@ -392,9 +392,12 @@ subjective value judgments with no institutional assessor ("is bad", "is wrong")
 
 4. COREFERENCE RESOLUTION
    Replace pronouns and anaphora with their referents using context from the claim.
-   - "He said it was..." → "[Speaker name] said [specific thing] was..."
    - "this policy" → "[the specific policy name]"
    - Only resolve when the referent is clear from the claim text
+   - When a Speaker is provided, use it ONLY to resolve first-person references \
+("my", "our", "we", "I") to the speaker's name. Do NOT reframe the claim as \
+"[Speaker] stated that..." — the speaker is metadata, not part of the claim. \
+We verify the CONTENT, not whether the speaker said it.
 
 5. REFERENCE GROUNDING
    Anchor vague references where the claim provides enough context.
@@ -444,7 +447,7 @@ Return ONLY the JSON object. No markdown, no explanation, no wrapping.\
 
 NORMALIZE_USER = """\
 Normalize this claim into neutral, researchable language.
-
+{speaker_line}
 Claim: {claim_text}
 
 Return ONLY the JSON object.\
@@ -909,7 +912,7 @@ Return ONLY the JSON object. No markdown, no explanation, no wrapping.\
 
 DECOMPOSE_USER = """\
 Decompose this claim into verifiable atomic facts.
-
+{speaker_line}
 Claim: {claim_text}
 
 Extract ALL distinct verifiable assertions, including:
@@ -917,6 +920,12 @@ Extract ALL distinct verifiable assertions, including:
 - Hidden presuppositions (triggered by "started", "stopped", "again", etc.)
 - Causal claims (A caused B → verify A, verify B, verify causation)
 - Attributions ("X said Y" → verify X said it AND verify Y)
+
+When a Speaker is provided above, the claim is a DIRECT QUOTE from that person. \
+Do NOT create sub-claims about whether the speaker said it — we already know they \
+did. Verify the CONTENT of what they said. However, if the claim itself contains \
+an embedded attribution ("Person A said Person B did X"), you should still verify \
+that embedded attribution normally.
 
 But DO NOT pad with trivial entailments like "X exists" or "X has a Y".
 Each fact should be independently verifiable and substantively different.
@@ -1094,7 +1103,7 @@ When you have finished, write a brief summary of what you found.\
 
 RESEARCH_USER = """\
 Find evidence about this claim:
-
+{speaker_line}
 "{sub_claim}"
 
 Seed searches have already been run — you can see their results in the \
@@ -1211,6 +1220,10 @@ Identify the 3-5 most relevant evidence items. For each, assess:
 - Is this source INDEPENDENT from the claim subject? False if: source IS \
 the claim subject, quotes the claim subject, or has ownership ties. A news \
 outlet reporting what Entity X said about itself is NOT independent.
+- When a Speaker is provided, any evidence that merely reports the speaker's \
+own statements is NOT independent — it is just amplifying the original claim. \
+Independent evidence must come from a separate source with its own data \
+(e.g., satellite imagery, foreign government records, independent audits).
 
 Evidence hierarchy:
   Primary documents (legislation, data, court filings) > Independent \
@@ -1237,7 +1250,10 @@ genuinely_mixed, leans_contradicts, clearly_contradicts, insufficient)
 STEP 4 — ASSESS PRECISION
 How precise is the claim vs the evidence? Check these:
 - Attribution ("X said Y"): Did X speak/write those words on record? If yes, \
-attribution is correct — even if X credited someone else or paraphrased.
+attribution is correct — even if X credited someone else or paraphrased. \
+However, when a Speaker is provided, the speaker's own statements are the \
+CLAIM ITSELF — do not treat news coverage of the speaker's words as evidence \
+that the claim is true. Verify the underlying facts, not the attribution.
 - Rhetorical quantifiers ("virtually every," "nearly all"): Verify DIRECTION. \
 Did it happen to the overwhelming majority? Slight imprecision doesn't flip.
 - Understatement: Real figure HIGHER than claimed = claim understates truth = \
@@ -1404,7 +1420,7 @@ Return ONLY the JSON object. No markdown, no explanation, no wrapping.\
 JUDGE_USER = """\
 Judge this sub-claim using the 5-step rubric. Base your evaluation ONLY on \
 the evidence below. Do not use your own knowledge.
-
+{speaker_line}
 Original claim (for context): {claim_text}
 
 Sub-claim to judge: {sub_claim}

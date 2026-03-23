@@ -139,6 +139,7 @@ async def submit_claim(
         text=body.text,
         source_url=body.source,
         source_name=body.source_name,
+        speaker=body.speaker,
         status=initial_status,
     )
     session.add(claim)
@@ -154,7 +155,7 @@ async def submit_claim(
     else:
         await temporal.start_workflow(
             VerifyClaimWorkflow.run,
-            args=[claim_id, body.text],
+            args=[claim_id, body.text, body.speaker],
             id=f"verify-{claim_id}",
             task_queue=TASK_QUEUE,
         )
@@ -196,6 +197,7 @@ async def submit_claims_batch(
             text=item.text,
             source_url=item.source,
             source_name=item.source_name,
+            speaker=item.speaker,
             status=initial_status,
         )
         session.add(claim)
@@ -207,7 +209,7 @@ async def submit_claims_batch(
         if initial_status == "pending":
             await temporal.start_workflow(
                 VerifyClaimWorkflow.run,
-                args=[claim_id, item.text],
+                args=[claim_id, item.text, item.speaker],
                 id=f"verify-{claim_id}",
                 task_queue=TASK_QUEUE,
             )
@@ -274,6 +276,7 @@ async def get_claim(
         status=claim.status,
         source=claim.source_url,
         source_name=claim.source_name,
+        speaker=claim.speaker,
         verdict=claim.verdict.verdict if claim.verdict else None,
         confidence=claim.verdict.confidence if claim.verdict else None,
         reasoning=claim.verdict.reasoning if claim.verdict else None,
@@ -318,6 +321,7 @@ async def list_claims(
                 status=c.status,
                 source=c.source_url,
                 source_name=c.source_name,
+                speaker=c.speaker,
                 verdict=c.verdict.verdict if c.verdict else None,
                 confidence=c.verdict.confidence if c.verdict else None,
                 reasoning=c.verdict.reasoning if c.verdict else None,

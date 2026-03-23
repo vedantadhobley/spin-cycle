@@ -69,6 +69,7 @@ async def _kickstart_queue(temporal: TemporalClient):
 
         claim_id = str(claim.id)
         claim_text = claim.text
+        claim_speaker = claim.speaker
 
         # Update status and start workflow
         claim.status = "pending"
@@ -76,7 +77,7 @@ async def _kickstart_queue(temporal: TemporalClient):
 
         await temporal.start_workflow(
             VerifyClaimWorkflow.run,
-            args=[claim_id, claim_text],
+            args=[claim_id, claim_text, claim_speaker],
             id=f"verify-{claim_id}",
             task_queue=TASK_QUEUE,
         )
@@ -120,6 +121,12 @@ async def lifespan(app: FastAPI):
             if "citations" not in v_cols:
                 sync_conn.execute(text(
                     "ALTER TABLE verdicts ADD COLUMN citations JSONB"
+                ))
+            # Claims table: speaker column
+            c_cols = {c["name"] for c in inspector.get_columns("claims")}
+            if "speaker" not in c_cols:
+                sync_conn.execute(text(
+                    "ALTER TABLE claims ADD COLUMN speaker VARCHAR(256)"
                 ))
         await conn.run_sync(_migrate)
 

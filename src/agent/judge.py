@@ -161,6 +161,7 @@ async def judge(
     sub_claim: str,
     evidence: list[dict],
     interested_parties: InterestedPartiesDict,
+    speaker: str | None = None,
 ) -> dict:
     """Evaluate evidence and return a verdict.
 
@@ -242,6 +243,7 @@ async def judge(
                 claim_text=claim_text,
                 sub_claim=sub_claim,
                 evidence_text=full_evidence,
+                speaker_line=f"\nSpeaker: {speaker}" if speaker else "",
             ),
             schema=JudgeOutput,
             semantic_validator=validate_judge,

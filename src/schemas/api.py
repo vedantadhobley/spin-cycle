@@ -10,6 +10,7 @@ class ClaimSubmit(BaseModel):
     text: str = Field(..., description="The claim text to verify")
     source: Optional[str] = Field(None, description="URL where the claim was found")
     source_name: Optional[str] = Field(None, description="Name of the source (e.g., 'BBC News')")
+    speaker: Optional[str] = Field(None, description="Person or entity making the claim")
 
     @field_validator("text")
     @classmethod
@@ -85,6 +86,7 @@ class VerdictResponse(BaseModel):
     status: Literal["queued", "pending", "processing", "verified", "flagged"]
     source: Optional[str] = None
     source_name: Optional[str] = None
+    speaker: Optional[str] = None
     verdict: Optional[Literal["true", "mostly_true", "mixed", "mostly_false", "false", "unverifiable"]] = None
     confidence: Optional[float] = None
     reasoning: Optional[str] = None

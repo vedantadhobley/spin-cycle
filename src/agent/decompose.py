@@ -399,7 +399,7 @@ async def _validate_subclaim_quality(
     return deduped, llm_issues
 
 
-async def decompose(claim_text: str) -> dict:
+async def decompose(claim_text: str, speaker: str | None = None) -> dict:
     """Full decompose pipeline: normalize → extract → quality validate → NER → Wikidata.
 
     Pipeline:
@@ -409,16 +409,26 @@ async def decompose(claim_text: str) -> dict:
     3. Quality validator checks for semantic duplicates and group enumeration
        (LLM call, ~6-8s). If issues found, retries decompose once with feedback.
     4. SpaCy NER augments entity extraction from claim text
-    5. Code expands interested parties via Wikidata (programmatic, cached)
+    5. If speaker provided, add them as a direct interested party
+    6. Code expands interested parties via Wikidata (programmatic, cached)
        - Corporate: CEO, founder, chairperson, parent/subsidiary
        - Family: spouse, parents, children, siblings + 2-hop in-laws
        - Media: ownership ties to news outlets
+
+    Args:
+        claim_text: The claim to decompose.
+        speaker: Optional name of the person making the claim. Automatically
+                 added as a direct interested party and Wikidata-expanded.
 
     Returns:
         {"facts": [{"text", "categories", "seed_queries"}, ...],
          "thesis_info": {"thesis", "normalized_claim", "structure", ...}}
     """
-    log.info(logger, MODULE, "start", "Decomposing claim", claim=claim_text)
+    log.info(logger, MODULE, "start", "Decomposing claim",
+             claim=claim_text, speaker=speaker)
+
+    # Build speaker context line for prompts
+    speaker_line = f"\nSpeaker: {speaker}" if speaker else ""
 
     # Step 1: Normalize claim
     norm_output = None
@@ -426,7 +436,8 @@ async def decompose(claim_text: str) -> dict:
     try:
         norm_output = await invoke_llm(
             system_prompt=NORMALIZE_SYSTEM.format(current_date=today),
-            user_prompt=NORMALIZE_USER.format(claim_text=claim_text),
+            user_prompt=NORMALIZE_USER.format(
+                claim_text=claim_text, speaker_line=speaker_line),
             schema=NormalizeOutput,
             semantic_validator=validate_normalize,
             max_retries=1,
@@ -452,7 +463,8 @@ async def decompose(claim_text: str) -> dict:
     try:
         output = await invoke_llm(
             system_prompt=decompose_system_with_patterns,
-            user_prompt=DECOMPOSE_USER.format(claim_text=normalized),
+            user_prompt=DECOMPOSE_USER.format(
+                claim_text=normalized, speaker_line=speaker_line),
             schema=DecomposeOutput,
             semantic_validator=validate_decompose,
             max_retries=2,
@@ -471,7 +483,8 @@ async def decompose(claim_text: str) -> dict:
                 # LLM found semantic dupes or group enumeration — retry decompose
                 feedback = "\n".join(f"- {issue}" for issue in llm_issues)
                 retry_prompt = (
-                    DECOMPOSE_USER.format(claim_text=normalized)
+                    DECOMPOSE_USER.format(
+                        claim_text=normalized, speaker_line=speaker_line)
                     + f"\n\nYOUR PREVIOUS OUTPUT HAD STRUCTURAL ISSUES:\n{feedback}\n"
                     "Fix these issues in your new output."
                 )
@@ -526,6 +539,18 @@ async def decompose(claim_text: str) -> dict:
             log.warning(logger, MODULE, "ner_fallback",
                        "SpaCy NER failed, continuing with LLM parties only",
                        error=str(e))
+
+        # Add speaker as direct interested party (if provided and not already present)
+        if speaker:
+            existing_lower = {
+                p.lower()
+                for p in raw_parties.get("direct", []) + raw_parties.get("institutional", [])
+            }
+            if speaker.lower() not in existing_lower:
+                raw_parties["direct"].append(speaker)
+                log.info(logger, MODULE, "speaker_added",
+                         "Speaker added as interested party",
+                         speaker=speaker)
 
         # Expand via Wikidata (programmatic — adds executives, family, media)
         expanded_parties = await expand_interested_parties(raw_parties)

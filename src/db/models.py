@@ -19,6 +19,7 @@ class Claim(Base):
     text = Column(Text, nullable=False)
     source_url = Column(String(2048), nullable=True)
     source_name = Column(String(256), nullable=True)
+    speaker = Column(String(256), nullable=True)
     status = Column(
         Enum("queued", "pending", "processing", "verified", "flagged", name="claim_status"),
         default="pending",
