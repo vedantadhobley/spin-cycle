@@ -362,7 +362,7 @@ async def _validate_subclaim_quality(
             ),
             schema=SubclaimQualityCheck,
             max_retries=1,
-            temperature=0.3,
+            temperature=0,
             max_tokens=16384,
             activity_name="subclaim_quality",
         )

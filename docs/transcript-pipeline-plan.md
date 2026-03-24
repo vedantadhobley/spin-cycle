@@ -36,14 +36,16 @@ transcript_claims
 ├── claim_type              VARCHAR(64)
 ├── worth_checking          BOOLEAN NOT NULL DEFAULT TRUE
 ├── skip_reason             VARCHAR(64)        — why not worth checking
-├── argument_summary        TEXT               — what argument does this support?
-├── supports_argument       BOOLEAN            — is this fact deployed to persuade?
 ├── checkable               BOOLEAN            — could independent data confirm/deny?
 ├── checkability_rationale  TEXT               — why checkable or not
-├── consequence_if_wrong    VARCHAR(16)        — high/low/none
-├── consequence_rationale   TEXT               — why this consequence level
+├── is_restatement          BOOLEAN            — true if speaker repeats earlier claim
 ├── segment_gist            TEXT               — what the speaker is arguing in this segment
 └── created_at              TIMESTAMPTZ
+
+Note: DB columns `argument_summary`, `supports_argument`, `consequence_if_wrong`,
+and `consequence_rationale` still exist for backward compatibility with older
+extractions but are no longer populated. The extraction LLM no longer produces
+these fields — editorial judgment was removed in favor of programmatic filtering.
 ```
 
 ALL claims are stored (including skipped ones). `worth_checking=FALSE` claims
@@ -193,16 +195,16 @@ claim processing. For transcript extraction, we need similar queue management:
 
 - [x] Transcript fetcher + parser (`src/transcript/fetcher.py`)
 - [x] Claim extraction with segment batching (`src/transcript/extractor.py`)
-- [x] Rubric-based extraction (checkable, consequence, argument_summary, segment_gist)
+- [x] Simplified extraction (checkable, checkability_rationale, context_insertions, is_restatement, segment_gist)
 - [x] Temporal workflow with per-batch activities (`src/workflows/extract_transcript.py`)
 - [x] API endpoint `POST /transcripts` (`src/api/routes/transcripts.py`)
 - [x] Transcript storage with cleaned display text (`store_transcript` activity)
-- [x] Transcript claims storage — ALL claims with full rationale (`store_transcript_claims`)
-- [x] DB models: `TranscriptRecord`, `TranscriptClaim` (with extraction rubric columns)
+- [x] Transcript claims storage — ALL claims with extraction metadata (`store_transcript_claims`)
+- [x] DB models: `TranscriptRecord`, `TranscriptClaim`
 - [x] Semaphore-based concurrency (2 parallel batches)
 - [x] Overlap context at batch boundaries (3 segments)
 - [x] Coverage retry (temperature=0.3 on <50% segment coverage)
-- [x] Programmatic consistency enforcement on worth_checking
+- [x] Programmatic worth_checking: checkable AND NOT restatement AND NOT future_prediction
 - [x] Wire `claim_id` FK when submitting transcript claims to verification
 - [x] Transcript status tracking (`queued` → `extracting` → `verifying` → `complete`)
 - [x] One-pipeline-at-a-time constraint via `finish_transcript_and_start_next`

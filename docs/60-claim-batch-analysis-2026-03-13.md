@@ -489,15 +489,15 @@ variance. Options:
 
 ## Implementation Order
 
-| # | Fix | Claims Fixed | Effort | Risk |
-|---|-----|-------------|--------|------|
-| 1 | Decompose: qualifier preservation + embedded conclusions | P1, N3 | Low | Low |
-| 2 | Judge: explicit numbers rule | P2 | Low | Low |
-| 3 | Judge: absence-of-evidence framework | N1, N2 | Medium | Medium |
-| 4 | Judge: dose-response vs overall-rate distinction | R2, N3 | Low | Low |
-| 5 | Judge: contested-category calibration | 3 debatable | Low | Medium |
-| 6 | Judge: viral statistics source-criticality | R1 | Medium | Low |
-| 7 | Decompose: non-determinism mitigation | Hubble variance | Medium-high | Medium |
+| # | Fix | Claims Fixed | Effort | Risk | Status |
+|---|-----|-------------|--------|------|--------|
+| 1 | Decompose: qualifier preservation + embedded conclusions | P1, N3 | Low | Low | **DONE** — decompose rules 14+15 |
+| 2 | Judge: explicit numbers rule | P2 | Low | Low | **OPEN** |
+| 3 | Judge: absence-of-evidence framework | N1, N2 | Medium | Medium | **OPEN** |
+| 4 | Judge: dose-response vs overall-rate distinction | R2, N3 | Low | Low | **OPEN** |
+| 5 | Judge: contested-category calibration | 3 debatable | Low | Medium | **OPEN** |
+| 6 | Judge: viral statistics source-criticality | R1 | Medium | Low | **OPEN** |
+| 7 | Decompose: non-determinism mitigation | Hubble variance | Medium-high | Medium | **OPEN** |
 
 Total prompt additions: ~600 words across decompose + judge prompts.
 Priorities 1-4 are low-risk, high-impact. Priority 5-6 are calibration tuning.

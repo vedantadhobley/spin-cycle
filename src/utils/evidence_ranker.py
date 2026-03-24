@@ -247,8 +247,18 @@ def score_evidence(ev: dict) -> tuple[float, dict]:
     # Content richness (0-30)
     breakdown["content"] = _content_score(content)
 
+    # Agent relevance: if the research agent listed this URL in its
+    # RELEVANT SOURCES section, boost it. If the agent explicitly chose
+    # NOT to list it (agent_relevant=False), penalize it so domain-quality
+    # alone can't save an off-topic article.
+    if "agent_relevant" in ev:
+        if ev["agent_relevant"]:
+            breakdown["agent_relevant"] = 15
+        else:
+            breakdown["agent_relevant"] = -20
+
     total = sum(breakdown.values())
-    return total, breakdown
+    return max(total, 0), breakdown
 
 
 def rank_and_select(

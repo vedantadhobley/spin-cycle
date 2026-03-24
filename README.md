@@ -97,8 +97,9 @@ decompose_claim       Normalize → Decompose → Quality Validate (2-4 LLM call
                         If issues found, retries decompose once with feedback
                       Each fact gets categories + LLM-written seed queries
                       Guided by 15-category linguistic pattern taxonomy
-                        + 9 extraction rules (decontextualize, entity disambig.,
-                          operationalize comparisons)
+                        + 15 extraction rules (decontextualize, entity disambig.,
+                          operationalize comparisons, polarity/qualifier
+                          preservation, embedded conclusion splitting)
                       SpaCy NER augments entity extraction
                       Wikidata expands parties → ownership, media, family
     ↓
@@ -322,7 +323,7 @@ Nine tables in PostgreSQL, all with UUID primary keys (except cache tables which
 | `verdicts` | Overall claim verdict | verdict, confidence, reasoning, reasoning_chain (JSONB), synthesis_rubric (JSONB) |
 | `interested_parties` | Entities with conflicts of interest | entity_name, role (direct/institutional/affiliated_media), source (llm/ner/wikidata) |
 | `transcripts` | Stored transcript records | url, title, date, speakers, word_count, display_text, status |
-| `transcript_claims` | Claims extracted from transcripts | claim_text, original_quote, speaker, timestamp, worth_checking, skip_reason, extraction rationale fields |
+| `transcript_claims` | Claims extracted from transcripts | claim_text, original_quote, speaker, timestamp, worth_checking, skip_reason, checkable, is_restatement |
 | `source_ratings` | Cached MBFC ratings | domain (PK), bias, factual_reporting, ownership, country |
 | `wikidata_cache` | Cached Wikidata entity data | entity_name (PK), qid, relationships (JSONB), 7-day TTL |
 
@@ -403,7 +404,7 @@ spin-cycle/
 │   │
 │   ├── transcript/                 # Transcript processing
 │   │   ├── fetcher.py              # Rev.com transcript fetcher + parser
-│   │   └── extractor.py            # Segment-batched claim extraction with rubric
+│   │   └── extractor.py            # Segment-batched claim extraction (programmatic filtering)
 │   │
 │   └── db/
 │       ├── models.py               # SQLAlchemy models (9 tables)

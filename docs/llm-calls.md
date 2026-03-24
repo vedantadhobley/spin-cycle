@@ -43,9 +43,9 @@ Thinking: disabled (`enable_thinking=False`). Max tokens: 16384 (all calls).
 **When**: Processing a transcript (not used for direct claim submissions).
 
 **Files**:
-- Prompts: `src/prompts/extraction.py` — `EXTRACTION_SYSTEM` (L18-139, ~4.5K chars), `EXTRACTION_USER` (L145-199, ~1.8K chars)
-- Invoker: `src/transcript/extractor.py:422-436`
-- Schema: `src/schemas/llm_outputs.py` — `ExtractionOutput`
+- Prompts: `src/prompts/extraction.py` — `EXTRACTION_SYSTEM` (L19-135), `EXTRACTION_USER` (L141-189)
+- Invoker: `src/transcript/extractor.py:370-385`
+- Schema: `src/transcript/extractor.py` — `ExtractionOutput` (L74), `SegmentExtraction` (L66), `ExtractedClaim` (L50)
 - Validator: `src/llm/validators.py` — `validate_extraction()`
 
 **Temperature**: 0.0 initial, 0.3 on retry. **Retries**: 1 (only if <50% segment coverage).
@@ -55,9 +55,9 @@ Thinking: disabled (`enable_thinking=False`). Max tokens: 16384 (all calls).
 ### What it does
 
 Processes transcript segments, identifying every factual assertion. For each,
-assesses checkability (could data confirm/deny this?), consequence (would the
-public care if wrong?), and worth_checking (checkable AND high consequence).
-Resolves pronouns/ambiguous references via square bracket insertion.
+assesses checkability (could independent data confirm/deny this?) and resolves
+pronouns/ambiguous references via square bracket insertion. No editorial
+judgment at extraction time — filtering is entirely programmatic.
 
 ### Structured output
 
@@ -74,20 +74,19 @@ ExtractionOutput
       speaker: str
       timestamp: str
       claim_type: str          ← quantitative|historical|causal|comparative|attribution|other
-      argument_summary: str?   ← "speaker cites this to argue that..."
-      supports_argument: bool
       checkable: bool
       checkability_rationale: str
-      consequence_if_wrong: str ← high|low|none
-      consequence_rationale: str
       context_insertions: list[str] ← FORCING: each bracket listed
-      worth_checking: bool     ← FORCING: checkable AND consequence=high
-      skip_reason: str?
+      is_restatement: bool
 ```
+
+Fields computed programmatically (not in LLM output):
+- `worth_checking: bool` — checkable AND NOT is_restatement AND NOT future_prediction
+- `skip_reason: str?` — "not_checkable", "restatement", or "future_prediction"
 
 ### Key rules
 
-- **5-step process**: segment_gist → identify assertions → assess each →
+- **5-step process**: segment_gist → identify assertions → checkability →
   bracket insertion → restatement detection
 - **Bracket insertion**: Resolve pronouns (he/she/they/their/it/we/our/I),
   ambiguous noun phrases ("the company", "the bill"). Do NOT bracket
@@ -95,16 +94,16 @@ ExtractionOutput
 - **Bracket examples**: "Their naval building was destroyed" → "[Iran's]
   naval building was destroyed". "We will defend our allies" →
   "[The United States] will defend [its] allies"
-- **worth_checking gate**: Programmatically enforced — must be
-  (checkable=true AND consequence_if_wrong="high")
+- **worth_checking**: Computed programmatically — `checkable AND NOT
+  is_restatement AND NOT future_prediction`. No editorial judgment.
 - **Future predictions**: Regex-detected post-LLM → forced to
-  worth_checking=false
+  checkable=False, worth_checking=False
 
-### Post-LLM enforcement (extractor.py:226-266)
+### Post-LLM enforcement (extractor.py:210-234)
 
-- `argument_summary` null → `supports_argument` forced False
-- Future prediction regex → worth_checking=False, skip_reason="future_prediction"
-- worth_checking recalculated from (checkable AND consequence_if_wrong=="high")
+- Future prediction regex → checkable=False, worth_checking=False, skip_reason="future_prediction"
+- is_restatement → worth_checking=False, skip_reason="restatement"
+- not checkable → worth_checking=False, skip_reason="not_checkable"
 
 ---
 
@@ -216,7 +215,7 @@ DecomposeOutput
 14. No injection of "overwhelming" or modifiers not in original
 15. Verification target must ask whether something IS true, not whether someone SAID it
 
-### Post-LLM pipeline (decompose.py:542-626)
+### Post-LLM pipeline (decompose.py:542-600+)
 
 1. Programmatic dedup (trivial: punctuation, case, whitespace)
 2. Quality check (Call 4) — semantic dupes + group enumeration
@@ -264,11 +263,11 @@ SubclaimQualityCheck
 **When**: For each atomic fact from decompose.
 
 **Files**:
-- Prompts: `src/prompts/verification.py` — `RESEARCH_SYSTEM` (L1043-1203, ~8.8K chars), `RESEARCH_USER` (L1205-1227, ~1K chars)
+- Prompts: `src/prompts/verification.py` — `RESEARCH_SYSTEM` (L1043-1204, ~8.8K chars), `RESEARCH_USER` (L1206-1227, ~1K chars)
 - Agent builder: `src/agent/research.py` — `build_research_agent()`
 - Entry point: `src/agent/research.py` — `research_claim()`
 
-**Temperature**: 0.1. **Max steps**: 38 (~12 tool calls). **Timeout**: 300s.
+**Temperature**: 0. **Max steps**: 47 (~15 tool calls). **Timeout**: 420s.
 
 **Placeholders**: `{current_date}`, `{claim_date_line}`, `{speaker_line}`, `{sub_claim}`
 
@@ -282,8 +281,15 @@ SubclaimQualityCheck
 5. `_prefetch_seed_pages()`: Fetch full content from top seeds (up to 10, TIER 1/2 first via `_source_tier`)
 6. `_build_seed_messages()`: Package as synthetic AIMessage+ToolMessage pairs. Each seed annotated with `Source tier: {tier_label}` line and `Conflict: {flags}` line (if any) so the agent sees source quality inline.
 
-**Phase 2 — LangGraph ReAct agent** (~60-90s):
+**Phase 2 — LangGraph ReAct agent** (~60-120s):
 Agent starts with seed results in history, spends budget on follow-up searches and fetches.
+Must list `RELEVANT SOURCES:` in final summary — URLs it considers on-topic.
+Evidence items are tagged with `agent_relevant=True/False` based on this list.
+
+Stopping criteria:
+- Both directions with 2+ independent sources each, OR
+- 8 searches + 2 counter-searches with one-direction evidence, OR
+- 7 searches with nothing relevant found
 
 **Phase 3 — Programmatic enrichment**:
 - `_enrich_with_legislation()`: LegiScan search for matching bills/votes
@@ -307,9 +313,14 @@ Agent starts with seed results in history, spends budget on follow-up searches a
 - When reputable sources conflict, gather BOTH
 - Prefer recent sources for current claims
 
-### Evidence relevance filter (programmatic, post-agent)
+### Evidence quality pipeline (programmatic, post-agent)
 
-`_filter_irrelevant_evidence()` in `research.py` — drops off-topic evidence.
+**Agent relevance tagging** (`extract_evidence()` in `research.py`):
+Agent lists `RELEVANT SOURCES:` URLs in its final summary. Evidence items
+matching those URLs get `agent_relevant=True`; others get `agent_relevant=False`.
+Used in `score_evidence()` as +15 (relevant) / -20 (not listed) scoring modifier.
+
+**Irrelevance filter** (`_filter_irrelevant_evidence()` in `research.py`):
 Two checks, **both must fail** for an item to be dropped:
 
 1. **Date check**: If claim_date available, extract claim_year. If evidence's
@@ -328,7 +339,7 @@ fails both checks when researching a 2026 Iran claim → dropped.
 **When**: For each sub-claim after research completes.
 
 **Files**:
-- Prompts: `src/prompts/verification.py` — `JUDGE_SYSTEM` (L1254-1519, ~15K chars), `JUDGE_USER` (L1521-1533, ~341 chars)
+- Prompts: `src/prompts/verification.py` — `JUDGE_SYSTEM` (L1255-1520, ~15K chars), `JUDGE_USER` (L1522-1535, ~341 chars)
 - Invoker: `src/agent/judge.py:242-260`
 - Schema: `src/schemas/llm_outputs.py` — `JudgeOutput`
 - Validator: `src/llm/validators.py` — `validate_judge()`
@@ -351,9 +362,9 @@ fails both checks when researching a 2026 Iran claim → dropped.
 ```
 JudgeOutput
   claim_interpretation: str       ← FORCING: charitable restatement
-  key_evidence: list[KeyEvidenceItem]
+  key_evidence: list[EvidenceAssessment]
     source_index: int             ← 1-indexed into evidence list
-    assessment: str               ← supports|contradicts|neutral
+    assessment: str               ← supports|contradicts|mixed|neutral
     is_independent: bool          ← FORCING: from interested parties?
     key_point: str                ← 1-2 sentence finding
   evidence_direction: str         ← FORCING: clearly_supports|leans_supports|genuinely_mixed|leans_contradicts|clearly_contradicts|insufficient
@@ -492,7 +503,7 @@ as an unknown domain. Max 4 gov items per 20 evidence slots.
 **When**: Only if decompose produced >1 fact. Skipped for single-fact claims.
 
 **Files**:
-- Prompts: `src/prompts/verification.py` — `SYNTHESIZE_SYSTEM` (L1540-1660, ~5.3K chars), `SYNTHESIZE_USER` (L1662-1673, ~237 chars)
+- Prompts: `src/prompts/verification.py` — `SYNTHESIZE_SYSTEM` (L1541-1661, ~5.3K chars), `SYNTHESIZE_USER` (L1663-1674, ~237 chars)
 - Invoker: `src/agent/synthesize.py:87-104`
 - Schema: `src/schemas/llm_outputs.py` — `SynthesizeOutput`
 - Validator: `src/llm/validators.py` — `validate_synthesize()`
@@ -548,7 +559,7 @@ Typically 10-20 unique items after deduplication across sub-claims.
 
 | # | Stage | Prompt Constants | Chars | Temp | Schema | Validator |
 |---|-------|-----------------|-------|------|--------|-----------|
-| 1 | Extract | EXTRACTION_SYSTEM + _USER | ~6.3K | 0→0.3 | ExtractionOutput | validate_extraction |
+| 1 | Extract | EXTRACTION_SYSTEM + _USER | ~5.2K | 0→0.3 | ExtractionOutput | validate_extraction |
 | 2 | Normalize | NORMALIZE_SYSTEM + _USER | ~6.8K | 0 | NormalizeOutput | validate_normalize |
 | 3 | Decompose | DECOMPOSE_SYSTEM + _USER + LINGUISTIC_PATTERNS + CHECKLIST | ~54.7K | 0→0.1 | DecomposeOutput | validate_decompose |
 | 4 | Quality Check | _SUBCLAIM_QUALITY_SYSTEM + _USER | ~477 | 0.3 | SubclaimQualityCheck | — |
@@ -556,4 +567,4 @@ Typically 10-20 unique items after deduplication across sub-claims.
 | 5 | Judge | JUDGE_SYSTEM + _USER | ~15.4K | 0 | JudgeOutput | validate_judge |
 | 6 | Synthesize | SYNTHESIZE_SYSTEM + _USER | ~5.6K | 0 | SynthesizeOutput | validate_synthesize |
 
-**Total prompt text**: ~99K chars across all stages (decompose is largest at ~55K due to 15 extraction rules + linguistic patterns + worked examples).
+**Total prompt text**: ~98K chars across all stages (decompose is largest at ~55K due to 15 extraction rules + linguistic patterns + worked examples).

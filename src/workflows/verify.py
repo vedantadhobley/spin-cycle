@@ -233,7 +233,7 @@ class VerifyClaimWorkflow:
                 args=[fact_text, interested_parties,
                       fact_categories, fact_seed_queries, speaker,
                       claim_date, claim_text],
-                start_to_close_timeout=timedelta(seconds=420),
+                start_to_close_timeout=timedelta(seconds=540),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
             # Update progress

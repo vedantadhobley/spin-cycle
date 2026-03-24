@@ -606,14 +606,14 @@ DISTINGUISHING RELATED FINDINGS:
 
 ## Implementation Order
 
-| # | Fix | Claims Fixed | Effort | Risk |
-|---|-----|-------------|--------|------|
-| 1 | Decompose: polarity + qualifier preservation rules | B1, B2 | Low (prompt edit) | Low |
-| 2 | Judge: temporal prediction logic | C1 | Low (prompt edit) | Low |
-| 3 | Judge: calibration rules (contested, boundary, precision) | C2, E1, E2, E3 | Low (prompt edit) | Medium — may overcorrect |
-| 4 | Judge: explicit numbers + distinguishing findings | D1, D2 | Low (prompt edit) | Low |
-| 5 | Decompose: duplicate subclaim detection (punctuation) | E1 (dupes) | Low (code) | Low |
-| 6 | Parse failures: investigate + fix | A1, A2, A3 | Medium (diagnosis needed) | Unknown |
+| # | Fix | Claims Fixed | Effort | Risk | Status |
+|---|-----|-------------|--------|------|--------|
+| 1 | Decompose: polarity + qualifier preservation rules | B1, B2 | Low (prompt edit) | Low | **DONE** — rules 13-15 |
+| 2 | Judge: temporal prediction logic | C1 | Low (prompt edit) | Low | **DONE** — verified in Mar 13 run |
+| 3 | Judge: calibration rules (contested, boundary, precision) | C2, E1, E2, E3 | Low (prompt edit) | Medium — may overcorrect | **DONE** |
+| 4 | Judge: explicit numbers + distinguishing findings | D1, D2 | Low (prompt edit) | Low | **OPEN** |
+| 5 | Decompose: duplicate subclaim detection (punctuation) | E1 (dupes) | Low (code) | Low | **DONE** — Mar 13 shows 0 dupes |
+| 6 | Parse failures: investigate + fix | A1, A2, A3 | Medium (diagnosis needed) | Unknown | **DONE** — Mar 13 shows 0 parse failures |
 
 Total prompt additions: ~500 words across decompose + judge prompts.
 No synthesize changes needed (issues originate upstream).

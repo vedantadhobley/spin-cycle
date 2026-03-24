@@ -105,8 +105,10 @@ Temporal Workflow
     │   └── ... (8-12 tool calls, then agent stops)
     └── Phase 3: Programmatic enrichment
         ├── LegiScan (US legislation: bill details, roll call votes, bill text)
-        └── _enrich_parties_from_evidence_content() — SpaCy NER on evidence
-            articles → Wikidata-expand (parallel, cap 8) → add if graph overlaps
+        ├── _enrich_parties_from_evidence_content() — SpaCy NER on evidence
+        │   articles → Wikidata-expand (parallel, cap 8) → add if graph overlaps
+        └── _filter_irrelevant_evidence() — date proximity + entity anchor check
+            (both must fail to drop; catches off-topic evidence)
     Returns: (evidence, enriched_interested_parties)
 ```
 
@@ -354,16 +356,16 @@ The critical constraint: **"Do NOT use your own knowledge."** The LLM must reaso
 
 **Evidence and source quality scoring** (`src/utils/evidence_ranker.py`) serves two purposes:
 
-1. **Seed ranking** (research phase): `score_url()` scores ~80-100 raw seed URLs by MBFC + TLD heuristics. `tier_label()` produces human-readable labels ("TIER 1 (government)", "TIER 2 (mostly factual)"). Used by `_rank_and_filter_seeds()` to select top 30 seeds.
+1. **Seed ranking** (research phase): `score_url()` scores ~80-100 raw seed URLs by MBFC + TLD heuristics (gov TLD = 0 bonus). `tier_label()` produces human-readable labels ("TIER 1 (very high factual)", "TIER 2 (mostly factual)", "government" for unrated gov). `source_tier()` returns int 0-3 for code logic. Used by `_rank_and_filter_seeds()` to select top 30 seeds.
 
 2. **Judge capping** (judge phase): `score_evidence()` scores full evidence items (URL quality + source type + content richness). `rank_and_select()` caps to 20 items with domain diversity.
 
-URL-only scoring (`score_url` — used for seeds, max 55):
+URL-only scoring (`score_url` — used for seeds, max 40):
 
 | Component | Range | Signals |
 |-----------|-------|---------|
-| MBFC factual | 0-30 | very-high=30, high=24, mostly-factual=16, unrated=4, unrated-gov=20 |
-| Gov/institutional TLD | 0-15 | .gov/.mil=15, .edu=10 |
+| MBFC factual | 0-30 | very-high=30, high=24, mostly-factual=16, unrated=4, unrated-gov=4 |
+| Gov/institutional TLD | 0-10 | .gov/.mil=0 (no bonus), .edu=10 |
 | MBFC credibility | 0-10 | high=10, medium=5, unrated=2 |
 
 Full evidence scoring (`score_evidence` — used for judge, adds source_type + content):
@@ -372,9 +374,9 @@ Full evidence scoring (`score_evidence` — used for judge, adds source_type + c
 |-----------|-------|---------|
 | Source type | 0-30 | Wikipedia=30, LegiScan=28 (by URL), web=10 |
 | Content richness | 0-30 | >2000 chars=30, >800=20, >200=10; <80 chars filtered out pre-ranking |
-| + URL quality | 0-55 | (from score_url above) |
+| + URL quality | 0-40 | (from score_url above) |
 
-Domain diversity cap (max 3 items per domain) ensures at least 7 unique source domains. Political bias is deliberately NOT a scoring signal. Unrated sources get low defaults (4/30) — unrated government domains get 20/30. All scoring uses `get_source_rating_sync()` — cache-only, zero network calls.
+Domain diversity cap (max 3 items per domain) ensures at least 7 unique source domains. Gov/mil category cap: max 4 gov items per 20 evidence slots (excess removed, backfilled with non-gov). Political bias is deliberately NOT a scoring signal. Unrated sources get low defaults (factual=4, credibility=2) — unrated government domains score the same as unknown (no TLD bonus, GOV_TLD_SCORE=0). Gov sources must earn rank via MBFC rating. All scoring uses `get_source_rating_sync()` — cache-only, zero network calls.
 
 **Pre-judge enrichment** is a lightweight cleanup pass. The heavy lifting (MBFC ownership → Wikidata, evidence NER → Wikidata) now happens in the research phase. The judge receives merged interested parties from all research sub-claims.
 
@@ -489,7 +491,7 @@ VerifyClaimWorkflow
 │       ├── Phase 1a: Seed search (~30-50 URLs)
 │       ├── Phase 1b: MBFC await → MBFC→Wikidata enrichment → rank/filter → top 30
 │       ├── Phase 2: ReAct agent (seeds pre-loaded, 8-12 tool calls)
-│       └── Phase 3: LegiScan enrichment + evidence NER→Wikidata enrichment
+│       └── Phase 3: LegiScan enrichment + evidence NER→Wikidata enrichment + relevance filter
 │   Merge enriched parties across all sub-claims (union of all_parties + affiliated_media)
 │
 ├── JUDGE PHASE — sliding window, MAX_CONCURRENT=2 (receives merged parties)
@@ -723,12 +725,9 @@ Transcript tables:
 │ display_text         │       │ claim_type               │
 │ status               │       │ worth_checking (bool)    │
 │ created_at           │       │ skip_reason              │
-└──────────────────────┘       │ argument_summary         │
-                               │ supports_argument        │
-                               │ checkable                │
+└──────────────────────┘       │ checkable                │
                                │ checkability_rationale   │
-                               │ consequence_if_wrong     │
-                               │ consequence_rationale    │
+                               │ is_restatement           │
                                │ segment_gist             │
                                │ created_at               │
                                └──────────────────────────┘
@@ -921,7 +920,7 @@ Stored transcripts with cleaned display text. One row per unique URL.
 
 ### Table: `transcript_claims`
 
-Claims extracted from transcripts, linking extraction to verification. Stores ALL claims including skipped ones with full extraction rationale.
+Claims extracted from transcripts, linking extraction to verification. Stores ALL claims including skipped ones with extraction metadata.
 
 | Column | Type | Constraints | Description |
 |--------|------|-------------|-------------|
@@ -934,15 +933,14 @@ Claims extracted from transcripts, linking extraction to verification. Stores AL
 | `timestamp` | `VARCHAR(32)` | NOT NULL | "MM:SS" timestamp |
 | `timestamp_secs` | `FLOAT` | NOT NULL | Timestamp in seconds |
 | `claim_type` | `VARCHAR(64)` | nullable | quantitative, historical, causal, comparative, attribution, other |
-| `worth_checking` | `BOOLEAN` | NOT NULL, default TRUE | Whether this claim was sent for verification |
-| `skip_reason` | `VARCHAR(64)` | nullable | Why not worth checking (not_checkable, low_consequence, etc.) |
-| `argument_summary` | `TEXT` | nullable | What argument does citing this fact support? |
-| `supports_argument` | `BOOLEAN` | nullable | Is this fact deployed to persuade? |
+| `worth_checking` | `BOOLEAN` | NOT NULL, default TRUE | Whether this claim was sent for verification (computed: checkable AND NOT restatement AND NOT future_prediction) |
+| `skip_reason` | `VARCHAR(64)` | nullable | Why not worth checking (not_checkable, restatement, future_prediction) |
 | `checkable` | `BOOLEAN` | nullable | Could independent data confirm or deny? |
 | `checkability_rationale` | `TEXT` | nullable | Why checkable or not |
-| `consequence_if_wrong` | `VARCHAR(16)` | nullable | high, low, or none |
-| `consequence_rationale` | `TEXT` | nullable | Why this consequence level |
+| `is_restatement` | `BOOLEAN` | nullable | True if speaker repeats a claim already extracted |
 | `segment_gist` | `TEXT` | nullable | What the speaker is arguing in this segment |
+
+Note: DB columns `argument_summary`, `supports_argument`, `consequence_if_wrong`, and `consequence_rationale` still exist for backward compatibility with older extractions but are no longer populated by the simplified extraction pipeline.
 | `created_at` | `TIMESTAMPTZ` | default now() | When the claim was extracted |
 
 **Relationships:**
@@ -1264,7 +1262,7 @@ Config: `~/workspace/monitor/promtail/promtail.yml`
 | Component | Status | Details |
 |-----------|--------|---------|
 | Docker infrastructure | **Done** | 7 containers, health checks, volume persistence |
-| PostgreSQL schema | **Done** | 9 tables: claims (+ decompose rubric), sub_claims (+ categories, judge_rubric), evidence (+ quality metadata), verdicts (+ synthesis_rubric), interested_parties, transcripts, transcript_claims (+ extraction rationale), source_ratings, wikidata_cache |
+| PostgreSQL schema | **Done** | 9 tables: claims (+ decompose rubric), sub_claims (+ categories, judge_rubric), evidence (+ quality metadata), verdicts (+ synthesis_rubric), interested_parties, transcripts, transcript_claims (+ extraction metadata), source_ratings, wikidata_cache |
 | FastAPI API | **Done** | POST/GET claims, health check, lifespan management |
 | Temporal workflows | **Done** | VerifyClaimWorkflow (7 activities) + ExtractTranscriptWorkflow (8 activities), flat pipeline, thesis-aware synthesis |
 | Temporal worker | **Done** | Registers 2 workflows + 15 activities, max_concurrent_activities=2, structured logging |
@@ -1285,8 +1283,8 @@ See [ROADMAP.md](ROADMAP.md) for the full prioritised improvement plan. Key next
 
 | Component | Status | Details |
 |-----------|--------|--------|
-| Transcript extraction | **Done** | ExtractTranscriptWorkflow: fetch → batch extract → finalize → verify. Segment-batched with overlap context, rubric-based extraction, all claims stored with rationale |
-| Data persistence | **Done** | All intermediate data persisted: decompose rubric, judge rubric, synthesis rubric, interested parties, extraction rationale. Enables retrospective debugging |
+| Transcript extraction | **Done** | ExtractTranscriptWorkflow: fetch → batch extract → finalize → verify. Segment-batched with overlap context, simplified extraction (checkable + brackets + restatement), programmatic worth_checking, all claims stored |
+| Data persistence | **Done** | All intermediate data persisted: decompose rubric, judge rubric, synthesis rubric, interested parties, extraction metadata. Enables retrospective debugging |
 | Grafana dashboard | **Done** | Pipeline KPIs, verdict trends, LLM latency, evidence quality, transcript metrics, error tracking. Loki datasource |
 | Rubric-based prompts | **Done** | Judge (5-step) and Synthesize (4-step) rubrics with structured output. Decompose (2-step) with categories and seed queries |
 | Alembic migrations | **Planned** | Unblocks future schema changes. Currently using `_migrate()` with column-existence checks |
@@ -1472,7 +1470,7 @@ spin-cycle/
 │   │
 │   ├── transcript/                 # Transcript processing
 │   │   ├── fetcher.py              # Rev.com transcript fetcher + parser
-│   │   └── extractor.py            # Segment-batched claim extraction with rubric
+│   │   └── extractor.py            # Segment-batched claim extraction (programmatic filtering)
 │   │
 │   └── db/                         # Database layer
 │       ├── models.py               # SQLAlchemy models (9 tables)

@@ -385,9 +385,10 @@ def validate_synthesize_consistency(output: SynthesizeOutput) -> list[str]:
    can be condensed to ~60% of current size by removing redundant field
    explanations in surrounding prose. Keep all examples — just trim padding.
 
-3. **Keep all 12 extraction rules** verbatim — these are from the
-   literature (Pryzant et al., VeriScore, SAFE, AmbiFC, FActScore) and
-   were carefully tested. DO NOT MODIFY.
+3. **Keep all 15 extraction rules** verbatim — rules 1-12 from the
+   literature (Pryzant et al., VeriScore, SAFE, AmbiFC, FActScore),
+   rules 13-15 added to fix polarity inversion, qualifier injection,
+   and embedded-conclusion issues. DO NOT MODIFY.
 
 4. **Keep linguistic patterns file** — but compress "How to handle"
    sections that duplicate what extraction rules already say.
@@ -397,7 +398,7 @@ def validate_synthesize_consistency(output: SynthesizeOutput) -> list[str]:
 
 ### What NOT to Change in Decompose
 
-- The 12 extraction rules are sacred — from academic literature
+- The 15 extraction rules are sacred — rules 1-12 from academic literature, 13-15 from pipeline testing
 - The seed query rules (especially rule 8)
 - The evidence-need categories
 - The interested parties analysis structure

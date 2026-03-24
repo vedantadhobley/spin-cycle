@@ -225,6 +225,9 @@ class ExtractTranscriptWorkflow:
 
         claims = finalize_result["worth_checking"]
         all_claims_for_storage = finalize_result["all_claims"]
+        # Indices into all_claims_for_storage that survived finalization
+        # (filtering + dedup). These map 1:1 to `claims` (worth_checking).
+        surviving_indices: list[int] = finalize_result.get("surviving_indices", [])
 
         self._claim_count = len(claims)
         self._claims = claims
@@ -247,19 +250,26 @@ class ExtractTranscriptWorkflow:
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
 
-            # Filter tc_ids to only worth_checking ones for claim creation
-            # tc_ids are in the same order as all_claims_for_storage
-            worth_checking_tc_ids = [
-                tc_id for tc_id, c in zip(tc_ids, all_claims_for_storage)
-                if c.get("worth_checking", True)
-            ]
+            # Use surviving_indices to pick the tc_ids that correspond
+            # exactly to the worth_checking claims (post-filter, post-dedup).
+            # This avoids the FK cross-wiring bug where dedup removes a claim
+            # from worth_checking but not from tc_ids.
+            if surviving_indices:
+                worth_checking_tc_ids = [tc_ids[i] for i in surviving_indices]
+            else:
+                # Fallback for older finalize_extraction without surviving_indices
+                worth_checking_tc_ids = [
+                    tc_id for tc_id, c in zip(tc_ids, all_claims_for_storage)
+                    if c.get("worth_checking", True)
+                ]
 
             # Step 4: Batch-create Claim records and link FKs (only for worth_checking)
             self._set_phase("submitting")
 
             log.info(workflow.logger, MODULE, "creating_claims",
                      "Batch-creating Claim records for verification",
-                     claim_count=len(claims))
+                     claim_count=len(claims),
+                     tc_id_count=len(worth_checking_tc_ids))
 
             claim_ids = await workflow.execute_activity(
                 create_claims_for_transcript,

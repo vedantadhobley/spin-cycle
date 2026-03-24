@@ -1173,7 +1173,7 @@ and look for the same information from a reputable publication instead.
 Do NOT rely on third-party fact-check sites (Snopes, PolitiFact, etc.). \
 We are building independent verification — find the PRIMARY sources yourself.
 
-IMPORTANT — you have a budget of 8-12 tool calls total. Seed searches have \
+IMPORTANT — you have a budget of 10-15 tool calls total. Seed searches have \
 already gathered ~30 curated URLs ranked by source quality. Be efficient:
 1. Review seed results — they are ranked by quality with annotations:
    - "Source tier: TIER 1/2" indicates source credibility
@@ -1193,14 +1193,27 @@ you have gathered so far — unique sources, domains, search engines used. \
 Use this to avoid repeating searches and to identify gaps in your coverage.
 
 You are done when:
-- You have evidence from BOTH directions (supporting + contradicting), OR
-- You have done 5 searches and evidence only points one way, OR
-- You have done 4 searches and found nothing (claim may be unverifiable)
+- You have evidence from BOTH directions (supporting + contradicting) with \
+at least 2 independent sources per direction, OR
+- You have done 8 searches and evidence only points one way — but FIRST \
+you MUST have tried at least 2 counter-searches (queries specifically \
+designed to find evidence for the opposite conclusion), OR
+- You have done 7 searches and found nothing relevant (claim may be \
+unverifiable) — exhaust different query angles before giving up
 
 Do NOT make up evidence. Only report what the tools actually return.
 Do NOT evaluate whether the claim is true or false — just gather evidence.
 
-When you have finished, write a brief summary of what you found.\
+When you have finished, write your summary in this format:
+
+RELEVANT SOURCES:
+- [URL] — one-line description of what this source says about the claim
+- [URL] — ...
+(List ONLY sources that directly address the claim. Exclude search results \
+that came back but turned out to be about a different topic, a different \
+event, or are otherwise not relevant to this specific claim.)
+
+SUMMARY: Brief description of what the evidence shows.\
 """
 
 RESEARCH_USER = """\

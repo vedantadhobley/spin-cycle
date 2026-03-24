@@ -30,7 +30,7 @@ A working end-to-end claim verification pipeline with **flat fact extraction + t
 - Results stored in Postgres with sub-claims, evidence, and reasoning chains
 - **Full intermediate data persistence** — decompose rubric (thesis, structure, claim_analysis), judge rubric (5-step assessment), synthesis rubric (thesis_survives, subclaim_weights), interested parties table. All stored in DB for debugging and frontend display.
 - Temporal orchestrates everything with retries and durability (15 activities, 2 workflows)
-- **Transcript extraction pipeline** — fetches Rev.com transcripts, extracts verifiable claims via rubric-based segment batching (30 segments/batch, 3-segment overlap), stores ALL claims (checked + skipped) with full extraction rationale. One-pipeline-at-a-time constraint matches LLM server capacity.
+- **Transcript extraction pipeline** — fetches Rev.com transcripts, extracts verifiable claims via segment batching (word-count-based batches, 3-segment overlap), stores ALL claims (checked + skipped) with extraction metadata. Programmatic filtering: checkable AND NOT restatement AND NOT future_prediction. One-pipeline-at-a-time constraint matches LLM server capacity.
 - **Transcript → verification bridge** — extracted claims auto-submit to verification queue with FK linking `transcript_claims → claims → sub_claims → evidence → verdicts`
 - **Grafana dashboard** — provisioned Loki dashboard (28 panels) for pipeline status, verdict distribution, LLM latency, evidence quality, transcript progress, error monitoring
 - Production-grade structured JSON logging (for Grafana Loki, pretty format for dev) — INFO for pipeline milestones, DEBUG for per-query tool noise
@@ -122,7 +122,7 @@ Switched from `ainvoke()` to `astream()` with `stream_mode="updates"`. Messages 
 
 Full programmatic source quality scoring pipeline:
 
-1. **`score_url(url)`** in `evidence_ranker.py` — scores any URL using cached MBFC data + TLD heuristics (gov/edu/mil). Zero network calls. Max score: 55.
+1. **`score_url(url)`** in `evidence_ranker.py` — scores any URL using cached MBFC data + TLD heuristics (gov/edu/mil). Zero network calls. Max score: 40 (factual=30 + credibility=10; gov TLD=0).
 2. **`tier_label(url)`** — human-readable "TIER 1 (government)", "TIER 2 (mostly factual)", etc.
 3. **Seed ranking** — `_rank_and_filter_seeds()` in `research.py` gathers ~80-100 seed URLs, awaits MBFC ratings in parallel (`await_ratings_parallel` with 20s timeout), scores and ranks them, keeps top 30. Seeds are annotated with "Source tier:" labels in the agent's conversation.
 4. **Conflict detection** — `url_matches_media()` and `check_publisher_ownership()` in `media_matching.py` detect when sources are affiliated with interested parties. Conflicted sources get a -15 penalty (soft, not hard block).
@@ -371,9 +371,9 @@ Right now you manually POST claims. To actually audit politicians and pundits at
 
 **What was implemented:**
 - Rev.com transcript fetcher + parser (`src/transcript/fetcher.py`)
-- Rubric-based claim extraction with segment batching (`src/transcript/extractor.py`) — 30 segments/batch, 3-segment overlap at boundaries
-- Extraction rubric: `worth_checking`, `checkable`, `consequence_if_wrong`, `argument_summary`, `supports_argument`, `segment_gist` per claim
-- ALL claims stored (checked + skipped) with full extraction rationale in `transcript_claims` table
+- Simplified claim extraction with segment batching (`src/transcript/extractor.py`) — segments batched by word count, 3-segment overlap at boundaries
+- Extraction fields: `checkable`, `checkability_rationale`, `context_insertions`, `is_restatement`, `segment_gist` per claim. `worth_checking` computed programmatically (checkable AND NOT restatement AND NOT future_prediction). No editorial judgment at extraction time.
+- ALL claims stored (checked + skipped) with extraction metadata in `transcript_claims` table
 - Speaker attribution on every claim, timestamps (MM:SS + seconds), original quotes for highlighting
 - Temporal workflow (`ExtractTranscriptWorkflow`) with visible per-batch activities
 - Auto-submission to verification queue with FK linking

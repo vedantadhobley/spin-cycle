@@ -30,7 +30,7 @@ Phase 2 — LangGraph ReAct agent (~60-90s):
                            END
 
   The agent starts with seed results and pre-fetched articles in its history.
-  It spends its 8-12 tool call budget on targeted follow-up searches and
+  It spends its 10-15 tool call budget on targeted follow-up searches and
   fetching additional sources rather than reading the top-ranked seeds.
 
   The pre_model hook injects a progress note each iteration: tool call count,
@@ -251,7 +251,7 @@ def _build_progress_note(messages: list) -> str | None:
         suggestions.append(
             "fetch full articles from your best URLs — snippets may miss detail"
         )
-    if total_fetches >= 3 and tool_calls >= 8:
+    if total_fetches >= 4 and tool_calls >= 10:
         suggestions.append(
             "you have good depth — consider wrapping up if both sides are covered"
         )
@@ -499,6 +499,36 @@ def _parse_tool_output(content: str, tool_name: str) -> list[dict]:
     return items
 
 
+def _extract_agent_relevant_urls(messages: list) -> set[str]:
+    """Extract URLs the agent listed as RELEVANT SOURCES in its final summary.
+
+    The agent's last AIMessage (no tool_calls) should contain a
+    "RELEVANT SOURCES:" section listing URLs it considers on-topic.
+    Returns the set of URLs found, or empty set if the section is missing.
+    """
+    relevant: set[str] = set()
+    # Find the last AIMessage without tool_calls (agent's final summary)
+    for msg in reversed(messages):
+        if isinstance(msg, AIMessage) and not msg.tool_calls:
+            content = msg.content if isinstance(msg.content, str) else str(msg.content)
+            # Look for the RELEVANT SOURCES section
+            marker = "RELEVANT SOURCES:"
+            idx = content.upper().find(marker.upper())
+            if idx == -1:
+                break
+            section = content[idx + len(marker):]
+            # Stop at SUMMARY: if present
+            summary_idx = section.upper().find("SUMMARY:")
+            if summary_idx != -1:
+                section = section[:summary_idx]
+            # Extract URLs from the section
+            for url_match in _re.finditer(r"https?://\S+", section):
+                url = url_match.group(0).rstrip(".,;)]\"\'>")
+                relevant.add(url)
+            break
+    return relevant
+
+
 def extract_evidence(messages: list) -> list[dict]:
     """Extract structured evidence records from the agent's conversation.
 
@@ -520,6 +550,11 @@ def extract_evidence(messages: list) -> list[dict]:
 
     Deduplicates by URL — different search engines often return the same
     pages, and duplicates just bloat the judge prompt without adding signal.
+
+    If the agent listed RELEVANT SOURCES in its summary, evidence items
+    are tagged with `agent_relevant=True/False`. Items the agent didn't
+    list are kept but deprioritized — they may still have value, but the
+    agent decided they weren't directly about the claim.
     """
     evidence = []
     seen_urls: set[str] = set()
@@ -543,6 +578,21 @@ def extract_evidence(messages: list) -> list[dict]:
                     continue
                 seen_urls.add(url)
             evidence.append(item)
+
+    # Tag evidence with agent's relevance assessment
+    agent_urls = _extract_agent_relevant_urls(messages)
+    if agent_urls:
+        relevant_count = 0
+        for ev in evidence:
+            url = ev.get("source_url", "")
+            ev["agent_relevant"] = url in agent_urls
+            if ev["agent_relevant"]:
+                relevant_count += 1
+        log.info(logger, MODULE, "agent_relevance",
+                 "Agent tagged relevant sources",
+                 agent_listed=len(agent_urls),
+                 matched=relevant_count,
+                 total_evidence=len(evidence))
 
     log.info(logger, MODULE, "evidence_dedup",
              "Evidence extraction complete",
@@ -1259,14 +1309,17 @@ def _filter_irrelevant_evidence(
 ) -> list[dict]:
     """Drop evidence that is clearly off-topic for the claim.
 
-    Two complementary checks — BOTH must fail for an item to be dropped:
+    Three checks — an item must fail at least 2 to be dropped:
 
     1. Date check: if claim_date is available and evidence's most prominent
        year is far from claim_year without mentioning claim_year → flag.
     2. Entity anchor check: if evidence mentions zero topic anchors
        (party names, claim entities, speaker) → flag.
+    3. Claim-term check: if evidence title mentions zero key terms from
+       the sub-claim → flag. Catches high-quality-domain articles that
+       are on a completely different topic.
 
-    This is deliberately conservative: if either check passes, the item stays.
+    This is deliberately conservative: failing 1 check is fine.
     """
     if not evidence:
         return evidence
@@ -1310,7 +1363,6 @@ def _filter_irrelevant_evidence(
         if claim_year:
             years_found = [int(y) for y in _YEAR_RE.findall(text_blob)]
             if years_found:
-                # Most prominent year = most frequently mentioned
                 from collections import Counter as _Counter
                 year_counts = _Counter(years_found)
                 prominent_year = year_counts.most_common(1)[0][0]
@@ -1343,8 +1395,8 @@ def _filter_irrelevant_evidence(
 async def research_claim(
     sub_claim: str,
     interested_parties: InterestedPartiesDict | None = None,
-    max_steps: int = 38,
-    timeout_secs: int = 300,
+    max_steps: int = 47,
+    timeout_secs: int = 420,
     categories: list[str] | None = None,
     seed_queries: list[str] | None = None,
     speaker: str | None = None,
@@ -1368,11 +1420,11 @@ async def research_claim(
             prompt.
         max_steps: Maximum number of graph steps (the agent's budget).
                    Each tool call costs ~3 steps (pre_model + agent + tools).
-                   38 steps allows ~12 tool calls. The final stop costs 2
+                   47 steps allows ~15 tool calls. The final stop costs 2
                    steps (pre_model + agent deciding no more tools).
         timeout_secs: Soft timeout in seconds. If the agent exceeds this,
                       we return whatever evidence was gathered so far.
-                      Default 300s (5 min).
+                      Default 420s (7 min).
         categories: Evidence-need categories from decompose (e.g. ["QUANTITATIVE",
                     "LEGISLATIVE"]). Determines SearXNG category routing for
                     seed queries. None defaults to ["GENERAL"].

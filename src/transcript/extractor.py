@@ -12,18 +12,17 @@ Processing strategy:
   each batch gets its target segments + a few overlap segments before/after
   for bracket resolution and restatement detection
 - Each batch is a separate Temporal activity for full UI visibility
-- Programmatic consistency enforcement on worth_checking
+- Programmatic worth_checking: checkable AND not restatement
 - Validate assertion_count matches actual claims per segment
 - Cross-batch deduplication catches restatements across boundaries
 """
 
 from __future__ import annotations
 
-import asyncio
 import re
 from dataclasses import dataclass
 from datetime import date
-from typing import Literal, Optional
+from typing import Optional
 
 from pydantic import BaseModel, Field
 
@@ -48,33 +47,20 @@ OVERLAP_SEGMENTS = 3       # context segments before/after each batch boundary
 # Pydantic schemas for LLM output
 # ---------------------------------------------------------------------------
 
-SkipReason = Literal[
-    "not_argumentative",
-    "not_checkable",
-    "low_consequence",
-    "common_knowledge",
-    "restatement",
-    "future_prediction",
-]
-
-Consequence = Literal["high", "low", "none"]
-
-
 class ExtractedClaim(BaseModel):
     claim_text: str = Field(..., description="Contextualized claim with [brackets]")
     original_quote: str = Field(..., description="Speaker's exact words")
     speaker: str = Field(..., description="Speaker name from transcript")
     timestamp: str = Field(..., description="MM:SS timestamp")
     claim_type: str = Field("other", description="quantitative|historical|causal|comparative|attribution|other")
-    argument_summary: Optional[str] = Field(None, description="What argument does citing this fact support?")
-    supports_argument: bool = Field(..., description="Is this fact deployed to persuade?")
     checkable: bool = Field(..., description="Could independent data confirm or deny?")
     checkability_rationale: str = Field(default="", description="Why checkable or not (1 sentence)")
-    consequence_if_wrong: Consequence = Field(..., description="If wrong, does it matter?")
-    consequence_rationale: str = Field(default="", description="Why high/low/none consequence (1 sentence)")
-    context_insertions: list[str] = Field(default_factory=list, description="Brackets inserted in claim_text, e.g. ['[Iran\\'s]', '[President Trump]']")
-    worth_checking: bool = Field(..., description="Final call: checkable AND consequence=high")
-    skip_reason: Optional[SkipReason] = Field(None, description="Why not worth checking")
+    context_insertions: list[str] = Field(default_factory=list, description="Brackets inserted in claim_text")
+    is_restatement: bool = Field(default=False, description="True if speaker repeats a claim already extracted")
+
+    # Computed programmatically — not in LLM output but needed downstream
+    worth_checking: bool = Field(default=True, description="Computed: checkable AND not restatement")
+    skip_reason: Optional[str] = Field(default=None, description="Why not worth checking")
 
 
 class SegmentExtraction(BaseModel):
@@ -216,52 +202,34 @@ _FUTURE_PATTERNS = re.compile(
 
 def _is_future_prediction(claim: ExtractedClaim) -> bool:
     """Detect future predictions/promises that can't be verified yet."""
-    text = claim.claim_text
-    # Check both claim_text and original_quote
-    if _FUTURE_PATTERNS.search(text) or _FUTURE_PATTERNS.search(claim.original_quote):
+    if _FUTURE_PATTERNS.search(claim.claim_text) or _FUTURE_PATTERNS.search(claim.original_quote):
         return True
     return False
 
 
-def _enforce_consistency(claims: list[ExtractedClaim]) -> list[ExtractedClaim]:
-    """Override worth_checking based on the structured reasoning fields.
+def _enforce_worth_checking(claims: list[ExtractedClaim]) -> list[ExtractedClaim]:
+    """Compute worth_checking programmatically.
 
-    The prompt says worth_checking should be true only when checkable AND
-    consequence_if_wrong=high.  The model doesn't always follow that rule,
-    so we enforce it programmatically.
-
-    Additionally: if argument_summary is null/empty, supports_argument must
-    be false — the model couldn't articulate an argument.
-
-    Future predictions are caught by regex as a safety net — the prompt asks
-    the model to skip these, but it doesn't always comply.
+    Simple rule: checkable AND not a restatement AND not a future prediction.
+    No editorial judgment — everything checkable gets verified.
     """
     for claim in claims:
-        if not claim.argument_summary or not claim.argument_summary.strip():
-            claim.supports_argument = False
-
-        # Catch future predictions the model marked as worth checking
-        if claim.worth_checking and _is_future_prediction(claim):
-            claim.worth_checking = False
+        # Catch future predictions the model marked as checkable
+        if claim.checkable and _is_future_prediction(claim):
             claim.checkable = False
+            claim.worth_checking = False
             claim.skip_reason = "future_prediction"
             continue
 
-        should_check = (
-            claim.checkable
-            and claim.consequence_if_wrong == "high"
-        )
-
-        if claim.worth_checking and not should_check:
+        if claim.is_restatement:
             claim.worth_checking = False
-            if not claim.checkable:
-                claim.skip_reason = "not_checkable"
-            else:
-                claim.skip_reason = "low_consequence"
-
-        elif not claim.worth_checking and should_check:
+            claim.skip_reason = "restatement"
+        elif claim.checkable:
             claim.worth_checking = True
             claim.skip_reason = None
+        else:
+            claim.worth_checking = False
+            claim.skip_reason = "not_checkable"
 
     return claims
 
@@ -290,6 +258,33 @@ def _validate_segment_coverage(
             log.warning(logger, MODULE, "assertion_count_mismatch",
                         f"Segment {seg.speaker} ({seg.timestamp}): "
                         f"assertion_count={seg.assertion_count} but {actual} claims listed")
+
+
+def _validate_extraction_consistency(output: ExtractionOutput) -> None:
+    """Log warnings for extraction inconsistencies. Permissive — never rejects."""
+    for seg in output.segments:
+        actual = len(seg.claims)
+
+        # assertion_count doesn't match len(claims)
+        if seg.assertion_count != actual:
+            log.warning(logger, MODULE, "assertion_count_mismatch",
+                        f"Segment {seg.speaker} ({seg.timestamp}): "
+                        f"assertion_count={seg.assertion_count} but {actual} claims",
+                        speaker=seg.speaker, timestamp=seg.timestamp)
+
+        # Segment has claims but empty segment_gist
+        if seg.claims and not seg.segment_gist.strip():
+            log.warning(logger, MODULE, "missing_segment_gist",
+                        f"Segment {seg.speaker} ({seg.timestamp}) has "
+                        f"{actual} claims but empty segment_gist",
+                        speaker=seg.speaker, timestamp=seg.timestamp)
+
+        for claim in seg.claims:
+            # checkable=True but empty checkability_rationale
+            if claim.checkable and not claim.checkability_rationale.strip():
+                log.warning(logger, MODULE, "missing_checkability_rationale",
+                            f"Claim marked checkable but no rationale: "
+                            f"'{claim.claim_text[:60]}...'")
 
 
 # ---------------------------------------------------------------------------
@@ -324,52 +319,6 @@ def _deduplicate_claims(claims: list[ExtractedClaim]) -> list[ExtractedClaim]:
             unique.append(claim)
 
     return unique
-
-
-# ---------------------------------------------------------------------------
-# Post-hoc consistency check (permissive — warnings only)
-# ---------------------------------------------------------------------------
-
-def _validate_extraction_consistency(output: ExtractionOutput) -> None:
-    """Log warnings for rubric inconsistencies. Permissive — never rejects."""
-    for seg in output.segments:
-        actual = len(seg.claims)
-
-        # assertion_count doesn't match len(claims)
-        if seg.assertion_count != actual:
-            log.warning(logger, MODULE, "assertion_count_mismatch",
-                        f"Segment {seg.speaker} ({seg.timestamp}): "
-                        f"assertion_count={seg.assertion_count} but {actual} claims",
-                        speaker=seg.speaker, timestamp=seg.timestamp)
-
-        # Segment has claims but empty segment_gist
-        if seg.claims and not seg.segment_gist.strip():
-            log.warning(logger, MODULE, "missing_segment_gist",
-                        f"Segment {seg.speaker} ({seg.timestamp}) has "
-                        f"{actual} claims but empty segment_gist",
-                        speaker=seg.speaker, timestamp=seg.timestamp)
-
-        for claim in seg.claims:
-            # checkable=True but empty checkability_rationale
-            if claim.checkable and not claim.checkability_rationale.strip():
-                log.warning(logger, MODULE, "missing_checkability_rationale",
-                            f"Claim marked checkable but no rationale: "
-                            f"'{claim.claim_text[:60]}...'")
-
-            # consequence=high but empty consequence_rationale
-            if claim.consequence_if_wrong == "high" and not claim.consequence_rationale.strip():
-                log.warning(logger, MODULE, "missing_consequence_rationale",
-                            f"Claim has high consequence but no rationale: "
-                            f"'{claim.claim_text[:60]}...'")
-
-            # worth_checking doesn't match checkable AND consequence=high
-            expected_worth = claim.checkable and claim.consequence_if_wrong == "high"
-            if claim.worth_checking != expected_worth:
-                log.warning(logger, MODULE, "worth_checking_mismatch",
-                            f"worth_checking={claim.worth_checking} but "
-                            f"checkable={claim.checkable}, "
-                            f"consequence={claim.consequence_if_wrong}: "
-                            f"'{claim.claim_text[:60]}...'")
 
 
 # ---------------------------------------------------------------------------
@@ -453,7 +402,7 @@ async def extract_batch(
     gist_count = sum(1 for s in output.segments if s.segment_gist.strip())
     total_claims = sum(len(s.claims) for s in output.segments)
     log.info(logger, MODULE, "rubric_summary",
-             f"Extraction rubric: {segment_count} segments, "
+             f"Extraction: {segment_count} segments, "
              f"{gist_count}/{segment_count} with gist, "
              f"{total_claims} total claims",
              segment_count=segment_count,
@@ -476,8 +425,8 @@ async def extract_batch(
             claim._segment_gist = seg.segment_gist  # transient — used in serialization
         all_claims.extend(seg.claims)
 
-    # Enforce consistency
-    _enforce_consistency(all_claims)
+    # Compute worth_checking programmatically
+    _enforce_worth_checking(all_claims)
 
     total = len(all_claims)
     worth = sum(1 for c in all_claims if c.worth_checking)

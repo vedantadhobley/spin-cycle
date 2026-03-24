@@ -108,12 +108,9 @@ async def extract_transcript_batch(
             "claim_type": c.claim_type,
             "worth_checking": c.worth_checking,
             "skip_reason": c.skip_reason,
-            "argument_summary": c.argument_summary,
-            "supports_argument": c.supports_argument,
             "checkable": c.checkable,
             "checkability_rationale": c.checkability_rationale,
-            "consequence_if_wrong": c.consequence_if_wrong,
-            "consequence_rationale": c.consequence_rationale,
+            "is_restatement": c.is_restatement,
             "segment_gist": getattr(c, "_segment_gist", None),
         }
         for c in claims
@@ -163,9 +160,10 @@ async def finalize_extraction(
     for seg in transcript.segments:
         ts_lookup[seg.timestamp] = seg.timestamp_secs
 
-    # Reconstruct ExtractedClaim objects from all batches
+    # Reconstruct ExtractedClaim objects from all batches.
+    # Tag each with its raw index so we can trace which raw claims survive
+    # finalization (filtering + dedup) for correct FK linkage later.
     all_claims: list[ExtractedClaim] = []
-    # Keep raw batch data for full metadata preservation
     all_raw_claims: list[dict] = []
     for batch_claims in all_batch_claims:
         for c in batch_claims:
@@ -176,14 +174,11 @@ async def finalize_extraction(
                 speaker=c["speaker"],
                 timestamp=c["timestamp"],
                 claim_type=c["claim_type"],
-                worth_checking=c["worth_checking"],
+                worth_checking=c.get("worth_checking", True),
                 skip_reason=c.get("skip_reason"),
-                argument_summary=c.get("argument_summary"),
-                supports_argument=c.get("supports_argument", False),
-                checkable=c.get("checkable", c["worth_checking"]),
+                checkable=c.get("checkable", True),
                 checkability_rationale=c.get("checkability_rationale", ""),
-                consequence_if_wrong=c.get("consequence_if_wrong", "high" if c["worth_checking"] else "low"),
-                consequence_rationale=c.get("consequence_rationale", ""),
+                is_restatement=c.get("is_restatement", False),
             ))
 
     log.info(activity.logger, "transcript", "finalize_start",
@@ -192,6 +187,18 @@ async def finalize_extraction(
              batch_count=len(all_batch_claims))
 
     final_claims = finalize_claims(all_claims, transcript)
+
+    # Match finalized claims back to their raw indices by claim_text.
+    # finalize_claims filters (worth_checking) and deduplicates, so its
+    # output is a subset of all_claims. We need to know WHICH raw claims
+    # survived so the workflow can link the correct transcript_claim rows.
+    final_claim_texts = {c.claim_text for c in final_claims}
+    seen_texts: set[str] = set()
+    surviving_raw_indices: list[int] = []
+    for i, c in enumerate(all_claims):
+        if c.claim_text in final_claim_texts and c.claim_text not in seen_texts:
+            surviving_raw_indices.append(i)
+            seen_texts.add(c.claim_text)
 
     worth_checking = [
         {
@@ -217,12 +224,9 @@ async def finalize_extraction(
             "claim_type": c.get("claim_type"),
             "worth_checking": c.get("worth_checking", True),
             "skip_reason": c.get("skip_reason"),
-            "argument_summary": c.get("argument_summary"),
-            "supports_argument": c.get("supports_argument"),
             "checkable": c.get("checkable"),
             "checkability_rationale": c.get("checkability_rationale"),
-            "consequence_if_wrong": c.get("consequence_if_wrong"),
-            "consequence_rationale": c.get("consequence_rationale"),
+            "is_restatement": c.get("is_restatement", False),
             "segment_gist": c.get("segment_gist"),
         }
         for c in all_raw_claims
@@ -232,11 +236,13 @@ async def finalize_extraction(
              "Extraction finalized",
              input_claims=len(all_claims),
              worth_checking=len(worth_checking),
-             all_for_storage=len(all_claims_for_storage))
+             all_for_storage=len(all_claims_for_storage),
+             surviving_indices=surviving_raw_indices)
 
     return {
         "worth_checking": worth_checking,
         "all_claims": all_claims_for_storage,
+        "surviving_indices": surviving_raw_indices,
     }
 
 
@@ -326,12 +332,8 @@ async def store_transcript_claims(
                 claim_type=c.get("claim_type"),
                 worth_checking=c.get("worth_checking", True),
                 skip_reason=c.get("skip_reason"),
-                argument_summary=c.get("argument_summary"),
-                supports_argument=c.get("supports_argument"),
                 checkable=c.get("checkable"),
                 checkability_rationale=c.get("checkability_rationale"),
-                consequence_if_wrong=c.get("consequence_if_wrong"),
-                consequence_rationale=c.get("consequence_rationale"),
                 segment_gist=c.get("segment_gist"),
             )
             session.add(tc)
