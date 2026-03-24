@@ -130,6 +130,7 @@ async def judge_subclaim(
     interested_parties: dict | list | None = None,
     speaker: str | None = None,
     claim_date: str | None = None,
+    verification_target: str = "",
 ) -> dict:
     """Judge a sub-claim based on collected evidence.
 
@@ -147,7 +148,8 @@ async def judge_subclaim(
         interested_parties = normalize_interested_parties(interested_parties)
 
     result = await judge(claim_text, sub_claim, evidence, interested_parties,
-                         speaker=speaker, claim_date=claim_date)
+                         speaker=speaker, claim_date=claim_date,
+                         verification_target=verification_target)
     log.info(activity.logger, "judge", "done", "Judge complete",
              sub_claim=sub_claim[:80],
              verdict=result.get("verdict"), confidence=result.get("confidence"))

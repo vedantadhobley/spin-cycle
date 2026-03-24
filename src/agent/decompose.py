@@ -577,6 +577,7 @@ async def decompose(claim_text: str, speaker: str | None = None,
         facts = [
             {
                 "text": f.text.strip(),
+                "verification_target": f.verification_target.strip() if f.verification_target else "",
                 "categories": f.categories,
                 "seed_queries": f.seed_queries,
                 "category_rationale": f.category_rationale,

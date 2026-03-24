@@ -163,6 +163,7 @@ async def judge(
     interested_parties: InterestedPartiesDict,
     speaker: str | None = None,
     claim_date: str | None = None,
+    verification_target: str = "",
 ) -> dict:
     """Evaluate evidence and return a verdict.
 
@@ -171,6 +172,7 @@ async def judge(
         sub_claim: Atomic fact being judged.
         evidence: Evidence dicts from research phase.
         interested_parties: Pre-expanded dict (all_parties, affiliated_media, etc).
+        verification_target: The factual question to answer (prevents attribution checks).
 
     Returns:
         Dict: sub_claim, verdict, confidence, reasoning, evidence.
@@ -245,6 +247,7 @@ async def judge(
             user_prompt=JUDGE_USER.format(
                 claim_text=claim_text,
                 sub_claim=sub_claim,
+                verification_line=f"Verification question: {verification_target}" if verification_target else "",
                 evidence_text=full_evidence,
                 speaker_line=f"\nSpeaker: {speaker}" if speaker else "",
             ),

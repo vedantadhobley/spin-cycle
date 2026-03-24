@@ -557,7 +557,14 @@ An atomic fact is a single, specific, independently verifiable statement.
 
 For each fact, assign categories and state WHY those categories apply.
 
-→ Output: facts (text, categories, category_rationale, seed_queries)
+For each fact, state the VERIFICATION TARGET: the factual question the \
+researcher should answer. Must ask whether something IS true in the world, \
+not whether someone SAID, DESCRIBED, or CHARACTERIZED it. If your target \
+reads like "Was X described as Y?" or "Did the speaker claim X?", you have \
+written an attribution check — rephrase the fact text to state what needs \
+to be TRUE.
+
+→ Output: facts (text, verification_target, categories, category_rationale, seed_queries)
 
 EXTRACTION RULES:
 
@@ -623,6 +630,17 @@ found — NOT as an abstract judgment:
 (researchable — did they or didn't they?)
    BAD:  "The process was fair" (abstract judgment)
    GOOD: "Monitoring organizations assessed the process as fair" (researchable)
+   CRITICAL — NO ATTRIBUTION HEDGING:
+   NEVER wrap a factual assertion in attribution language like "described as", \
+"characterized as", "claimed to be", "said to be", "called". The speaker is \
+tracked separately. Your job is to state WHAT NEEDS TO BE VERIFIED, not who \
+said it. Attribution hedging turns a factual question into a trivially true \
+attribution check — the judge verifies that someone said it instead of \
+whether it's true.
+   BAD:  "Operation X is described as one of the largest military operations"
+   GOOD: "Operation X is one of the largest military operations in history"
+   BAD:  "The policy is characterized as effective"
+   GOOD: "The policy is effective" (or better: "Assessors have rated the policy as effective")
 
 8. ENTITY DISAMBIGUATION
    Add minimum context to uniquely identify entities. Don't assume the researcher \
@@ -840,7 +858,7 @@ Simple claim (KEEP IT SIMPLE):
   "key_test": "Earth's age is approximately 4.5 billion years",
   "interested_parties": {{"direct": [], "institutional": [], "affiliated_media": [], "reasoning": "No interested parties — this is established scientific consensus"}},
   "facts": [
-    {{"text": "The Earth is approximately 4.5 billion years old", "categories": ["SCIENTIFIC"], "category_rationale": "Scientific age estimate requiring peer-reviewed geological evidence.", "seed_queries": ["age of the Earth scientific estimate", "Earth 4.5 billion years evidence"]}}
+    {{"text": "The Earth is approximately 4.5 billion years old", "verification_target": "Is the Earth approximately 4.5 billion years old?", "categories": ["SCIENTIFIC"], "category_rationale": "Scientific age estimate requiring peer-reviewed geological evidence.", "seed_queries": ["age of the Earth scientific estimate", "Earth 4.5 billion years evidence"]}}
   ]
 }}
 Note: DO NOT add "The Earth has an age" or "not older than X" or "not younger than X" — these are redundant.
@@ -855,7 +873,7 @@ Another simple claim:
   "key_test": "NASA must have landed on the moon 6 times",
   "interested_parties": {{"direct": ["NASA"], "institutional": ["US Government"], "affiliated_media": [], "reasoning": "NASA is the subject; US Government is parent organization"}},
   "facts": [
-    {{"text": "NASA landed on the moon 6 times", "categories": ["QUANTITATIVE"], "category_rationale": "Specific count requiring historical records.", "seed_queries": ["NASA moon landings complete list", "how many times did NASA land on the moon"]}}
+    {{"text": "NASA landed on the moon 6 times", "verification_target": "Has NASA completed exactly 6 crewed moon landings?", "categories": ["QUANTITATIVE"], "category_rationale": "Specific count requiring historical records.", "seed_queries": ["NASA moon landings complete list", "how many times did NASA land on the moon"]}}
   ]
 }}
 
@@ -869,10 +887,10 @@ Parallel claim:
   "key_test": "Both countries must be increasing military spending AND cutting foreign aid",
   "interested_parties": {{"direct": ["Country A", "Country B"], "institutional": [], "affiliated_media": [], "reasoning": "Both countries are subjects of the claim"}},
   "facts": [
-    {{"text": "Country A is increasing its military spending", "categories": ["QUANTITATIVE"], "category_rationale": "Budget trend requiring spending data.", "seed_queries": ["Country A military spending budget increase", "Country A defense budget year over year"]}},
-    {{"text": "Country B is increasing its military spending", "categories": ["QUANTITATIVE"], "category_rationale": "Budget trend requiring spending data.", "seed_queries": ["Country B military spending budget increase", "Country B defense budget year over year"]}},
-    {{"text": "Country A is cutting its foreign aid budget", "categories": ["QUANTITATIVE"], "category_rationale": "Budget trend requiring spending data.", "seed_queries": ["Country A foreign aid budget cuts", "Country A foreign aid spending data"]}},
-    {{"text": "Country B is cutting its foreign aid budget", "categories": ["QUANTITATIVE"], "category_rationale": "Budget trend requiring spending data.", "seed_queries": ["Country B foreign aid budget cuts", "Country B foreign aid spending data"]}}
+    {{"text": "Country A is increasing its military spending", "verification_target": "Is Country A's military spending increasing?", "categories": ["QUANTITATIVE"], "category_rationale": "Budget trend requiring spending data.", "seed_queries": ["Country A military spending budget increase", "Country A defense budget year over year"]}},
+    {{"text": "Country B is increasing its military spending", "verification_target": "Is Country B's military spending increasing?", "categories": ["QUANTITATIVE"], "category_rationale": "Budget trend requiring spending data.", "seed_queries": ["Country B military spending budget increase", "Country B defense budget year over year"]}},
+    {{"text": "Country A is cutting its foreign aid budget", "verification_target": "Is Country A reducing its foreign aid budget?", "categories": ["QUANTITATIVE"], "category_rationale": "Budget trend requiring spending data.", "seed_queries": ["Country A foreign aid budget cuts", "Country A foreign aid spending data"]}},
+    {{"text": "Country B is cutting its foreign aid budget", "verification_target": "Is Country B reducing its foreign aid budget?", "categories": ["QUANTITATIVE"], "category_rationale": "Budget trend requiring spending data.", "seed_queries": ["Country B foreign aid budget cuts", "Country B foreign aid spending data"]}}
   ]
 }}
 
@@ -886,9 +904,9 @@ Temporal/origin claim (CRITICAL — presupposition extraction):
   "key_test": "Must verify post-merger sales AND check for significant prior sales",
   "interested_parties": {{"direct": ["Company X"], "institutional": [], "affiliated_media": [], "reasoning": "Company X is the subject of the claim"}},
   "facts": [
-    {{"text": "Company X began selling products in Market Y after the merger", "categories": ["CURRENT_EVENTS"], "category_rationale": "Recent business event requiring news sources.", "seed_queries": ["Company X Market Y expansion timeline", "Company X merger Market Y entry"]}},
-    {{"text": "The merger caused Company X to enter Market Y", "categories": ["CAUSAL"], "category_rationale": "Causal claim needing mechanism evidence and alternative explanations.", "seed_queries": ["Company X stated reason for entering Market Y", "Company X Market Y expansion other causes"]}},
-    {{"text": "Company X had significant sales in Market Y before the merger", "categories": ["CURRENT_EVENTS"], "category_rationale": "Historical business activity requiring records or reporting.", "seed_queries": ["Company X Market Y sales before merger", "Company X Market Y history of operations"]}}
+    {{"text": "Company X began selling products in Market Y after the merger", "verification_target": "Did Company X enter Market Y after the merger?", "categories": ["CURRENT_EVENTS"], "category_rationale": "Recent business event requiring news sources.", "seed_queries": ["Company X Market Y expansion timeline", "Company X merger Market Y entry"]}},
+    {{"text": "The merger caused Company X to enter Market Y", "verification_target": "Did the merger cause Company X's entry into Market Y?", "categories": ["CAUSAL"], "category_rationale": "Causal claim needing mechanism evidence and alternative explanations.", "seed_queries": ["Company X stated reason for entering Market Y", "Company X Market Y expansion other causes"]}},
+    {{"text": "Company X had significant sales in Market Y before the merger", "verification_target": "Did Company X have significant sales in Market Y before the merger?", "categories": ["CURRENT_EVENTS"], "category_rationale": "Historical business activity requiring records or reporting.", "seed_queries": ["Company X Market Y sales before merger", "Company X Market Y history of operations"]}}
   ]
 }}
 Note: The third fact tests the PRESUPPOSITION. "Started" implies nothing before.
@@ -903,9 +921,9 @@ Causal claim:
   "key_test": "Regulation was implemented AND record enrollment occurred AND causal link exists",
   "interested_parties": {{"direct": [], "institutional": [], "affiliated_media": [], "reasoning": "No specific interested parties identified"}},
   "facts": [
-    {{"text": "The regulation was implemented", "categories": ["LEGISLATIVE"], "category_rationale": "Legislative action requiring bill text or enactment records.", "seed_queries": ["regulation implemented enacted effective date", "new regulation policy passed"]}},
-    {{"text": "Record enrollment occurred", "categories": ["QUANTITATIVE"], "category_rationale": "Statistical claim needing enrollment data.", "seed_queries": ["enrollment statistics record high", "enrollment data trend increase"]}},
-    {{"text": "The regulation caused the enrollment increase", "categories": ["CAUSAL", "QUANTITATIVE"], "category_rationale": "Causal link needing mechanism evidence; quantitative to verify the magnitude.", "seed_queries": ["regulation effect on enrollment analysis", "enrollment increase causes other factors"]}}
+    {{"text": "The regulation was implemented", "verification_target": "Was the regulation implemented and put into effect?", "categories": ["LEGISLATIVE"], "category_rationale": "Legislative action requiring bill text or enactment records.", "seed_queries": ["regulation implemented enacted effective date", "new regulation policy passed"]}},
+    {{"text": "Record enrollment occurred", "verification_target": "Did enrollment reach a record high?", "categories": ["QUANTITATIVE"], "category_rationale": "Statistical claim needing enrollment data.", "seed_queries": ["enrollment statistics record high", "enrollment data trend increase"]}},
+    {{"text": "The regulation caused the enrollment increase", "verification_target": "Did the regulation cause the enrollment increase?", "categories": ["CAUSAL", "QUANTITATIVE"], "category_rationale": "Causal link needing mechanism evidence; quantitative to verify the magnitude.", "seed_queries": ["regulation effect on enrollment analysis", "enrollment increase causes other factors"]}}
   ]
 }}
 Note: The causal fact requires evidence of mechanism, not just correlation.
@@ -920,7 +938,7 @@ Comparative/ranking claim (DO NOT use placeholders):
   "key_test": "Country A's spending must exceed the sum of countries ranked 2nd through 6th",
   "interested_parties": {{"direct": ["Country A military"], "institutional": ["Country A government"], "affiliated_media": [], "reasoning": "Country A's military and government have interest in defense spending perception"}},
   "facts": [
-    {{"text": "Country A spends more on its military than the next five highest-spending countries combined", "categories": ["QUANTITATIVE", "COMPARATIVE"], "category_rationale": "Quantitative comparison needing spending data for multiple countries.", "seed_queries": ["global military spending by country ranking", "Country A defense budget vs next five countries"]}}
+    {{"text": "Country A spends more on its military than the next five highest-spending countries combined", "verification_target": "Does Country A's military spending exceed the combined total of the next five countries?", "categories": ["QUANTITATIVE", "COMPARATIVE"], "category_rationale": "Quantitative comparison needing spending data for multiple countries.", "seed_queries": ["global military spending by country ranking", "Country A defense budget vs next five countries"]}}
   ]
 }}
 Note: The comparison is kept as one searchable fact. The researcher finds the \
@@ -936,7 +954,7 @@ Trend claim (DO NOT enumerate individual years):
   "key_test": "Agency Z's budget must have increased in every single year over the past two decades with no year-over-year decrease",
   "interested_parties": {{"direct": ["Agency Z"], "institutional": [], "affiliated_media": [], "reasoning": "Agency Z is the subject of the budget claim"}},
   "facts": [
-    {{"text": "Agency Z's budget increased in every single year over the past two decades compared to the previous year", "categories": ["QUANTITATIVE"], "category_rationale": "Time-series budget data requiring official spending records.", "seed_queries": ["Agency Z budget history by year", "Agency Z annual budget 2005 to 2025", "Agency Z budget cuts or decreases"]}}
+    {{"text": "Agency Z's budget increased in every single year over the past two decades compared to the previous year", "verification_target": "Has Agency Z's budget increased every year for the past two decades with no decrease?", "categories": ["QUANTITATIVE"], "category_rationale": "Time-series budget data requiring official spending records.", "seed_queries": ["Agency Z budget history by year", "Agency Z annual budget 2005 to 2025", "Agency Z budget cuts or decreases"]}}
   ]
 }}
 Note: The trend is ONE fact. The researcher finds a budget time series or \
@@ -953,7 +971,7 @@ Group quantifier claim (DO NOT enumerate members):
   "key_test": "Every Alliance X member nation must have adopted Policy Y; one non-adopter = false",
   "interested_parties": {{"direct": [], "institutional": ["Alliance X"], "affiliated_media": [], "reasoning": "Alliance X is the group whose members are being evaluated"}},
   "facts": [
-    {{"text": "All Alliance X member nations have adopted Policy Y", "categories": ["GENERAL"], "category_rationale": "General policy adoption claim requiring member-state records.", "seed_queries": ["Alliance X members Policy Y", "countries that adopted Policy Y", "Alliance X nations without Policy Y"]}}
+    {{"text": "All Alliance X member nations have adopted Policy Y", "verification_target": "Have all Alliance X member nations adopted Policy Y?", "categories": ["GENERAL"], "category_rationale": "General policy adoption claim requiring member-state records.", "seed_queries": ["Alliance X members Policy Y", "countries that adopted Policy Y", "Alliance X nations without Policy Y"]}}
   ]
 }}
 Note: The group membership is ONE fact. The researcher finds a list of which \
@@ -974,8 +992,8 @@ Return a JSON object:
     "reasoning": "Explanation of relationships"
   }},
   "facts": [
-    {{"text": "Atomic fact 1", "categories": ["QUANTITATIVE"], "category_rationale": "Why these categories apply.", "seed_queries": ["specific search query 1", "specific search query 2"]}},
-    {{"text": "Atomic fact 2", "categories": ["LEGISLATIVE"], "category_rationale": "Why these categories apply.", "seed_queries": ["targeted query for this fact", "counter-evidence query"]}},
+    {{"text": "Atomic fact 1", "verification_target": "Is [specific thing] true?", "categories": ["QUANTITATIVE"], "category_rationale": "Why these categories apply.", "seed_queries": ["specific search query 1", "specific search query 2"]}},
+    {{"text": "Atomic fact 2", "verification_target": "Did [specific event] happen?", "categories": ["LEGISLATIVE"], "category_rationale": "Why these categories apply.", "seed_queries": ["targeted query for this fact", "counter-evidence query"]}},
     "..."
   ]
 }}
@@ -1004,7 +1022,7 @@ But DO NOT pad with trivial entailments like "X exists" or "X has a Y".
 Each fact should be independently verifiable and substantively different.
 
 Return JSON with: thesis, key_test, structure, interested_parties, facts
-Each fact is an object: {{"text": "...", "categories": ["CATEGORY1", ...], "seed_queries": ["query1", "query2"]}}\
+Each fact is an object: {{"text": "...", "verification_target": "Is [specific thing] true?", "categories": ["CATEGORY1", ...], "seed_queries": ["query1", "query2"]}}\
 """
 
 
@@ -1497,7 +1515,7 @@ the evidence below. Do not use your own knowledge.
 Original claim (for context): {claim_text}
 
 Sub-claim to judge: {sub_claim}
-
+{verification_line}
 Evidence:
 {evidence_text}
 

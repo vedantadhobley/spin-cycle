@@ -113,6 +113,11 @@ class AtomicFact(BaseModel):
     evidence already in hand.
     """
     text: str = Field(..., description="The atomic fact text")
+    verification_target: str = Field(
+        default="",
+        description="What factual question should the researcher answer? "
+        "Must ask whether something IS true, not whether someone SAID it.",
+    )
     categories: list[str] = Field(
         default_factory=lambda: ["GENERAL"],
         description="Evidence-need categories for this fact",

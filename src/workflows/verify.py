@@ -208,6 +208,12 @@ class VerifyClaimWorkflow:
                  structure=thesis_info.get("structure"),
                  interested_parties=interested_parties)
 
+        # Build verification_target lookup for judge phase
+        verification_targets = {
+            fact["text"]: fact.get("verification_target", "")
+            for fact in atomic_facts
+        }
+
         # Step 2: Research all facts (thinking=off, fast)
         self._set_phase("researching")
 
@@ -305,10 +311,11 @@ class VerifyClaimWorkflow:
         async def _judge(fact_text: str, evidence: list,
                          merged_p: dict) -> dict:
             """Judge a single fact given its evidence."""
+            vt = verification_targets.get(fact_text, "")
             result = await workflow.execute_activity(
                 judge_subclaim,
                 args=[claim_text, fact_text, evidence, merged_p, speaker,
-                      claim_date],
+                      claim_date, vt],
                 start_to_close_timeout=timedelta(seconds=300),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
