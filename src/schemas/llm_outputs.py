@@ -117,6 +117,10 @@ class AtomicFact(BaseModel):
         default_factory=lambda: ["GENERAL"],
         description="Evidence-need categories for this fact",
     )
+    category_rationale: str = Field(
+        default="",
+        description="Why these categories apply (1 sentence)",
+    )
     seed_queries: list[str] = Field(
         default_factory=list,
         description="2-4 targeted search queries to find evidence for this fact",
@@ -137,6 +141,16 @@ class DecomposeOutput(BaseModel):
     Contains a flat list of atomic verifiable facts plus metadata for synthesis.
     This simplified format matches standard fact-checking approaches (SAFE, FActScore).
     """
+    # Step 1 — Understand the claim
+    claim_analysis: str = Field(
+        default="",
+        description="What is this claim asserting and what is the logical relationship between its parts?",
+    )
+    structure_justification: str = Field(
+        default="",
+        description="Why this structure type? Name the structural features.",
+    )
+    # Step 2 — Identify thesis and key test
     thesis: Optional[str] = Field(
         default=None,
         description="One sentence: what is the speaker fundamentally arguing?"

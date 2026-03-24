@@ -94,6 +94,26 @@ def validate_decompose(output: DecomposeOutput) -> tuple[bool, str]:
         if len(f.strip()) < 15:
             return False, f"Fact {i+1} is too short to be self-contained: '{f}'"
 
+    # Check 5: Rubric field — claim_analysis present must be substantive
+    if output.claim_analysis and len(output.claim_analysis.strip()) < 20:
+        return False, "claim_analysis is present but too short (<20 chars)"
+
+    # Check 6: Non-simple structure needs justification
+    if output.structure != "simple" and output.structure_justification:
+        if len(output.structure_justification.strip()) < 10:
+            return False, "structure_justification is too short for non-simple structure"
+
+    # Check 7: Thesis and key_test must not be identical
+    if (output.thesis and output.key_test
+            and output.thesis.strip().lower() == output.key_test.strip().lower()):
+        return False, "thesis and key_test are identical — they must be different"
+
+    # Check 8: Named interested parties need reasoning
+    ip = output.interested_parties
+    has_named = bool(ip.direct or ip.institutional or ip.affiliated_media)
+    if has_named and ip.reasoning and len(ip.reasoning.strip()) < 15:
+        return False, "interested_parties.reasoning is too short for named parties"
+
     return True, ""
 
 
@@ -153,5 +173,33 @@ def validate_synthesize(output: SynthesizeOutput) -> tuple[bool, str]:
     if output.verdict in ("true", "false") and output.confidence < 0.3:
         log.warning(logger, MODULE, "low_confidence_strong_verdict",
                    f"Strong verdict '{output.verdict}' with low confidence {output.confidence}")
+
+    return True, ""
+
+
+def validate_extraction(output) -> tuple[bool, str]:
+    """Validate extraction output semantically.
+
+    Checks:
+    1. At least one segment exists
+    2. Claims have non-empty claim_text (≥10 chars) and original_quote (≥5 chars)
+
+    Intentionally minimal — rationale fields are forcing fields, not gates.
+    """
+    if not output.segments:
+        return False, "Extraction produced no segments"
+
+    for seg in output.segments:
+        for i, claim in enumerate(seg.claims):
+            if not claim.claim_text or len(claim.claim_text.strip()) < 10:
+                return False, (
+                    f"Segment {seg.speaker} ({seg.timestamp}), "
+                    f"claim {i+1}: claim_text is empty or too short (<10 chars)"
+                )
+            if not claim.original_quote or len(claim.original_quote.strip()) < 5:
+                return False, (
+                    f"Segment {seg.speaker} ({seg.timestamp}), "
+                    f"claim {i+1}: original_quote is empty or too short (<5 chars)"
+                )
 
     return True, ""

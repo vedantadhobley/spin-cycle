@@ -27,7 +27,7 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
-from src.llm import invoke_llm
+from src.llm import invoke_llm, validate_extraction
 from src.prompts.extraction import EXTRACTION_SYSTEM, EXTRACTION_USER
 from src.transcript.fetcher import Transcript, TranscriptSegment
 from src.utils.logging import log, get_logger
@@ -69,7 +69,9 @@ class ExtractedClaim(BaseModel):
     argument_summary: Optional[str] = Field(None, description="What argument does citing this fact support?")
     supports_argument: bool = Field(..., description="Is this fact deployed to persuade?")
     checkable: bool = Field(..., description="Could independent data confirm or deny?")
+    checkability_rationale: str = Field(default="", description="Why checkable or not (1 sentence)")
     consequence_if_wrong: Consequence = Field(..., description="If wrong, does it matter?")
+    consequence_rationale: str = Field(default="", description="Why high/low/none consequence (1 sentence)")
     worth_checking: bool = Field(..., description="Final call: checkable AND consequence=high")
     skip_reason: Optional[SkipReason] = Field(None, description="Why not worth checking")
 
@@ -77,6 +79,7 @@ class ExtractedClaim(BaseModel):
 class SegmentExtraction(BaseModel):
     timestamp: str = Field(..., description="MM:SS timestamp of this segment")
     speaker: str = Field(..., description="Speaker name")
+    segment_gist: str = Field(default="", description="One sentence: what is the speaker arguing in this segment?")
     assertion_count: int = Field(..., description="Total factual assertions found in this segment")
     claims: list[ExtractedClaim] = Field(default_factory=list)
 
@@ -323,6 +326,52 @@ def _deduplicate_claims(claims: list[ExtractedClaim]) -> list[ExtractedClaim]:
 
 
 # ---------------------------------------------------------------------------
+# Post-hoc consistency check (permissive — warnings only)
+# ---------------------------------------------------------------------------
+
+def _validate_extraction_consistency(output: ExtractionOutput) -> None:
+    """Log warnings for rubric inconsistencies. Permissive — never rejects."""
+    for seg in output.segments:
+        actual = len(seg.claims)
+
+        # assertion_count doesn't match len(claims)
+        if seg.assertion_count != actual:
+            log.warning(logger, MODULE, "assertion_count_mismatch",
+                        f"Segment {seg.speaker} ({seg.timestamp}): "
+                        f"assertion_count={seg.assertion_count} but {actual} claims",
+                        speaker=seg.speaker, timestamp=seg.timestamp)
+
+        # Segment has claims but empty segment_gist
+        if seg.claims and not seg.segment_gist.strip():
+            log.warning(logger, MODULE, "missing_segment_gist",
+                        f"Segment {seg.speaker} ({seg.timestamp}) has "
+                        f"{actual} claims but empty segment_gist",
+                        speaker=seg.speaker, timestamp=seg.timestamp)
+
+        for claim in seg.claims:
+            # checkable=True but empty checkability_rationale
+            if claim.checkable and not claim.checkability_rationale.strip():
+                log.warning(logger, MODULE, "missing_checkability_rationale",
+                            f"Claim marked checkable but no rationale: "
+                            f"'{claim.claim_text[:60]}...'")
+
+            # consequence=high but empty consequence_rationale
+            if claim.consequence_if_wrong == "high" and not claim.consequence_rationale.strip():
+                log.warning(logger, MODULE, "missing_consequence_rationale",
+                            f"Claim has high consequence but no rationale: "
+                            f"'{claim.claim_text[:60]}...'")
+
+            # worth_checking doesn't match checkable AND consequence=high
+            expected_worth = claim.checkable and claim.consequence_if_wrong == "high"
+            if claim.worth_checking != expected_worth:
+                log.warning(logger, MODULE, "worth_checking_mismatch",
+                            f"worth_checking={claim.worth_checking} but "
+                            f"checkable={claim.checkable}, "
+                            f"consequence={claim.consequence_if_wrong}: "
+                            f"'{claim.claim_text[:60]}...'")
+
+
+# ---------------------------------------------------------------------------
 # Core extraction — single batch
 # ---------------------------------------------------------------------------
 
@@ -379,6 +428,7 @@ async def extract_batch(
                 context_note=context_note,
             ),
             schema=ExtractionOutput,
+            semantic_validator=validate_extraction,
             temperature=temperature,
             max_tokens=16384,
             activity_name="extract_claims",
@@ -393,6 +443,21 @@ async def extract_batch(
                     f"Model returned {covered}/{expected} segments, "
                     f"retrying with temperature=0.3")
         output = await _call(temperature=0.3)
+
+    # Post-hoc consistency check (permissive warnings)
+    _validate_extraction_consistency(output)
+
+    # Rubric summary logging
+    segment_count = len(output.segments)
+    gist_count = sum(1 for s in output.segments if s.segment_gist.strip())
+    total_claims = sum(len(s.claims) for s in output.segments)
+    log.info(logger, MODULE, "rubric_summary",
+             f"Extraction rubric: {segment_count} segments, "
+             f"{gist_count}/{segment_count} with gist, "
+             f"{total_claims} total claims",
+             segment_count=segment_count,
+             gist_coverage=f"{gist_count}/{segment_count}",
+             total_claims=total_claims)
 
     # Validate segment coverage
     _validate_segment_coverage(output, target_segments)

@@ -53,6 +53,7 @@ from src.llm.validators import (
     validate_decompose,
     validate_judge,
     validate_synthesize,
+    validate_extraction,
 )
 
 __all__ = [
@@ -71,4 +72,5 @@ __all__ = [
     "validate_decompose",
     "validate_judge",
     "validate_synthesize",
+    "validate_extraction",
 ]

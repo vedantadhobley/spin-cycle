@@ -475,6 +475,56 @@ Today's date: {current_date}
 You are a fact-checker's assistant. Your job is to extract verifiable \
 atomic facts from a claim.
 
+Follow these four steps IN ORDER. Each step produces specific output fields.
+
+## STEP 1 — UNDERSTAND THE CLAIM
+
+Before extracting anything, analyze the claim:
+- What is this claim fundamentally asserting?
+- What is the logical relationship between its parts?
+- What structural features does it have (parallel entities, causal chain, comparison, time sequence)?
+
+Classify the structure based on this analysis, and explain WHY.
+
+→ Output: claim_analysis, structure, structure_justification
+
+## STEP 2 — IDENTIFY THESIS AND KEY TEST
+
+Thesis = what the speaker is ARGUING (the overall point).
+Key test = what must be TRUE for the thesis to hold (the falsifying conditions).
+These are different. "NASA is mismanaged" is a thesis. "NASA projects exceed budget \
+and timeline" is a key test.
+
+→ Output: thesis, key_test
+
+## STEP 3 — MAP INTERESTED PARTIES
+
+This is CRITICAL for preventing circular verification. When a claim is ABOUT \
+an entity, that entity's statements cannot verify or refute the claim about \
+themselves. Think through ALL levels:
+
+1. DIRECT: The immediate subject of the claim
+   - Named person → their organization
+   - Organization → that organization
+
+2. INSTITUTIONAL: Parent/governing organizations
+   - Agency A → Parent Department → Executive Branch
+   - Police dept → City government → State government
+   - Subsidiary Corp → Parent Corp → Holding Company
+
+3. AFFILIATED MEDIA: News outlets with ownership/financial ties
+   - Company X → Newspaper N (if same owner)
+   - If a billionaire owns both the subject company AND a media outlet, \
+that outlet cannot independently verify claims about the company
+
+4. REASONING: Explain WHY each party has stake
+   - This forces explicit thinking about relationships
+   - Helps the judge understand the conflict
+
+→ Output: interested_parties (with per-party reasoning)
+
+## STEP 4 — EXTRACT ATOMIC FACTS
+
 CRITICAL: PREFER FEWER, BETTER FACTS OVER EXHAUSTIVE EXTRACTION.
 - A simple claim should produce 1-2 facts, not 5
 - Don't add redundant variations of the same fact
@@ -482,14 +532,15 @@ CRITICAL: PREFER FEWER, BETTER FACTS OVER EXHAUSTIVE EXTRACTION.
 - Don't split "approximately X" into "not more than X" AND "not less than X"
 - Only add falsifying conditions for SUPERLATIVES ("only", "first", "never")
 
-OUTPUT FORMAT:
-You will return a flat list of atomic facts (strings), plus metadata for synthesis.
-
 WHAT IS AN ATOMIC FACT?
 An atomic fact is a single, specific, independently verifiable statement.
 - ONE subject, ONE predicate, ONE object/value
 - No conjunctions (split "X and Y" into two facts)
 - No conditionals in the fact itself (but note if the claim was conditional)
+
+For each fact, assign categories and state WHY those categories apply.
+
+→ Output: facts (text, categories, category_rationale, seed_queries)
 
 EXTRACTION RULES:
 
@@ -760,41 +811,19 @@ The full linguistic pattern taxonomy (presuppositions, quantifiers, modality, \
 causation, negation, etc.) is appended below. Use those patterns to detect \
 and properly decompose complex claim structures.
 
-INTERESTED_PARTIES — COMPREHENSIVE ANALYSIS:
-
-This is CRITICAL for preventing circular verification. When a claim is ABOUT \
-an entity, that entity's statements cannot verify or refute the claim about \
-themselves. Think through ALL levels:
-
-1. DIRECT: The immediate subject of the claim
-   - Named person → their organization
-   - Organization → that organization
-
-2. INSTITUTIONAL: Parent/governing organizations
-   - Agency A → Parent Department → Executive Branch
-   - Police dept → City government → State government
-   - Subsidiary Corp → Parent Corp → Holding Company
-
-3. AFFILIATED MEDIA: News outlets with ownership/financial ties
-   - Company X → Newspaper N (if same owner)
-   - If a billionaire owns both the subject company AND a media outlet, \
-that outlet cannot independently verify claims about the company
-
-4. REASONING: Explain WHY each party has stake
-   - This forces explicit thinking about relationships
-   - Helps the judge understand the conflict
-
 EXAMPLES:
 
 Simple claim (KEEP IT SIMPLE):
 "The Earth is approximately 4.5 billion years old"
 → {{
+  "claim_analysis": "This claim asserts a single scientific fact about Earth's age. It is a straightforward quantitative assertion with no causal, comparative, or temporal components.",
+  "structure": "simple",
+  "structure_justification": "Single subject, single predicate, no parallel entities or causal chain.",
   "thesis": "The Earth is approximately 4.5 billion years old",
   "key_test": "Earth's age is approximately 4.5 billion years",
-  "structure": "simple",
   "interested_parties": {{"direct": [], "institutional": [], "affiliated_media": [], "reasoning": "No interested parties — this is established scientific consensus"}},
   "facts": [
-    {{"text": "The Earth is approximately 4.5 billion years old", "categories": ["SCIENTIFIC"], "seed_queries": ["age of the Earth scientific estimate", "Earth 4.5 billion years evidence"]}}
+    {{"text": "The Earth is approximately 4.5 billion years old", "categories": ["SCIENTIFIC"], "category_rationale": "Scientific age estimate requiring peer-reviewed geological evidence.", "seed_queries": ["age of the Earth scientific estimate", "Earth 4.5 billion years evidence"]}}
   ]
 }}
 Note: DO NOT add "The Earth has an age" or "not older than X" or "not younger than X" — these are redundant.
@@ -802,41 +831,47 @@ Note: DO NOT add "The Earth has an age" or "not older than X" or "not younger th
 Another simple claim:
 "NASA landed on the moon 6 times"
 → {{
+  "claim_analysis": "This claim asserts a specific count of NASA moon landings. It is a single quantitative assertion about a historical fact.",
+  "structure": "simple",
+  "structure_justification": "Single subject (NASA), single quantitative predicate (6 landings).",
   "thesis": "NASA successfully completed multiple moon landings",
   "key_test": "NASA must have landed on the moon 6 times",
-  "structure": "simple",
   "interested_parties": {{"direct": ["NASA"], "institutional": ["US Government"], "affiliated_media": [], "reasoning": "NASA is the subject; US Government is parent organization"}},
   "facts": [
-    {{"text": "NASA landed on the moon 6 times", "categories": ["QUANTITATIVE"], "seed_queries": ["NASA moon landings complete list", "how many times did NASA land on the moon"]}}
+    {{"text": "NASA landed on the moon 6 times", "categories": ["QUANTITATIVE"], "category_rationale": "Specific count requiring historical records.", "seed_queries": ["NASA moon landings complete list", "how many times did NASA land on the moon"]}}
   ]
 }}
 
 Parallel claim:
 "Country A and Country B are both increasing military spending while cutting foreign aid"
 → {{
+  "claim_analysis": "This claim makes parallel assertions about two countries, each doing two things (increasing military spending, cutting foreign aid). The logical relationship is parallel structure across two entities with two predicates each.",
+  "structure": "parallel_comparison",
+  "structure_justification": "Two named entities (Country A, Country B) with identical dual predicates — classic parallel structure.",
   "thesis": "Both major powers prioritize military over foreign aid",
   "key_test": "Both countries must be increasing military spending AND cutting foreign aid",
-  "structure": "parallel_comparison",
   "interested_parties": {{"direct": ["Country A", "Country B"], "institutional": [], "affiliated_media": [], "reasoning": "Both countries are subjects of the claim"}},
   "facts": [
-    {{"text": "Country A is increasing its military spending", "categories": ["QUANTITATIVE"], "seed_queries": ["Country A military spending budget increase", "Country A defense budget year over year"]}},
-    {{"text": "Country B is increasing its military spending", "categories": ["QUANTITATIVE"], "seed_queries": ["Country B military spending budget increase", "Country B defense budget year over year"]}},
-    {{"text": "Country A is cutting its foreign aid budget", "categories": ["QUANTITATIVE"], "seed_queries": ["Country A foreign aid budget cuts", "Country A foreign aid spending data"]}},
-    {{"text": "Country B is cutting its foreign aid budget", "categories": ["QUANTITATIVE"], "seed_queries": ["Country B foreign aid budget cuts", "Country B foreign aid spending data"]}}
+    {{"text": "Country A is increasing its military spending", "categories": ["QUANTITATIVE"], "category_rationale": "Budget trend requiring spending data.", "seed_queries": ["Country A military spending budget increase", "Country A defense budget year over year"]}},
+    {{"text": "Country B is increasing its military spending", "categories": ["QUANTITATIVE"], "category_rationale": "Budget trend requiring spending data.", "seed_queries": ["Country B military spending budget increase", "Country B defense budget year over year"]}},
+    {{"text": "Country A is cutting its foreign aid budget", "categories": ["QUANTITATIVE"], "category_rationale": "Budget trend requiring spending data.", "seed_queries": ["Country A foreign aid budget cuts", "Country A foreign aid spending data"]}},
+    {{"text": "Country B is cutting its foreign aid budget", "categories": ["QUANTITATIVE"], "category_rationale": "Budget trend requiring spending data.", "seed_queries": ["Country B foreign aid budget cuts", "Country B foreign aid spending data"]}}
   ]
 }}
 
 Temporal/origin claim (CRITICAL — presupposition extraction):
 "Company X started selling in Market Y after the merger"
 → {{
+  "claim_analysis": "This claim asserts a temporal sequence (selling started after the merger) with an implicit causal link and a presupposition that there were no significant prior sales. Three components: the temporal event, the causal implication, and the presupposition triggered by 'started'.",
+  "structure": "temporal_sequence",
+  "structure_justification": "'Started...after' creates a temporal dependency between the merger and market entry, with a presupposition.",
   "thesis": "Company X began selling in Market Y specifically because of the merger, implying no significant prior sales",
   "key_test": "Must verify post-merger sales AND check for significant prior sales",
-  "structure": "temporal_sequence",
   "interested_parties": {{"direct": ["Company X"], "institutional": [], "affiliated_media": [], "reasoning": "Company X is the subject of the claim"}},
   "facts": [
-    {{"text": "Company X began selling products in Market Y after the merger", "categories": ["CURRENT_EVENTS"], "seed_queries": ["Company X Market Y expansion timeline", "Company X merger Market Y entry"]}},
-    {{"text": "The merger caused Company X to enter Market Y", "categories": ["CAUSAL"], "seed_queries": ["Company X stated reason for entering Market Y", "Company X Market Y expansion other causes"]}},
-    {{"text": "Company X had significant sales in Market Y before the merger", "categories": ["CURRENT_EVENTS"], "seed_queries": ["Company X Market Y sales before merger", "Company X Market Y history of operations"]}}
+    {{"text": "Company X began selling products in Market Y after the merger", "categories": ["CURRENT_EVENTS"], "category_rationale": "Recent business event requiring news sources.", "seed_queries": ["Company X Market Y expansion timeline", "Company X merger Market Y entry"]}},
+    {{"text": "The merger caused Company X to enter Market Y", "categories": ["CAUSAL"], "category_rationale": "Causal claim needing mechanism evidence and alternative explanations.", "seed_queries": ["Company X stated reason for entering Market Y", "Company X Market Y expansion other causes"]}},
+    {{"text": "Company X had significant sales in Market Y before the merger", "categories": ["CURRENT_EVENTS"], "category_rationale": "Historical business activity requiring records or reporting.", "seed_queries": ["Company X Market Y sales before merger", "Company X Market Y history of operations"]}}
   ]
 }}
 Note: The third fact tests the PRESUPPOSITION. "Started" implies nothing before.
@@ -844,14 +879,16 @@ Note: The third fact tests the PRESUPPOSITION. "Started" implies nothing before.
 Causal claim:
 "The new regulation caused record enrollment"
 → {{
+  "claim_analysis": "This claim asserts a causal relationship: a regulation (cause) produced record enrollment (effect). Three components need verification: the regulation exists, the record enrollment happened, and the causal link is real (not just correlation).",
+  "structure": "causal",
+  "structure_justification": "'Caused' is an explicit causal connector between regulation and enrollment outcome.",
   "thesis": "The regulation directly produced the enrollment increase",
   "key_test": "Regulation was implemented AND record enrollment occurred AND causal link exists",
-  "structure": "causal",
   "interested_parties": {{"direct": [], "institutional": [], "affiliated_media": [], "reasoning": "No specific interested parties identified"}},
   "facts": [
-    {{"text": "The regulation was implemented", "categories": ["LEGISLATIVE"], "seed_queries": ["regulation implemented enacted effective date", "new regulation policy passed"]}},
-    {{"text": "Record enrollment occurred", "categories": ["QUANTITATIVE"], "seed_queries": ["enrollment statistics record high", "enrollment data trend increase"]}},
-    {{"text": "The regulation caused the enrollment increase", "categories": ["CAUSAL", "QUANTITATIVE"], "seed_queries": ["regulation effect on enrollment analysis", "enrollment increase causes other factors"]}},
+    {{"text": "The regulation was implemented", "categories": ["LEGISLATIVE"], "category_rationale": "Legislative action requiring bill text or enactment records.", "seed_queries": ["regulation implemented enacted effective date", "new regulation policy passed"]}},
+    {{"text": "Record enrollment occurred", "categories": ["QUANTITATIVE"], "category_rationale": "Statistical claim needing enrollment data.", "seed_queries": ["enrollment statistics record high", "enrollment data trend increase"]}},
+    {{"text": "The regulation caused the enrollment increase", "categories": ["CAUSAL", "QUANTITATIVE"], "category_rationale": "Causal link needing mechanism evidence; quantitative to verify the magnitude.", "seed_queries": ["regulation effect on enrollment analysis", "enrollment increase causes other factors"]}}
   ]
 }}
 Note: The causal fact requires evidence of mechanism, not just correlation.
@@ -859,12 +896,14 @@ Note: The causal fact requires evidence of mechanism, not just correlation.
 Comparative/ranking claim (DO NOT use placeholders):
 "Country A spends more on defense than the next five countries combined"
 → {{
+  "claim_analysis": "This claim asserts a comparative ranking: Country A's defense spending exceeds a combined total of the next five countries. It is a single comparative assertion involving a ranking and summation.",
+  "structure": "ranking",
+  "structure_justification": "'More than...combined' is a ranking comparison against an aggregate of the next five.",
   "thesis": "Country A's defense budget exceeds the combined budgets of the next five largest spenders",
   "key_test": "Country A's spending must exceed the sum of countries ranked 2nd through 6th",
-  "structure": "ranking",
   "interested_parties": {{"direct": ["Country A military"], "institutional": ["Country A government"], "affiliated_media": [], "reasoning": "Country A's military and government have interest in defense spending perception"}},
   "facts": [
-    {{"text": "Country A spends more on its military than the next five highest-spending countries combined", "categories": ["QUANTITATIVE", "COMPARATIVE"], "seed_queries": ["global military spending by country ranking", "Country A defense budget vs next five countries"]}}
+    {{"text": "Country A spends more on its military than the next five highest-spending countries combined", "categories": ["QUANTITATIVE", "COMPARATIVE"], "category_rationale": "Quantitative comparison needing spending data for multiple countries.", "seed_queries": ["global military spending by country ranking", "Country A defense budget vs next five countries"]}}
   ]
 }}
 Note: The comparison is kept as one searchable fact. The researcher finds the \
@@ -873,12 +912,14 @@ numbers; the judge evaluates the comparison.
 Trend claim (DO NOT enumerate individual years):
 "Agency Z's budget has been increasing every year for the past two decades"
 → {{
+  "claim_analysis": "This claim asserts a consistent upward trend in Agency Z's budget over a 20-year period. It is a single quantitative assertion about a time series, not a set of year-over-year comparisons.",
+  "structure": "simple",
+  "structure_justification": "Single subject with a single trend assertion — no parallel entities or causal chain.",
   "thesis": "Agency Z has seen uninterrupted annual budget growth over 20 years",
   "key_test": "Agency Z's budget must have increased in every single year over the past two decades with no year-over-year decrease",
-  "structure": "simple",
   "interested_parties": {{"direct": ["Agency Z"], "institutional": [], "affiliated_media": [], "reasoning": "Agency Z is the subject of the budget claim"}},
   "facts": [
-    {{"text": "Agency Z's budget increased in every single year over the past two decades compared to the previous year", "categories": ["QUANTITATIVE"], "seed_queries": ["Agency Z budget history by year", "Agency Z annual budget 2005 to 2025", "Agency Z budget cuts or decreases"]}}
+    {{"text": "Agency Z's budget increased in every single year over the past two decades compared to the previous year", "categories": ["QUANTITATIVE"], "category_rationale": "Time-series budget data requiring official spending records.", "seed_queries": ["Agency Z budget history by year", "Agency Z annual budget 2005 to 2025", "Agency Z budget cuts or decreases"]}}
   ]
 }}
 Note: The trend is ONE fact. The researcher finds a budget time series or \
@@ -888,12 +929,14 @@ Do NOT split into "2024 > 2023", "2023 > 2022", etc.
 Group quantifier claim (DO NOT enumerate members):
 "Every country in Alliance X has adopted Policy Y"
 → {{
+  "claim_analysis": "This claim asserts universal adoption of a policy across a named group. It is a single group-level assertion, not individual member checks.",
+  "structure": "simple",
+  "structure_justification": "Single group-level assertion with a universal quantifier — no parallel entities to split.",
   "thesis": "All Alliance X members have adopted Policy Y",
   "key_test": "Every Alliance X member nation must have adopted Policy Y; one non-adopter = false",
-  "structure": "simple",
   "interested_parties": {{"direct": [], "institutional": ["Alliance X"], "affiliated_media": [], "reasoning": "Alliance X is the group whose members are being evaluated"}},
   "facts": [
-    {{"text": "All Alliance X member nations have adopted Policy Y", "categories": ["GENERAL"], "seed_queries": ["Alliance X members Policy Y", "countries that adopted Policy Y", "Alliance X nations without Policy Y"]}}
+    {{"text": "All Alliance X member nations have adopted Policy Y", "categories": ["GENERAL"], "category_rationale": "General policy adoption claim requiring member-state records.", "seed_queries": ["Alliance X members Policy Y", "countries that adopted Policy Y", "Alliance X nations without Policy Y"]}}
   ]
 }}
 Note: The group membership is ONE fact. The researcher finds a list of which \
@@ -902,9 +945,11 @@ produce separate "Country A adopted Policy Y", "Country B adopted Policy Y" fact
 
 Return a JSON object:
 {{
+  "claim_analysis": "What is this claim asserting and what is the logical relationship between its parts?",
+  "structure": "simple | parallel_comparison | causal | ranking | temporal_sequence | superlative | negation",
+  "structure_justification": "Why this structure type? Name the structural features.",
   "thesis": "One sentence: what is the speaker fundamentally arguing?",
   "key_test": "What must ALL be true for the thesis to hold?",
-  "structure": "simple | parallel_comparison | causal | ranking | temporal_sequence | superlative | negation",
   "interested_parties": {{
     "direct": ["org1", "person1"],
     "institutional": ["parent_org", "gov_body"],
@@ -912,8 +957,8 @@ Return a JSON object:
     "reasoning": "Explanation of relationships"
   }},
   "facts": [
-    {{"text": "Atomic fact 1", "categories": ["QUANTITATIVE"], "seed_queries": ["specific search query 1", "specific search query 2"]}},
-    {{"text": "Atomic fact 2", "categories": ["LEGISLATIVE"], "seed_queries": ["targeted query for this fact", "counter-evidence query"]}},
+    {{"text": "Atomic fact 1", "categories": ["QUANTITATIVE"], "category_rationale": "Why these categories apply.", "seed_queries": ["specific search query 1", "specific search query 2"]}},
+    {{"text": "Atomic fact 2", "categories": ["LEGISLATIVE"], "category_rationale": "Why these categories apply.", "seed_queries": ["targeted query for this fact", "counter-evidence query"]}},
     "..."
   ]
 }}

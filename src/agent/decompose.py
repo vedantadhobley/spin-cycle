@@ -400,6 +400,51 @@ async def _validate_subclaim_quality(
     return deduped, llm_issues
 
 
+def _validate_decompose_consistency(output: DecomposeOutput) -> None:
+    """Log warnings for rubric inconsistencies. Permissive — never rejects."""
+    facts = output.facts
+    fact_count = len(facts)
+    structure = output.structure
+
+    # structure="simple" but >3 facts
+    if structure == "simple" and fact_count > 3:
+        log.warning(logger, MODULE, "simple_many_facts",
+                    f"Structure is 'simple' but {fact_count} facts extracted",
+                    structure=structure, fact_count=fact_count)
+
+    # structure="parallel_comparison" but <2 facts
+    if structure == "parallel_comparison" and fact_count < 2:
+        log.warning(logger, MODULE, "parallel_few_facts",
+                    f"Structure is 'parallel_comparison' but only {fact_count} facts",
+                    structure=structure, fact_count=fact_count)
+
+    # structure="causal" but no fact has CAUSAL category
+    if structure == "causal":
+        has_causal = any("CAUSAL" in f.categories for f in facts)
+        if not has_causal:
+            log.warning(logger, MODULE, "causal_no_category",
+                        "Structure is 'causal' but no fact has CAUSAL category",
+                        structure=structure)
+
+    # All facts have only GENERAL category
+    if facts and all(f.categories == ["GENERAL"] for f in facts):
+        log.warning(logger, MODULE, "all_general_categories",
+                    "All facts have only GENERAL category — consider more specific categories",
+                    fact_count=fact_count)
+
+    # claim_analysis mentions "causal"/"temporal" but structure doesn't match
+    if output.claim_analysis:
+        analysis_lower = output.claim_analysis.lower()
+        if "causal" in analysis_lower and structure not in ("causal",):
+            log.warning(logger, MODULE, "analysis_structure_mismatch",
+                        f"claim_analysis mentions 'causal' but structure is '{structure}'",
+                        structure=structure)
+        if "temporal" in analysis_lower and structure not in ("temporal_sequence",):
+            log.warning(logger, MODULE, "analysis_structure_mismatch",
+                        f"claim_analysis mentions 'temporal' but structure is '{structure}'",
+                        structure=structure)
+
+
 async def decompose(claim_text: str, speaker: str | None = None) -> dict:
     """Full decompose pipeline: normalize → extract → quality validate → NER → Wikidata.
 
@@ -474,6 +519,20 @@ async def decompose(claim_text: str, speaker: str | None = None) -> dict:
             max_tokens=16384,
             activity_name="decompose",
         )
+
+        # Post-hoc rubric consistency check (permissive warnings)
+        _validate_decompose_consistency(output)
+
+        # Rubric summary logging
+        all_categories = set()
+        for f in output.facts:
+            all_categories.update(f.categories)
+        log.info(logger, MODULE, "rubric_summary",
+                 "Decompose rubric complete",
+                 claim_analysis=output.claim_analysis[:100] if output.claim_analysis else "",
+                 structure=output.structure,
+                 fact_count=len(output.facts),
+                 categories=sorted(all_categories))
 
         # Post-validation: check for semantic duplicates / group enumeration
         # Returns deduped facts (trivial dupes removed) + LLM-detected issues
