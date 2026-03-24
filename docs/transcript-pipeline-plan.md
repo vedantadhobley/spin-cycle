@@ -21,20 +21,34 @@ transcripts
 ├── word_count    INTEGER
 ├── segment_count INTEGER
 ├── display_text  TEXT                  — cleaned, merged same-speaker text
+├── status        VARCHAR(32)           — queued → extracting → verifying → complete
 └── created_at    TIMESTAMPTZ
 
 transcript_claims
-├── id              UUID PK
-├── transcript_id   FK → transcripts.id
-├── claim_id        FK → claims.id (nullable — set when sent to verification)
-├── claim_text      TEXT               — contextualized with [brackets]
-├── original_quote  TEXT               — speaker's exact words (for highlighting)
-├── speaker         VARCHAR(256)
-├── timestamp       VARCHAR(32)        — "MM:SS"
-├── timestamp_secs  FLOAT
-├── claim_type      VARCHAR(64)
-└── created_at      TIMESTAMPTZ
+├── id                      UUID PK
+├── transcript_id           FK → transcripts.id
+├── claim_id                FK → claims.id (nullable — set when sent to verification)
+├── claim_text              TEXT               — contextualized with [brackets]
+├── original_quote          TEXT               — speaker's exact words (for highlighting)
+├── speaker                 VARCHAR(256)
+├── timestamp               VARCHAR(32)        — "MM:SS"
+├── timestamp_secs          FLOAT
+├── claim_type              VARCHAR(64)
+├── worth_checking          BOOLEAN NOT NULL DEFAULT TRUE
+├── skip_reason             VARCHAR(64)        — why not worth checking
+├── argument_summary        TEXT               — what argument does this support?
+├── supports_argument       BOOLEAN            — is this fact deployed to persuade?
+├── checkable               BOOLEAN            — could independent data confirm/deny?
+├── checkability_rationale  TEXT               — why checkable or not
+├── consequence_if_wrong    VARCHAR(16)        — high/low/none
+├── consequence_rationale   TEXT               — why this consequence level
+├── segment_gist            TEXT               — what the speaker is arguing in this segment
+└── created_at              TIMESTAMPTZ
 ```
+
+ALL claims are stored (including skipped ones). `worth_checking=FALSE` claims
+have `claim_id=NULL` (never sent to verification) but retain full extraction
+rationale for debugging and frontend display.
 
 `transcript_claims.claim_id` is the bridge to the verification pipeline.
 When a transcript claim is submitted for verification, a `claims` record is
@@ -179,23 +193,61 @@ claim processing. For transcript extraction, we need similar queue management:
 
 - [x] Transcript fetcher + parser (`src/transcript/fetcher.py`)
 - [x] Claim extraction with segment batching (`src/transcript/extractor.py`)
+- [x] Rubric-based extraction (checkable, consequence, argument_summary, segment_gist)
 - [x] Temporal workflow with per-batch activities (`src/workflows/extract_transcript.py`)
 - [x] API endpoint `POST /transcripts` (`src/api/routes/transcripts.py`)
 - [x] Transcript storage with cleaned display text (`store_transcript` activity)
-- [x] Transcript claims storage (`store_transcript_claims` activity)
-- [x] DB models: `TranscriptRecord`, `TranscriptClaim`
+- [x] Transcript claims storage — ALL claims with full rationale (`store_transcript_claims`)
+- [x] DB models: `TranscriptRecord`, `TranscriptClaim` (with extraction rubric columns)
 - [x] Semaphore-based concurrency (2 parallel batches)
 - [x] Overlap context at batch boundaries (3 segments)
 - [x] Coverage retry (temperature=0.3 on <50% segment coverage)
+- [x] Programmatic consistency enforcement on worth_checking
+- [x] Wire `claim_id` FK when submitting transcript claims to verification
+- [x] Transcript status tracking (`queued` → `extracting` → `verifying` → `complete`)
+- [x] One-pipeline-at-a-time constraint via `finish_transcript_and_start_next`
+
+## Current Usage: Manual Submission
+
+Until the cron job is built, transcripts are submitted manually via the API:
+
+```bash
+# Production (port 3500)
+curl -X POST http://localhost:3500/transcripts \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://www.rev.com/transcripts/some-transcript-slug"}'
+
+# Development (port 4500)
+curl -X POST http://localhost:4500/transcripts \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://www.rev.com/transcripts/some-transcript-slug"}'
+```
+
+The endpoint is **idempotent** — re-submitting a URL that is `queued`/`extracting`/`verifying`
+returns the existing status. Completed or failed transcripts can be re-submitted.
+
+If another pipeline (extraction or verification) is already running, the transcript is
+queued and auto-starts when the current pipeline finishes.
+
+### Next Step: Auto-Discovery Cron Job
+
+The planned cron job (`src/transcript/poller.py`) will:
+
+1. **Discover** — Fetch the Rev.com transcript index page, parse for transcript URLs
+2. **Filter** — Skip URLs already in the `transcripts` table. Apply relevance filter
+   (speaker-based or keyword-based — TBD, start with a curated speaker list)
+3. **Submit** — `POST /transcripts` for each new URL (leverages existing queuing)
+
+Implementation approach:
+- Temporal scheduled workflow (cron syntax) OR system cron calling the API
+- Either way, the submission endpoint handles all queuing and one-at-a-time constraints
+- The poller only needs to discover and POST — no pipeline logic
 
 ## What Needs Building
 
+- [ ] Cron job: daily transcript discovery from Rev.com index
+- [ ] Transcript relevance filter (which transcripts are worth processing)
 - [ ] Frontend: transcript view with inline claim highlighting
 - [ ] Frontend: claims-only toggle view
 - [ ] Frontend: claim detail panel (verdict, reasoning, evidence)
-- [ ] Cron job: daily transcript discovery from Rev.com index
-- [ ] Transcript relevance filter (which transcripts are worth processing)
-- [ ] Global queue manager: enforce one-pipeline-at-a-time constraint
-- [ ] Wire `claim_id` FK when submitting transcript claims to verification
-- [ ] Transcript status tracking (`queued` → `extracting` → `complete`)
-- [ ] API endpoints for frontend queries (transcript list, claims by transcript, etc.)
+- [ ] Frontend: skipped claims display with rationale

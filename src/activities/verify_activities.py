@@ -29,7 +29,7 @@ from sqlalchemy import select
 from temporalio import activity
 
 from src.db.session import async_session
-from src.db.models import Claim, SubClaim, Evidence, Verdict
+from src.db.models import Claim, SubClaim, Evidence, Verdict, InterestedParty
 from src.utils.logging import log
 
 
@@ -151,7 +151,12 @@ async def synthesize_verdict(
 
 
 @activity.defn
-async def store_result(claim_id: str, result: dict) -> None:
+async def store_result(
+    claim_id: str,
+    result: dict,
+    thesis_info: dict | None = None,
+    atomic_facts: list[dict] | None = None,
+) -> None:
     """Store the verification result in the database.
 
     The result dict is either:
@@ -163,6 +168,12 @@ async def store_result(claim_id: str, result: dict) -> None:
     """
     log.info(activity.logger, "store", "start", "Storing verification result",
              claim_id=claim_id, verdict=result.get("verdict"))
+
+    # Build fact lookup for matching sub_claim text → decompose metadata
+    fact_lookup: dict[str, dict] = {}
+    if atomic_facts:
+        for fact in atomic_facts:
+            fact_lookup[fact["text"]] = fact
 
     async with async_session() as session:
         async with session.begin():
@@ -178,6 +189,36 @@ async def store_result(claim_id: str, result: dict) -> None:
                           error="claim_not_found", claim_id=claim_id)
                 return
 
+            # Write claim-level decompose fields
+            if thesis_info:
+                claim.normalized_claim = thesis_info.get("normalized_claim")
+                claim.normalization_changes = thesis_info.get("normalization_changes")
+                claim.thesis = thesis_info.get("thesis")
+                claim.key_test = thesis_info.get("key_test")
+                claim.claim_structure = thesis_info.get("structure")
+                claim.claim_analysis = thesis_info.get("claim_analysis")
+                claim.structure_justification = thesis_info.get("structure_justification")
+                ip = thesis_info.get("interested_parties", {})
+                claim.interested_parties_reasoning = ip.get("reasoning")
+                claim.wikidata_context = ip.get("wikidata_context")
+
+                # Write InterestedParty rows
+                for entity in ip.get("direct", []):
+                    session.add(InterestedParty(
+                        claim_id=claim_uuid, entity_name=entity,
+                        role="direct", source="llm",
+                    ))
+                for entity in ip.get("institutional", []):
+                    session.add(InterestedParty(
+                        claim_id=claim_uuid, entity_name=entity,
+                        role="institutional", source="llm",
+                    ))
+                for entity in ip.get("affiliated_media", []):
+                    session.add(InterestedParty(
+                        claim_id=claim_uuid, entity_name=entity,
+                        role="affiliated_media", source="llm",
+                    ))
+
             # Recursive storage of the result tree
             async def _store_node(sub: dict, parent_id=None):
                 """Store a sub-result node (leaf or synthesis) with evidence and children."""
@@ -190,7 +231,14 @@ async def store_result(claim_id: str, result: dict) -> None:
                     verdict=sub.get("verdict"),
                     confidence=sub.get("confidence"),
                     reasoning=sub.get("reasoning"),
+                    judge_rubric=sub.get("judge_rubric"),
                 )
+                # Match against decompose facts for categories/seeds
+                fact_meta = fact_lookup.get(sub["sub_claim"])
+                if fact_meta:
+                    sub_claim.categories = fact_meta.get("categories")
+                    sub_claim.seed_queries = fact_meta.get("seed_queries")
+                    sub_claim.category_rationale = fact_meta.get("category_rationale")
                 session.add(sub_claim)
                 await session.flush()  # get sub_claim.id
 
@@ -246,6 +294,7 @@ async def store_result(claim_id: str, result: dict) -> None:
                 reasoning=result.get("reasoning"),
                 reasoning_chain=result.get("reasoning_chain"),
                 citations=result.get("citations"),
+                synthesis_rubric=result.get("synthesis_rubric"),
             )
             session.add(verdict_row)
 

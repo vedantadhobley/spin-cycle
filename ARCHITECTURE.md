@@ -311,7 +311,6 @@ The research agent uses **thinking=off**. The ReAct loop is pure tool-routing �
 **Tools available to the agent (dynamically loaded based on API keys):**
 - `serper_search` — Google search via Serper API (primary). Requires `SERPER_API_KEY`.
 - `web_search` — DuckDuckGo search (fallback). Always available, free.
-- `searxng_search` — SearXNG meta-search (optional padding). Self-hosted, no API key.
 - `brave_search` — Brave Search API (optional). Requires `BRAVE_API_KEY`.
 - `wikipedia_search` — Wikipedia API search (established facts, background).
 - `page_fetcher` — Fetches and extracts text from URLs found in search results.
@@ -564,7 +563,7 @@ Search engines return Reddit comments, Quora answers, Medium blogs, and other us
 
 ### How It's Wired
 
-- `filter_results(results)` — called in all search tools (Serper, SearXNG, Brave, DuckDuckGo) on the result list before returning
+- `filter_results(results)` — called in all search tools (Serper, Brave, DuckDuckGo) on the result list before returning
 - `is_blocked(url)` — called in `page_fetcher.py` to reject blocked URLs before fetching
 - Handles subdomains: `old.reddit.com` matches the `reddit.com` block
 - Search tools request extra results (e.g., 15 instead of 10) to compensate for filtering losses
@@ -668,30 +667,71 @@ Key decisions:
 ### Entity Relationship Diagram
 
 ```
-┌─────────────────┐       ┌──────────────────┐       ┌────────────────────┐
-│     claims      │       │    sub_claims     │       │     evidence       │
-│─────────────────│       │──────────────────│       │────────────────────│
-│ id (uuid) PK    │───┐   │ id (uuid) PK     │───┐   │ id (uuid) PK      │
-│ text (text)     │   │   │ claim_id (uuid)FK│   │   │ sub_claim_id (FK) │
-│ source_url      │   └──▶│ parent_id (FK)   │   └──▶│ source_type (enum)│
-│ source_name     │       │ is_leaf (bool)   │       │ source_url        │
-│ status (enum)   │       │ text (text)      │       │ content (text)    │
-│ created_at      │       │ verdict (enum)   │       │ retrieved_at      │
-│ updated_at      │       │ confidence (float)│       │                    │
-└────────┬────────┘       │ reasoning (text) │       └────────────────────┘
-         │                └──────────────────┘
-         │       ┌──────────────────┐      parent_id is self-referential:
-         │       │    verdicts      │      compound nodes link to their parent,
-         │       │──────────────────│      leaves link to their parent node,
-         └──────▶│ id (uuid) PK     │      top-level nodes have parent_id = NULL
-                 │ claim_id (FK) UQ  │
-                 │ verdict (enum)    │
-                 │ confidence (float)│
-                 │ reasoning (text)  │
-                 │ reasoning_chain   │
-                 │   (jsonb)         │
-                 │ created_at        │
-                 └──────────────────┘
+┌─────────────────────┐       ┌──────────────────────┐       ┌────────────────────┐
+│       claims        │       │     sub_claims        │       │     evidence       │
+│─────────────────────│       │──────────────────────│       │────────────────────│
+│ id (uuid) PK        │───┐   │ id (uuid) PK         │───┐   │ id (uuid) PK      │
+│ text (text)         │   │   │ claim_id (uuid) FK   │   │   │ sub_claim_id (FK) │
+│ source_url          │   ├──▶│ parent_id (FK, self) │   └──▶│ source_type (enum)│
+│ source_name         │   │   │ is_leaf (bool)       │       │ source_url        │
+│ speaker             │   │   │ text (text)          │       │ content, title    │
+│ status (enum)       │   │   │ verdict (enum)       │       │ domain, bias      │
+│ normalized_claim    │   │   │ confidence (float)   │       │ factual, tier     │
+│ normalization_changes│   │   │ reasoning (text)     │       │ judge_index       │
+│ thesis              │   │   │ categories (jsonb)   │       │ assessment        │
+│ key_test            │   │   │ seed_queries (jsonb) │       │ is_independent    │
+│ claim_structure     │   │   │ category_rationale   │       │ key_point         │
+│ claim_analysis      │   │   │ judge_rubric (jsonb) │       │ retrieved_at      │
+│ structure_justif.   │   │   └──────────────────────┘       └────────────────────┘
+│ ip_reasoning        │   │
+│ wikidata_context    │   │   ┌──────────────────────┐
+│ created_at          │   │   │ interested_parties   │
+│ updated_at          │   │   │──────────────────────│
+└─────────┬───────────┘   ├──▶│ id (uuid) PK         │
+          │               │   │ claim_id (FK)        │
+          │               │   │ entity_name          │
+          │               │   │ role, source         │
+          │               │   │ created_at           │
+          │               │   └──────────────────────┘
+          │
+          │       ┌──────────────────────┐
+          │       │      verdicts        │
+          │       │──────────────────────│
+          └──────▶│ id (uuid) PK         │
+                  │ claim_id (FK) UQ     │
+                  │ verdict (enum)       │
+                  │ confidence (float)   │
+                  │ reasoning (text)     │
+                  │ reasoning_chain (jsonb)│
+                  │ citations (jsonb)    │
+                  │ synthesis_rubric (jsonb)│
+                  │ created_at           │
+                  └──────────────────────┘
+
+Transcript tables:
+
+┌──────────────────────┐       ┌──────────────────────────┐
+│    transcripts       │       │   transcript_claims      │
+│──────────────────────│       │──────────────────────────│
+│ id (uuid) PK         │───┐   │ id (uuid) PK             │
+│ url (unique)         │   └──▶│ transcript_id (FK)       │
+│ title                │       │ claim_id (FK → claims)   │
+│ date                 │       │ claim_text               │
+│ speakers (jsonb)     │       │ original_quote           │
+│ word_count           │       │ speaker, timestamp       │
+│ segment_count        │       │ timestamp_secs           │
+│ display_text         │       │ claim_type               │
+│ status               │       │ worth_checking (bool)    │
+│ created_at           │       │ skip_reason              │
+└──────────────────────┘       │ argument_summary         │
+                               │ supports_argument        │
+                               │ checkable                │
+                               │ checkability_rationale   │
+                               │ consequence_if_wrong     │
+                               │ consequence_rationale    │
+                               │ segment_gist             │
+                               │ created_at               │
+                               └──────────────────────────┘
 
 Cache tables (no FK relationships — standalone lookup):
 
@@ -713,7 +753,7 @@ Cache tables (no FK relationships — standalone lookup):
 
 ### Table: `claims`
 
-The top-level entity. One row per claim submitted (manually or via extraction).
+The top-level entity. One row per claim submitted (manually or via transcript extraction).
 
 | Column | Type | Constraints | Description |
 |--------|------|-------------|-------------|
@@ -721,13 +761,24 @@ The top-level entity. One row per claim submitted (manually or via extraction).
 | `text` | `TEXT` | NOT NULL | The original claim text |
 | `source_url` | `VARCHAR(2048)` | nullable | URL where the claim was found |
 | `source_name` | `VARCHAR(256)` | nullable | Name of the source (e.g., "BBC News") |
+| `speaker` | `VARCHAR(256)` | nullable | Person who made the claim |
 | `status` | `ENUM('queued','pending','processing','verified','flagged')` | NOT NULL, default 'pending' | Workflow state |
+| `normalized_claim` | `TEXT` | nullable | Claim after bias-neutralization normalization |
+| `normalization_changes` | `JSONB` | nullable | List of changes made during normalization |
+| `thesis` | `TEXT` | nullable | One-sentence thesis: what is the speaker arguing? |
+| `key_test` | `TEXT` | nullable | What must be true for the thesis to hold? |
+| `claim_structure` | `VARCHAR(64)` | nullable | Structure type (simple, conditional, comparative, etc.) |
+| `claim_analysis` | `TEXT` | nullable | Decompose rubric step 1: what the claim asserts |
+| `structure_justification` | `TEXT` | nullable | Decompose rubric step 1: why this structure type |
+| `interested_parties_reasoning` | `TEXT` | nullable | Why these entities have stake in the claim |
+| `wikidata_context` | `TEXT` | nullable | Wikidata-derived relationship context |
 | `created_at` | `TIMESTAMPTZ` | default now() | When the claim was submitted |
 | `updated_at` | `TIMESTAMPTZ` | default now(), on update | Last modification time |
 
 **Relationships:**
 - Has many `sub_claims` (cascade delete)
 - Has one `verdict` (cascade delete)
+- Has many `interested_parties` (cascade delete)
 
 **Status lifecycle:** `queued` → `pending` → `processing` → `verified` (or `flagged`). Claims submitted while another is running start as `queued`; `start_next_queued_claim` promotes them to `pending`.
 
@@ -745,6 +796,10 @@ Atomic sub-claims and compound nodes decomposed from the parent claim by the LLM
 | `verdict` | `ENUM(...)` | nullable | LLM's verdict on this sub-claim (7-level scale) |
 | `confidence` | `FLOAT` | nullable | 0.0 to 1.0 confidence score |
 | `reasoning` | `TEXT` | nullable | LLM's explanation of the verdict |
+| `categories` | `JSONB` | nullable | Evidence-need categories from decompose (e.g., `["QUANTITATIVE", "COMPARATIVE"]`) |
+| `seed_queries` | `JSONB` | nullable | LLM-written search queries for this fact |
+| `category_rationale` | `TEXT` | nullable | Why these categories apply |
+| `judge_rubric` | `JSONB` | nullable | Full 5-step judge rubric (claim_interpretation, key_evidence, evidence_direction, direction_reasoning, precision_assessment) |
 
 **Relationships:**
 - Belongs to one `claim`
@@ -753,15 +808,24 @@ Atomic sub-claims and compound nodes decomposed from the parent claim by the LLM
 
 ### Table: `evidence`
 
-Individual pieces of evidence gathered by the research agent for a sub-claim.
+Individual pieces of evidence gathered by the research agent for a sub-claim, annotated with source quality metadata and judge assessments.
 
 | Column | Type | Constraints | Description |
 |--------|------|-------------|-------------|
 | `id` | `UUID` | PK, default uuid4 | Unique identifier |
 | `sub_claim_id` | `UUID` | FK → sub_claims.id, NOT NULL | Parent sub-claim |
 | `source_type` | `ENUM('web','wikipedia','news_api')` | NOT NULL | Where the evidence came from |
-| `source_url` | `VARCHAR(2048)` | nullable | URL of the source (often embedded in content) |
+| `source_url` | `VARCHAR(2048)` | nullable | URL of the source |
 | `content` | `TEXT` | nullable | The evidence text/excerpt |
+| `title` | `VARCHAR(512)` | nullable | Page title |
+| `domain` | `VARCHAR(256)` | nullable | Extracted domain (e.g., "reuters.com") |
+| `bias` | `VARCHAR(64)` | nullable | MBFC bias rating |
+| `factual` | `VARCHAR(64)` | nullable | MBFC factual reporting rating |
+| `tier` | `VARCHAR(64)` | nullable | Evidence tier label (TIER 1/2/3) |
+| `judge_index` | `INTEGER` | nullable | Index in the judge prompt's evidence list |
+| `assessment` | `VARCHAR(32)` | nullable | Judge's assessment (supports/contradicts/mixed/neutral) |
+| `is_independent` | `BOOLEAN` | nullable | Whether the source is independent from claim subject |
+| `key_point` | `TEXT` | nullable | Judge's summary of what this evidence says |
 | `retrieved_at` | `TIMESTAMPTZ` | default now() | When the evidence was gathered |
 
 **Relationships:**
@@ -779,10 +843,30 @@ The overall verdict for a claim, produced by the synthesize step.
 | `confidence` | `FLOAT` | NOT NULL | 0.0 to 1.0 confidence score |
 | `reasoning` | `TEXT` | nullable | Top-level synthesis reasoning explaining the verdict |
 | `reasoning_chain` | `JSONB` | nullable | Array of reasoning strings from sub-claim judgments |
+| `citations` | `JSONB` | nullable | Source citations extracted from reasoning |
+| `synthesis_rubric` | `JSONB` | nullable | Full 4-step synthesis rubric (thesis_restatement, subclaim_weights, thesis_survives) |
 | `created_at` | `TIMESTAMPTZ` | default now() | When the verdict was produced |
 
 **Relationships:**
 - Belongs to one `claim` (one-to-one via unique constraint)
+
+### Table: `interested_parties`
+
+Entities with potential conflicts of interest related to a claim. Populated during decomposition from LLM output, SpaCy NER, and Wikidata expansion. Enables "show all claims involving Entity X" queries.
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | `UUID` | PK, default uuid4 | Unique identifier |
+| `claim_id` | `UUID` | FK → claims.id, NOT NULL | Parent claim |
+| `entity_name` | `VARCHAR(256)` | NOT NULL | Entity name (person, org, media outlet) |
+| `role` | `VARCHAR(32)` | NOT NULL | `direct`, `institutional`, `affiliated_media`, or `wikidata_expanded` |
+| `source` | `VARCHAR(32)` | NOT NULL | `llm`, `ner`, `speaker`, or `wikidata` |
+| `created_at` | `TIMESTAMPTZ` | default now() | When the record was created |
+
+**Index:** `(entity_name, claim_id)` for efficient "all claims involving Entity X" lookups.
+
+**Relationships:**
+- Belongs to one `claim`
 
 ### Table: `source_ratings`
 
@@ -815,6 +899,56 @@ Cached Wikidata entity relationships for conflict-of-interest detection. Stores 
 | `relationships` | `JSONB` | nullable | Full `get_ownership_chain()` result |
 | `scraped_at` | `TIMESTAMPTZ` | default now() | When the entity was looked up |
 
+### Table: `transcripts`
+
+Stored transcripts with cleaned display text. One row per unique URL.
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | `UUID` | PK, default uuid4 | Unique identifier |
+| `url` | `VARCHAR(2048)` | UNIQUE, NOT NULL | Transcript source URL (Rev.com) |
+| `title` | `VARCHAR(512)` | NOT NULL | Transcript title |
+| `date` | `VARCHAR(64)` | nullable | Publication date |
+| `speakers` | `JSONB` | NOT NULL | List of speaker names |
+| `word_count` | `INTEGER` | NOT NULL | Total word count |
+| `segment_count` | `INTEGER` | NOT NULL | Number of speaker segments |
+| `display_text` | `TEXT` | NOT NULL | Cleaned, merged same-speaker segments |
+| `status` | `VARCHAR(32)` | NOT NULL, default 'queued' | `queued` → `extracting` → `verifying` → `complete` / `failed` |
+| `created_at` | `TIMESTAMPTZ` | default now() | When the transcript was stored |
+
+**Relationships:**
+- Has many `transcript_claims` (cascade delete)
+
+### Table: `transcript_claims`
+
+Claims extracted from transcripts, linking extraction to verification. Stores ALL claims including skipped ones with full extraction rationale.
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | `UUID` | PK, default uuid4 | Unique identifier |
+| `transcript_id` | `UUID` | FK → transcripts.id, NOT NULL | Parent transcript |
+| `claim_id` | `UUID` | FK → claims.id, nullable | Set when sent to verification (NULL for skipped claims) |
+| `claim_text` | `TEXT` | NOT NULL | Contextualized claim with [brackets] |
+| `original_quote` | `TEXT` | NOT NULL | Speaker's exact words (for inline highlighting) |
+| `speaker` | `VARCHAR(256)` | NOT NULL | Speaker name |
+| `timestamp` | `VARCHAR(32)` | NOT NULL | "MM:SS" timestamp |
+| `timestamp_secs` | `FLOAT` | NOT NULL | Timestamp in seconds |
+| `claim_type` | `VARCHAR(64)` | nullable | quantitative, historical, causal, comparative, attribution, other |
+| `worth_checking` | `BOOLEAN` | NOT NULL, default TRUE | Whether this claim was sent for verification |
+| `skip_reason` | `VARCHAR(64)` | nullable | Why not worth checking (not_checkable, low_consequence, etc.) |
+| `argument_summary` | `TEXT` | nullable | What argument does citing this fact support? |
+| `supports_argument` | `BOOLEAN` | nullable | Is this fact deployed to persuade? |
+| `checkable` | `BOOLEAN` | nullable | Could independent data confirm or deny? |
+| `checkability_rationale` | `TEXT` | nullable | Why checkable or not |
+| `consequence_if_wrong` | `VARCHAR(16)` | nullable | high, low, or none |
+| `consequence_rationale` | `TEXT` | nullable | Why this consequence level |
+| `segment_gist` | `TEXT` | nullable | What the speaker is arguing in this segment |
+| `created_at` | `TIMESTAMPTZ` | default now() | When the claim was extracted |
+
+**Relationships:**
+- Belongs to one `transcript`
+- Optionally belongs to one `claim` (set when verification starts)
+
 ### Enums
 
 | Enum Name | Values | Used By |
@@ -830,7 +964,7 @@ All models use SQLAlchemy 2.0 declarative base (`src/db/models.py`):
 - UUIDs via `sqlalchemy.dialects.postgresql.UUID(as_uuid=True)`
 - Async engine + sessionmaker via `asyncpg` (`src/db/session.py`)
 - Tables auto-created on app startup via `Base.metadata.create_all` in the FastAPI lifespan
-- No Alembic migrations yet — table changes require dropping and recreating
+- Schema migrations via `_migrate()` in `src/api/app.py` — inspects existing columns and adds missing ones via `ALTER TABLE`. No Alembic yet
 
 ---
 
@@ -917,8 +1051,10 @@ The app uses a lifespan context manager for startup/shutdown:
 | `POST` | `/claims` | Submit a claim | `ClaimSubmit` | `ClaimResponse` (201) |
 | `GET` | `/claims/{id}` | Get claim with verdict | — | `VerdictResponse` |
 | `GET` | `/claims` | List claims | `?status=&limit=&offset=` | `ClaimListResponse` |
+| `POST` | `/claims/batch` | Submit multiple claims | `BatchClaimSubmit` | `BatchClaimResponse` (201) |
+| `POST` | `/transcripts` | Submit transcript URL | `TranscriptSubmit` | `TranscriptResponse` (201) |
 
-### Pydantic Schemas (`src/data/schemas.py`)
+### Pydantic Schemas (`src/schemas/api.py`)
 
 | Schema | Purpose | Key Fields |
 |--------|---------|------------|
@@ -956,6 +1092,8 @@ spin-cycle-dev-temporal-ui       :4501  ← Temporal workflow dashboard
 spin-cycle-dev-postgres                 ← Application Postgres (internal)
 spin-cycle-dev-temporal-postgres        ← Temporal metadata Postgres (internal)
 spin-cycle-dev-adminer           :4502  ← Postgres web UI (Dracula theme)
+
+Production (spin-cycle-prod-*) uses ports 3500-3502 with the same topology.
 ```
 
 ### Port Allocation
@@ -977,7 +1115,6 @@ spin-cycle-dev-adminer           :4502  ← Postgres web UI (Dracula theme)
 - `LLAMA_EMBED_URL` — LLM embeddings API (llama.cpp, via Tailscale)
 - Serper — primary search (Google results via API, requires `SERPER_API_KEY`)
 - DuckDuckGo — fallback search (free, always available)
-- SearXNG — optional padding (self-hosted meta-search, configured via `SEARXNG_URL`)
 - Brave Search — optional (independent index, requires `BRAVE_API_KEY`)
 - Wikipedia API — factual lookups (no API key)
 
@@ -1127,15 +1264,15 @@ Config: `~/workspace/monitor/promtail/promtail.yml`
 | Component | Status | Details |
 |-----------|--------|---------|
 | Docker infrastructure | **Done** | 7 containers, health checks, volume persistence |
-| PostgreSQL schema | **Done** | 6 tables: claims, sub_claims (with tree structure), evidence, verdicts, source_ratings (MBFC cache), wikidata_cache |
+| PostgreSQL schema | **Done** | 9 tables: claims (+ decompose rubric), sub_claims (+ categories, judge_rubric), evidence (+ quality metadata), verdicts (+ synthesis_rubric), interested_parties, transcripts, transcript_claims (+ extraction rationale), source_ratings, wikidata_cache |
 | FastAPI API | **Done** | POST/GET claims, health check, lifespan management |
-| Temporal workflow | **Done** | VerifyClaimWorkflow with 7 activities, flat pipeline, thesis-aware synthesis, retry policies |
-| Temporal worker | **Done** | Registers workflow + 7 activities, max_concurrent_activities=2, structured logging |
+| Temporal workflows | **Done** | VerifyClaimWorkflow (7 activities) + ExtractTranscriptWorkflow (8 activities), flat pipeline, thesis-aware synthesis |
+| Temporal worker | **Done** | Registers 2 workflows + 15 activities, max_concurrent_activities=2, structured logging |
 | `decompose_claim` | **Done** | LLM decomposes text into flat facts (guided by linguistic patterns) + thesis (structure, key_test) in one pass |
-| `research_subclaim` | **Done** | LangGraph ReAct agent with Serper (primary) + DuckDuckGo (fallback) + SearXNG + Wikipedia + page_fetcher |
+| `research_subclaim` | **Done** | LangGraph ReAct agent with Serper (primary) + DuckDuckGo (fallback) + Brave (optional) + Wikipedia + page_fetcher |
 | `judge_subclaim` | **Done** | LLM evaluates evidence, returns structured verdict |
 | `synthesize_verdict` | **Done** | Thesis-aware synthesis — evaluates whether speaker's argument survives sub-verdicts (importance-weighted, not count-based) |
-| `store_result` | **Done** | Writes flat result to Postgres (all sub-claims as leaves) |
+| `store_result` | **Done** | Writes full result tree to Postgres: decompose rubric on claim, categories/seeds on sub-claims, judge rubric, synthesis rubric on verdict, interested parties |
 | Source quality filtering | **Done** | Domain blocklist (~117 domains) filters all search results + page fetches |
 | Prompts | **Done** | 5 prompt pairs (NORMALIZE, DECOMPOSE, RESEARCH, JUDGE, SYNTHESIZE) in `src/prompts/verification.py` |
 | LLM connectivity | **Done** | Unified Qwen3.5 via `LLAMA_URL` — `enable_thinking=False` for all steps (thinking mode unused, generates excessive tokens) |
@@ -1148,11 +1285,12 @@ See [ROADMAP.md](ROADMAP.md) for the full prioritised improvement plan. Key next
 
 | Component | Status | Details |
 |-----------|--------|--------|
-| Alembic migrations | **Next** | Unblocks all future schema changes. Dependency installed, no init |
-| Source credibility hierarchy | **Done** | 3-tier system in prompts: primary docs > independent reporting > political statements |
+| Transcript extraction | **Done** | ExtractTranscriptWorkflow: fetch → batch extract → finalize → verify. Segment-batched with overlap context, rubric-based extraction, all claims stored with rationale |
+| Data persistence | **Done** | All intermediate data persisted: decompose rubric, judge rubric, synthesis rubric, interested parties, extraction rationale. Enables retrospective debugging |
+| Grafana dashboard | **Done** | Pipeline KPIs, verdict trends, LLM latency, evidence quality, transcript metrics, error tracking. Loki datasource |
+| Rubric-based prompts | **Done** | Judge (5-step) and Synthesize (4-step) rubrics with structured output. Decompose (2-step) with categories and seed queries |
+| Alembic migrations | **Planned** | Unblocks future schema changes. Currently using `_migrate()` with column-existence checks |
 | Calibration test suite | **Planned** | 100+ known claims, measure accuracy and confidence calibration |
-| RSS feed monitoring | **Planned** | `source_feeds` + `articles` tables, Temporal cron workflow |
-| Claim extraction pipeline | **Planned** | ExtractClaimsWorkflow, LLM reads articles → extracts claims |
 | LangFuse integration | **Planned** | Self-hosted LLM observability |
 
 ---
@@ -1221,9 +1359,9 @@ docker logs -f spin-cycle-dev-worker
 
 Adminer is available at http://localhost:4502:
 - **System**: PostgreSQL
-- **Server**: `postgres`
+- **Server**: `spin-cycle-dev-postgres` (dev) or `spin-cycle-prod-postgres` (prod)
 - **Username**: `spincycle`
-- **Password**: `spincycle`
+- **Password**: from `POSTGRES_PASSWORD` env var (`spin-cycle-dev` in dev)
 - **Database**: `spincycle`
 
 Key queries:
@@ -1304,11 +1442,10 @@ spin-cycle/
 │   ├── tools/                      # Evidence gathering + data sources
 │   │   ├── source_ratings.py       # MBFC ratings (scrape + cache + parallel await)
 │   │   ├── source_filter.py        # Domain blocklist + MBFC cache population
-│   │   ├── media_matching.py       # URL↔media matching, publisher ownership, MBFC owner extraction
+│   │   ├── media_matching.py       # URL↔media matching, publisher ownership
 │   │   ├── mbfc_index.py           # MBFC index bootstrap (WordPress REST API → source_ratings DB)
 │   │   ├── wikidata.py             # Wikidata SPARQL — ownership chains, relationships
 │   │   ├── legiscan.py             # LegiScan API — US legislation, votes, bill text
-│   │   ├── searxng.py              # SearXNG meta-search (optional padding, self-hosted)
 │   │   ├── serper.py               # Serper (Google Search API) — primary search backend
 │   │   ├── brave.py                # Brave Search API
 │   │   ├── web_search.py           # DuckDuckGo search (fallback backend)
@@ -1317,21 +1454,28 @@ spin-cycle/
 │   │
 │   ├── schemas/                    # Data schemas
 │   │   ├── api.py                  # Pydantic API request/response models
-│   │   ├── llm_outputs.py          # Pydantic schemas for LLM structured output
+│   │   ├── llm_outputs.py          # Pydantic schemas for LLM structured output (rubric-based)
 │   │   └── interested_parties.py   # InterestedPartiesDict TypedDict (pipeline contract)
 │   │
 │   ├── prompts/                    # All LLM prompts with documentation
 │   │   ├── verification.py         # Normalize, Decompose, Research, Judge, Synthesize
+│   │   ├── extraction.py           # Transcript claim extraction
 │   │   └── linguistic_patterns.py  # 15-category linguistic pattern taxonomy
 │   │
 │   ├── workflows/                  # Temporal workflow definitions
-│   │   └── verify.py               # VerifyClaimWorkflow
+│   │   ├── verify.py               # VerifyClaimWorkflow (7 activities)
+│   │   └── extract_transcript.py   # ExtractTranscriptWorkflow (8 activities)
 │   │
 │   ├── activities/                 # Temporal activity implementations
-│   │   └── verify_activities.py    # All 7 verification activities
+│   │   ├── verify_activities.py    # Verification activities (decompose, research, judge, synthesize, store)
+│   │   └── transcript_activities.py # Transcript activities (fetch, extract, finalize, store)
+│   │
+│   ├── transcript/                 # Transcript processing
+│   │   ├── fetcher.py              # Rev.com transcript fetcher + parser
+│   │   └── extractor.py            # Segment-batched claim extraction with rubric
 │   │
 │   └── db/                         # Database layer
-│       ├── models.py               # SQLAlchemy models (6 tables: Claim, SubClaim, Evidence, Verdict, SourceRating, WikidataCache)
+│       ├── models.py               # SQLAlchemy models (9 tables)
 │       └── session.py              # Async engine + session factory
 │
 ├── scripts/
@@ -1358,4 +1502,4 @@ spin-cycle/
 | `pydantic` | >=2.0 | Request/response validation |
 | `sqlalchemy` | >=2.0 | Async ORM (PostgreSQL) |
 | `asyncpg` | >=0.30.0 | Async PostgreSQL driver |
-| `httpx` | >=0.28.0 | Async HTTP client (Serper, Wikipedia, Brave, SearXNG) |
+| `httpx` | >=0.28.0 | Async HTTP client (Serper, Wikipedia, Brave, page fetcher) |

@@ -211,6 +211,61 @@ async def lifespan(app: FastAPI):
                     sync_conn.execute(text(
                         "ALTER TABLE transcripts ADD COLUMN status VARCHAR(32) DEFAULT 'complete' NOT NULL"
                     ))
+            # Claims table: decompose rubric columns
+            c_cols = {c["name"] for c in inspector.get_columns("claims")}
+            claim_migrations = {
+                "normalized_claim": "TEXT",
+                "normalization_changes": "JSONB",
+                "thesis": "TEXT",
+                "key_test": "TEXT",
+                "claim_structure": "VARCHAR(64)",
+                "claim_analysis": "TEXT",
+                "structure_justification": "TEXT",
+                "interested_parties_reasoning": "TEXT",
+                "wikidata_context": "TEXT",
+            }
+            for col, dtype in claim_migrations.items():
+                if col not in c_cols:
+                    sync_conn.execute(text(
+                        f"ALTER TABLE claims ADD COLUMN {col} {dtype}"
+                    ))
+            # Sub-claims table: decompose + judge rubric columns
+            sc_cols = {c["name"] for c in inspector.get_columns("sub_claims")}
+            sc_migrations = {
+                "categories": "JSONB",
+                "seed_queries": "JSONB",
+                "category_rationale": "TEXT",
+                "judge_rubric": "JSONB",
+            }
+            for col, dtype in sc_migrations.items():
+                if col not in sc_cols:
+                    sync_conn.execute(text(
+                        f"ALTER TABLE sub_claims ADD COLUMN {col} {dtype}"
+                    ))
+            # Verdicts table: synthesis rubric
+            if "synthesis_rubric" not in v_cols:
+                sync_conn.execute(text(
+                    "ALTER TABLE verdicts ADD COLUMN synthesis_rubric JSONB"
+                ))
+            # Transcript claims table: extraction rubric columns
+            if inspector.has_table("transcript_claims"):
+                tc_cols = {c["name"] for c in inspector.get_columns("transcript_claims")}
+                tc_migrations = {
+                    "worth_checking": "BOOLEAN NOT NULL DEFAULT TRUE",
+                    "skip_reason": "VARCHAR(64)",
+                    "argument_summary": "TEXT",
+                    "supports_argument": "BOOLEAN",
+                    "checkable": "BOOLEAN",
+                    "checkability_rationale": "TEXT",
+                    "consequence_if_wrong": "VARCHAR(16)",
+                    "consequence_rationale": "TEXT",
+                    "segment_gist": "TEXT",
+                }
+                for col, dtype in tc_migrations.items():
+                    if col not in tc_cols:
+                        sync_conn.execute(text(
+                            f"ALTER TABLE transcript_claims ADD COLUMN {col} {dtype}"
+                        ))
         await conn.run_sync(_migrate)
 
     log.info(logger, MODULE, "db_ready", "Database tables ready")

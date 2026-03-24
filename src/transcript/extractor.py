@@ -462,7 +462,7 @@ async def extract_batch(
     # Validate segment coverage
     _validate_segment_coverage(output, target_segments)
 
-    # Flatten segments → claims
+    # Flatten segments → claims, propagating segment_gist
     all_claims: list[ExtractedClaim] = []
     segments_with_claims = 0
     segments_empty = 0
@@ -471,6 +471,8 @@ async def extract_batch(
             segments_with_claims += 1
         else:
             segments_empty += 1
+        for claim in seg.claims:
+            claim._segment_gist = seg.segment_gist  # transient — used in serialization
         all_claims.extend(seg.claims)
 
     # Enforce consistency

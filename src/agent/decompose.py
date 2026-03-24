@@ -574,6 +574,7 @@ async def decompose(claim_text: str, speaker: str | None = None) -> dict:
                 "text": f.text.strip(),
                 "categories": f.categories,
                 "seed_queries": f.seed_queries,
+                "category_rationale": f.category_rationale,
             }
             for f in clean_facts if f and f.text and f.text.strip()
         ]
@@ -624,6 +625,8 @@ async def decompose(claim_text: str, speaker: str | None = None) -> dict:
             "normalization_changes": norm_output.changes if norm_output else [],
             "structure": output.structure,
             "key_test": output.key_test,
+            "claim_analysis": output.claim_analysis,
+            "structure_justification": output.structure_justification,
             "interested_parties": expanded_parties,
         }
 

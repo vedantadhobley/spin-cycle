@@ -37,7 +37,6 @@ services:
       TEMPORAL_HOST: spin-cycle-dev-temporal:7233
       LLAMA_URL: ${LLAMA_URL}
       LLAMA_EMBED_URL: ${LLAMA_EMBED_URL}
-      NEWSAPI_KEY: ${NEWSAPI_KEY:-}
       SERPER_API_KEY: ${SERPER_API_KEY:-}
       BRAVE_API_KEY: ${BRAVE_API_KEY:-}
       LEGISCAN_API_KEY: ${LEGISCAN_API_KEY:-}
@@ -73,7 +72,6 @@ services:
       TEMPORAL_HOST: spin-cycle-dev-temporal:7233
       LLAMA_URL: ${LLAMA_URL}
       LLAMA_EMBED_URL: ${LLAMA_EMBED_URL}
-      NEWSAPI_KEY: ${NEWSAPI_KEY:-}
       SERPER_API_KEY: ${SERPER_API_KEY:-}
       BRAVE_API_KEY: ${BRAVE_API_KEY:-}
       LEGISCAN_API_KEY: ${LEGISCAN_API_KEY:-}

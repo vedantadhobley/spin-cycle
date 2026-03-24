@@ -38,8 +38,8 @@ Because we're putting the spin through the wringer.
               │  └─────────┘  └──────────┘  └────────────────┘  │
               │                      │                            │
               │               ┌──────▼──────┐                    │
+              │               │ Serper      │                    │
               │               │ DuckDuckGo  │                    │
-              │               │ SearXNG     │                    │
               │               │ Wikipedia   │                    │
               │               │ Page Fetch  │                    │
               │               └─────────────┘                    │
@@ -103,7 +103,7 @@ decompose_claim       Normalize → Decompose → Quality Validate (2-4 LLM call
                       Wikidata expands parties → ownership, media, family
     ↓
 RESEARCH PHASE (all facts, 2 concurrent):
-    research_subclaim   Phase 1a: Programmatic seed search (DuckDuckGo + SearXNG, ~30-50 URLs)
+    research_subclaim   Phase 1a: Programmatic seed search (Serper + DuckDuckGo fallback, ~30-50 URLs)
        ↓                Phase 1b: MBFC await → MBFC ownership→Wikidata enrichment
        ↓                  → score → conflict detect → rank → top 30 (tier + conflicts)
        ↓                Phase 2: LangGraph ReAct agent (fetches, follow-up)
@@ -195,7 +195,6 @@ docker compose -f docker-compose.dev.yml ps
 | API | http://localhost:4500 | FastAPI backend |
 | Temporal UI | http://localhost:4501 | Workflow dashboard |
 | Adminer | http://localhost:4502 | Postgres web UI (Dracula theme) |
-| SearXNG | http://localhost:4503 | Self-hosted meta-search engine |
 
 Adminer login: Server `spin-cycle-dev-postgres`, User `spincycle`, Password `spin-cycle-dev`, Database `spincycle`.
 
@@ -300,11 +299,8 @@ docker logs -f spin-cycle-dev-worker
 | `POSTGRES_PASSWORD` | `spin-cycle-dev` | Application Postgres password |
 | `LOG_FORMAT` | `json` (prod) / `pretty` (dev) | Log output format — `json` for Grafana Loki, `pretty` for terminal |
 | `LOG_LEVEL` | `INFO` | Log level — `DEBUG`, `INFO`, `WARNING`, `ERROR` |
-| `NEWSAPI_KEY` | (empty) | NewsAPI key (not currently wired — future use) |
 | `SERPER_API_KEY` | (empty) | Serper key for Google search (primary search backend) |
-| `BRAVE_API_KEY` | (empty) | Brave Search API key |
 | `LEGISCAN_API_KEY` | (empty) | LegiScan Civic API key (US legislation, votes, bill text) |
-| `SEARXNG_URL` | `http://searxng:8080` | SearXNG meta-search endpoint (optional padding, self-hosted) |
 
 ## Port Allocation
 
@@ -313,22 +309,24 @@ docker logs -f spin-cycle-dev-worker
 | Base | 4500 | 3500 | FastAPI API |
 | +1 | 4501 | 3501 | Temporal UI |
 | +2 | 4502 | 3502 | Adminer |
-| +3 | 4503 | — | SearXNG (dev only) |
 
 ## Database
 
-Six tables in PostgreSQL, all with UUID primary keys (except cache tables which use string PKs):
+Nine tables in PostgreSQL, all with UUID primary keys (except cache tables which use string PKs):
 
 | Table | Purpose | Key Columns |
 |-------|---------|-------------|
-| `claims` | Top-level claims | text, source_url, status (queued→pending→verified), timestamps |
-| `sub_claims` | Decomposed sub-claim tree | text, parent_id (self-ref FK), is_leaf, verdict, confidence, reasoning |
-| `evidence` | Research results per sub-claim | source_type (web/wikipedia/news_api), content, URL |
-| `verdicts` | Overall claim verdict | verdict, confidence, reasoning, reasoning_chain (JSONB) |
+| `claims` | Top-level claims | text, source_url, status, decompose rubric (normalized_claim, thesis, claim_structure, claim_analysis) |
+| `sub_claims` | Decomposed sub-claim tree | text, parent_id (self-ref FK), is_leaf, verdict, confidence, categories, seed_queries, judge_rubric (JSONB) |
+| `evidence` | Research results per sub-claim | source_type, content, URL, bias, factual, tier, assessment, is_independent |
+| `verdicts` | Overall claim verdict | verdict, confidence, reasoning, reasoning_chain (JSONB), synthesis_rubric (JSONB) |
+| `interested_parties` | Entities with conflicts of interest | entity_name, role (direct/institutional/affiliated_media), source (llm/ner/wikidata) |
+| `transcripts` | Stored transcript records | url, title, date, speakers, word_count, display_text, status |
+| `transcript_claims` | Claims extracted from transcripts | claim_text, original_quote, speaker, timestamp, worth_checking, skip_reason, extraction rationale fields |
 | `source_ratings` | Cached MBFC ratings | domain (PK), bias, factual_reporting, ownership, country |
 | `wikidata_cache` | Cached Wikidata entity data | entity_name (PK), qid, relationships (JSONB), 7-day TTL |
 
-Relationships: `claims` → has many `sub_claims` → has many `evidence`. `claims` → has one `verdict`. Cache tables are standalone (no FK relationships).
+Relationships: `claims` → has many `sub_claims` → has many `evidence`. `claims` → has one `verdict`. `claims` → has many `interested_parties`. `transcripts` → has many `transcript_claims` → optional FK to `claims`. Cache tables are standalone.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for full schema documentation with column types and constraints.
 
@@ -349,36 +347,36 @@ spin-cycle/
 │   │   ├── client.py               # ChatOpenAI client setup
 │   │   ├── invoker.py              # invoke_llm() — structured output + retries
 │   │   ├── parser.py               # Response parsing helpers
-│   │   └── validators.py           # Semantic validators (normalize, decompose, synthesize)
+│   │   └── validators.py           # Semantic validators (normalize, decompose, judge, synthesize, extraction)
 │   │
 │   ├── utils/                      # Shared utilities
 │   │   ├── logging.py              # Structured logging (JSON for Loki, pretty for dev)
-│   │   ├── ner.py                  # SpaCy NER — entity extraction (PERSON/ORG)
+│   │   ├── ner.py                  # SpaCy NER — 3-pass entity extraction (PERSON/ORG)
 │   │   ├── quote_detection.py      # Detect claim subject quotes in evidence text
 │   │   ├── text_cleanup.py         # Grammar/spell check for LLM output
 │   │   └── evidence_ranker.py      # Source + evidence quality scoring, seed ranking, judge capping
 │   │
 │   ├── api/                        # FastAPI backend
-│   │   ├── app.py                  # App + lifespan
+│   │   ├── app.py                  # App + lifespan (DB init + migration)
 │   │   └── routes/
 │   │       ├── health.py           # Health check
-│   │       └── claims.py           # Claim CRUD
+│   │       ├── claims.py           # Claim CRUD + batch submit
+│   │       └── transcripts.py      # Transcript submission + query
 │   │
 │   ├── agent/                      # Domain logic (called by Temporal activities)
 │   │   ├── decompose.py            # Normalize + extract facts + Wikidata expansion
 │   │   ├── research.py             # Seed search + rank + ReAct agent + evidence extraction
-│   │   ├── judge.py                # Evidence ranking, annotation, LLM verdict
-│   │   ├── synthesize.py           # Verdict synthesis
+│   │   ├── judge.py                # Evidence ranking, annotation, rubric-based LLM verdict
+│   │   ├── synthesize.py           # Thesis-aware verdict synthesis with rubric
 │   │   └── claim_category.py       # Seed query routing (backend selection)
 │   │
 │   ├── tools/                      # Evidence gathering + data sources
 │   │   ├── source_ratings.py       # MBFC ratings (scrape + cache + parallel await)
 │   │   ├── source_filter.py        # Domain blocklist + MBFC cache population
 │   │   ├── mbfc_index.py           # MBFC REST API index bootstrap (~10,300 sources)
-│   │   ├── media_matching.py       # URL↔media matching, publisher ownership, MBFC owner extraction
+│   │   ├── media_matching.py       # URL↔media matching, publisher ownership
 │   │   ├── wikidata.py             # Wikidata SPARQL — ownership chains, relationships
 │   │   ├── legiscan.py             # LegiScan API — US legislation, votes, bill text
-│   │   ├── searxng.py              # SearXNG meta-search (optional padding)
 │   │   ├── serper.py               # Serper (Google Search API) — primary search backend
 │   │   ├── brave.py                # Brave Search API
 │   │   ├── web_search.py           # DuckDuckGo (fallback search backend)
@@ -386,22 +384,29 @@ spin-cycle/
 │   │   └── page_fetcher.py         # URL → text extraction + SpaCy entity metadata
 │   │
 │   ├── prompts/                    # LLM prompts (heavily documented)
-│   │   ├── verification.py         # Decompose, Research, Judge, Synthesize
+│   │   ├── verification.py         # Normalize, Decompose, Research, Judge, Synthesize
+│   │   ├── extraction.py           # Transcript claim extraction
 │   │   └── linguistic_patterns.py  # 15-category linguistic pattern taxonomy
 │   │
 │   ├── schemas/                    # Data schemas
-│   │   ├── api.py                  # Pydantic schemas for API
-│   │   ├── llm_outputs.py          # Pydantic schemas for LLM structured output
+│   │   ├── api.py                  # Pydantic API request/response models
+│   │   ├── llm_outputs.py          # Pydantic schemas for LLM structured output (rubric-based)
 │   │   └── interested_parties.py   # InterestedPartiesDict TypedDict (pipeline contract)
 │   │
 │   ├── workflows/
-│   │   └── verify.py               # VerifyClaimWorkflow
+│   │   ├── verify.py               # VerifyClaimWorkflow (7 activities)
+│   │   └── extract_transcript.py   # ExtractTranscriptWorkflow (8 activities)
 │   │
 │   ├── activities/
-│   │   └── verify_activities.py    # Temporal activities (7 activities)
+│   │   ├── verify_activities.py    # Verification activities (decompose, research, judge, synthesize, store)
+│   │   └── transcript_activities.py # Transcript activities (fetch, extract, finalize, store)
+│   │
+│   ├── transcript/                 # Transcript processing
+│   │   ├── fetcher.py              # Rev.com transcript fetcher + parser
+│   │   └── extractor.py            # Segment-batched claim extraction with rubric
 │   │
 │   └── db/
-│       ├── models.py               # SQLAlchemy models
+│       ├── models.py               # SQLAlchemy models (9 tables)
 │       └── session.py              # Async DB sessions
 │
 └── tests/
@@ -412,11 +417,23 @@ spin-cycle/
     └── stress_claims.py             # Load/stress testing
 ```
 
+## Observability
+
+Grafana dashboard at `~/workspace/monitor/grafana/provisioning/dashboards/spin-cycle.json` provides:
+- Pipeline status KPIs (claims verified, errors, LLM latency)
+- Verdict distribution and confidence trends
+- Per-stage completion rates (decompose, research, judge, synthesize)
+- Evidence quality metrics (direction distribution, independence)
+- Transcript extraction pipeline metrics
+- Error/warning breakdown by module
+- Live log panels (errors + all logs)
+
+Data flows via structured JSON logs → Promtail → Loki → Grafana.
+
 ## What's Next
 
-1. **Alembic migrations** — proper database schema versioning (currently using raw SQL ALTER TABLE)
-2. **Extraction pipeline** — automated claim ingestion from RSS feeds via scheduled Temporal workflows
-3. **Calibration test suite** — benchmark against known claims to measure accuracy
-4. **LangFuse** — self-hosted LLM observability for prompt debugging
+1. **Alembic migrations** — proper database schema versioning (currently using `_migrate()` with raw SQL ALTER TABLE)
+2. **Calibration test suite** — benchmark against known claims to measure accuracy
+3. **LangFuse** — self-hosted LLM observability for prompt debugging
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the full technical deep dive, including the extraction pipeline design, database schema details, and how LangChain/LangGraph/Temporal fit together.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full technical deep dive.

@@ -15,7 +15,7 @@ A working end-to-end claim verification pipeline with **flat fact extraction + t
 - **Unified 6-level verdict scale**: `true | mostly_true | mixed | mostly_false | false | unverifiable` with spirit-vs-substance guidance
 - **Single `reasoning` field** — consolidated from separate reasoning/nuance fields for clearer output
 - **Single synthesis activity** uses the thesis as primary rubric when available
-- **LLM-driven seed queries** — decompose outputs per-fact `categories` (for SearXNG routing) and `seed_queries` (targeted search queries). Seed queries use synonyms/rephrasing but NOT entity names from training knowledge.
+- **LLM-driven seed queries** — decompose outputs per-fact `categories` (evidence-need categories) and `seed_queries` (targeted search queries). Seed queries use synonyms/rephrasing but NOT entity names from training knowledge.
 - LangGraph ReAct research agent gathers evidence with dynamically loaded tools (38 max steps, ~12 tool calls per fact)
 - **Progress-aware research agent** — pre-model hook injects real-time progress (tool call count, unique URLs, queries used, engines tried, seed tier/conflict coverage) before each LLM call
 - **Streaming evidence collection** — agent uses `astream()` instead of `ainvoke()`. If the agent hits its step limit or times out, we keep ALL evidence gathered so far instead of losing everything
@@ -28,15 +28,18 @@ A working end-to-end claim verification pipeline with **flat fact extraction + t
 - **Importance-weighted synthesis** — verdicts weighed by significance, not count
 - **Date-aware prompts** — all prompts include `Today's date: {current_date}` so the LLM references current data
 - Results stored in Postgres with sub-claims, evidence, and reasoning chains
-- Temporal orchestrates everything with retries and durability (7 activities, 1 workflow)
+- **Full intermediate data persistence** — decompose rubric (thesis, structure, claim_analysis), judge rubric (5-step assessment), synthesis rubric (thesis_survives, subclaim_weights), interested parties table. All stored in DB for debugging and frontend display.
+- Temporal orchestrates everything with retries and durability (15 activities, 2 workflows)
+- **Transcript extraction pipeline** — fetches Rev.com transcripts, extracts verifiable claims via rubric-based segment batching (30 segments/batch, 3-segment overlap), stores ALL claims (checked + skipped) with full extraction rationale. One-pipeline-at-a-time constraint matches LLM server capacity.
+- **Transcript → verification bridge** — extracted claims auto-submit to verification queue with FK linking `transcript_claims → claims → sub_claims → evidence → verdicts`
+- **Grafana dashboard** — provisioned Loki dashboard (28 panels) for pipeline status, verdict distribution, LLM latency, evidence quality, transcript progress, error monitoring
 - Production-grade structured JSON logging (for Grafana Loki, pretty format for dev) — INFO for pipeline milestones, DEBUG for per-query tool noise
 - LLM max_tokens configured to prevent truncated output (2048 for all steps)
 
 **Search tools (env-var gated — set the key to enable):**
-- **SearXNG** (self-hosted meta-search, free, aggregates 70+ engines) — `SEARXNG_URL`
-- **Serper** (Google index via API, 2,500 one-time free) — `SERPER_API_KEY`
-- **Brave Search** (independent index, ~1k queries from $5/mo credit) — `BRAVE_API_KEY`
+- **Serper** (Google index via API, primary search backend) — `SERPER_API_KEY`
 - **DuckDuckGo** (free fallback, always available, no key needed)
+- **Brave Search** (independent index, optional diversity source) — `BRAVE_API_KEY`
 - **Wikipedia** (always available, no key needed)
 - **Page fetcher** (reads full page text from URLs, always available)
 
@@ -58,18 +61,13 @@ The single biggest lever. The verdict is only as good as the evidence.
 **Status:** ✅ Implemented
 
 Search tools are dynamically loaded based on configured API keys / services:
-- **SearXNG** — Self-hosted meta-search engine. Aggregates Google, Bing, DuckDuckGo, Brave, and dozens more. Free, unlimited, runs as a Docker container in the stack.
-- **Serper** — Google results via Serper API. Reliable paid option.
-- **Brave Search** — Independent search index. Finds things Google misses.
+- **Serper** — Google results via Serper API. Primary search backend.
 - **DuckDuckGo** — Free fallback, always available.
+- **Brave Search** — Independent search index. Optional diversity source.
 - **Wikipedia** — Established facts, always available.
 - **Page fetcher** — Fetches and extracts full text from URLs. Lets the agent actually read articles instead of relying on snippets.
 
 The agent uses these tools in combination — it decides which tools to call, reads results, and loops until it has enough evidence.
-
-### ~~1.1b — SearXNG Meta-Search~~ (Merged into 1.1)
-
-SearXNG is now the primary search tool, running self-hosted in the Docker stack.
 
 ### 1.1c — LegiScan Legislative Evidence (DONE)
 
@@ -118,14 +116,6 @@ The progress note is ephemeral (returned via `llm_input_messages`, not written t
 
 Switched from `ainvoke()` to `astream()` with `stream_mode="updates"`. Messages are collected incrementally as the agent works. If the agent is interrupted (step limit, timeout, any exception), we extract evidence from whatever messages were collected. Only if zero evidence was gathered do we fall back to the direct search fallback.
 
-### 1.2 — News API Integration
-
-**Why:** NewsAPI gives structured access to 150,000+ news sources with date filtering. Critical for claims about recent events where web search might not surface the right articles yet.
-
-**What:** Implement a NewsAPI tool with `@tool` wrapper and register it in `src/agent/research.py`. Needs `NEWSAPI_KEY` env var gating.
-
-**Effort:** Small. Straightforward API integration + tool registration.
-
 ### 1.3 — Source Credibility Scoring (DONE)
 
 **Status:** ✅ Implemented
@@ -152,7 +142,7 @@ Prompt-level 3-tier source hierarchy is unchanged:
 **Status:** ✅ Implemented via per-fact categories + LLM-written seed queries
 
 Handled by the decompose step — each atomic fact gets:
-- **`categories`**: Evidence-need categories (QUANTITATIVE, LEGISLATIVE, SCIENTIFIC, CURRENT_EVENTS, GENERAL) that determine SearXNG routing (news, science, general).
+- **`categories`**: Evidence-need categories (QUANTITATIVE, LEGISLATIVE, SCIENTIFIC, CURRENT_EVENTS, GENERAL) that inform search strategy.
 - **`seed_queries`**: LLM-written search queries tailored to the specific evidence each fact needs. The LLM rephrases using synonyms but does NOT inject entity names from training knowledge (Wikidata handles entity discovery).
 
 Categories + seed queries are passed through the workflow to `claim_category.py` which wraps them in backend routing specs. No separate classification activity needed — integrated into decompose.
@@ -375,17 +365,26 @@ Right now you manually POST claims. To actually audit politicians and pundits at
 
 **Effort:** Large. This is a new workflow + activity + prompt + database relationships. But it's the backbone for automated operation.
 
-### 2.3 — Speech & Debate Transcripts
+### 2.3 — Speech & Debate Transcripts (DONE)
 
-**Why:** Politicians say things in speeches, press conferences, debates, and parliament. These are often the primary source of claims worth checking.
+**Status:** ✅ Implemented — full transcript extraction pipeline
 
-**What:**
-- Ingest transcripts from public sources (C-SPAN, Hansard, Congressional Record, press briefing transcripts)
-- Same extraction pipeline as articles — LLM reads transcript, extracts claims
-- Track speaker attribution — WHO said it, not just what was said
-- Add `speaker` field to claims table
+**What was implemented:**
+- Rev.com transcript fetcher + parser (`src/transcript/fetcher.py`)
+- Rubric-based claim extraction with segment batching (`src/transcript/extractor.py`) — 30 segments/batch, 3-segment overlap at boundaries
+- Extraction rubric: `worth_checking`, `checkable`, `consequence_if_wrong`, `argument_summary`, `supports_argument`, `segment_gist` per claim
+- ALL claims stored (checked + skipped) with full extraction rationale in `transcript_claims` table
+- Speaker attribution on every claim, timestamps (MM:SS + seconds), original quotes for highlighting
+- Temporal workflow (`ExtractTranscriptWorkflow`) with visible per-batch activities
+- Auto-submission to verification queue with FK linking
+- One-pipeline-at-a-time constraint (extraction OR verification, not both)
+- `POST /transcripts` API endpoint for submission
+- See `docs/transcript-pipeline-plan.md` for full design doc
 
-**Effort:** Medium-Large. Transcript sources vary in format. Speaker attribution requires NLP or structured transcripts.
+**Remaining:**
+- Daily cron job for automated transcript discovery
+- Transcript relevance filter (which transcripts are worth processing)
+- Frontend: transcript view with inline claim highlighting
 
 ### 2.4 — Social Media Monitoring (Later)
 
@@ -567,26 +566,28 @@ What to build next, in order of impact:
 | ~~**—**~~ | ~~LegiScan legislative evidence (1.1c)~~ | ✅ Done |
 | ~~**—**~~ | ~~Progress-aware research agent (1.1d)~~ | ✅ Done |
 | ~~**—**~~ | ~~Streaming evidence collection (1.1e)~~ | ✅ Done |
+| ~~**—**~~ | ~~Interested party weighting (1.5.0f)~~ | ✅ Done |
+| ~~**—**~~ | ~~Source credibility scoring (1.3)~~ | ✅ Done |
+| ~~**—**~~ | ~~Claim normalization (1.5.0c)~~ | ✅ Done |
+| ~~**—**~~ | ~~Evidence quality signals for judges (1.5.6)~~ | ✅ Done |
+| ~~**—**~~ | ~~Speech transcripts (2.3)~~ | ✅ Done |
 | **2** | Alembic migrations | Unblocks all future schema changes |
 | **3** | Checkability filter (1.5.0b) | Stop wasting cycles on uncheckable claims |
 | **4** | Confidence-weighted synthesis (1.5.1) | Low effort, immediately improves verdict quality |
-| ~~**5**~~ | ~~Interested party weighting (1.5.0f)~~ | ✅ Done |
-| ~~**6**~~ | ~~Source credibility scoring (1.3)~~ | ✅ Done |
-| ~~**7**~~ | ~~Claim normalization (1.5.0c)~~ | ✅ Done |
-| **8** | Adaptive research depth (1.5.2) | Cuts pipeline time in half for simple claims |
-| **9** | Calibration test suite (3.1) | Can't improve without measuring |
-| **10** | Domain-specific research (1.5.0d) | Right sources for right claims |
-| **11** | Citation chasing (1.5.0e) | Get primary sources, not secondary |
-| ~~**12**~~ | ~~Evidence quality signals for judges (1.5.6)~~ | ✅ Done |
-| **13** | RSS feed monitoring (2.1) | First step toward automated intake |
-| **14** | Claim extraction from articles (2.2) | Enables fully automated pipeline |
-| **15** | Sub-claim dedup & caching (1.5.4) | Reduces redundant work at scale |
-| **16** | LangFuse observability (4.3) | Visibility into LLM performance |
-| **17** | Speaker profiles (5.3) | Product differentiation |
-| **18** | Article highlighting UI (5.1) | Core product experience |
-| **19** | Human review loop (3.4) | Trust + quality assurance |
-| **20** | Public API (5.2) | Distribution |
-| **21** | Speech transcripts (2.3) | Expand beyond articles |
+| **5** | Transcript frontend (highlights + claims view) | Users can see extracted claims inline |
+| **6** | Adaptive research depth (1.5.2) | Cuts pipeline time in half for simple claims |
+| **7** | Calibration test suite (3.1) | Can't improve without measuring |
+| **8** | Domain-specific research (1.5.0d) | Right sources for right claims |
+| **9** | Citation chasing (1.5.0e) | Get primary sources, not secondary |
+| **10** | Daily transcript cron job | Automated discovery of new transcripts |
+| **11** | RSS feed monitoring (2.1) | First step toward automated article intake |
+| **12** | Claim extraction from articles (2.2) | Enables fully automated pipeline |
+| **13** | Sub-claim dedup & caching (1.5.4) | Reduces redundant work at scale |
+| **14** | LangFuse observability (4.3) | Visibility into LLM performance |
+| **15** | Speaker profiles (5.3) | Product differentiation |
+| **16** | Article highlighting UI (5.1) | Core product experience |
+| **17** | Human review loop (3.4) | Trust + quality assurance |
+| **18** | Public API (5.2) | Distribution |
 
 ---
 

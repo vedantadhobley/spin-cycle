@@ -5,6 +5,7 @@
 | Phase | Target | Status | Date |
 |-------|--------|--------|------|
 | Phase 1: Judge + Synthesize | Rubric prompts + schemas + validators | **COMPLETE** | 2026-03-10 |
+| Data persistence | Judge/synthesis rubric + decompose fields → DB | **COMPLETE** | 2026-03-24 |
 | Phase 2: Decompose | Lighter-touch restructure | PLANNED | — |
 | Phase 3: Normalize + Research | Polish only | PLANNED | — |
 

@@ -81,6 +81,7 @@ async def synthesize(
         )
     synthesis_framing = f"Original claim: {claim_text}{thesis_block}"
 
+    synthesis_rubric = None
     try:
         output = await invoke_llm(
             system_prompt=SYNTHESIZE_SYSTEM.format(
@@ -136,6 +137,12 @@ async def synthesize(
                       for w in output.subclaim_weights
                   ])
 
+        synthesis_rubric = {
+            "thesis_restatement": output.thesis_restatement,
+            "subclaim_weights": [w.model_dump() for w in output.subclaim_weights],
+            "thesis_survives": output.thesis_survives,
+        }
+
         # Programmatic consistency check (permissive — log only)
         consistency_warnings = _validate_synthesize_consistency(output)
         for warning in consistency_warnings:
@@ -176,6 +183,7 @@ async def synthesize(
         "child_results": child_results,
         "reasoning_chain": [sub.get("reasoning", "") for sub in child_results],
         "citations": citations,
+        "synthesis_rubric": synthesis_rubric,
     }
 
 

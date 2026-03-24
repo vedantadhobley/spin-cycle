@@ -217,12 +217,15 @@ class ExtractTranscriptWorkflow:
         # Step 3: Finalize — dedup + filter across batches
         self._set_phase("finalizing")
 
-        claims = await workflow.execute_activity(
+        finalize_result = await workflow.execute_activity(
             finalize_extraction,
             args=[transcript_data, all_batch_claims],
             start_to_close_timeout=timedelta(seconds=30),
             retry_policy=RetryPolicy(maximum_attempts=2),
         )
+
+        claims = finalize_result["worth_checking"]
+        all_claims_for_storage = finalize_result["all_claims"]
 
         self._claim_count = len(claims)
         self._claims = claims
@@ -233,18 +236,26 @@ class ExtractTranscriptWorkflow:
 
         log.info(workflow.logger, MODULE, "finalized",
                  "Claims finalized",
-                 claim_count=self._claim_count)
+                 worth_checking=len(claims),
+                 total_stored=len(all_claims_for_storage))
 
-        # Step 3b: Store extracted claims in DB (linked to transcript)
-        if self._transcript_id and claims:
+        # Step 3b: Store ALL extracted claims in DB (linked to transcript)
+        if self._transcript_id and all_claims_for_storage:
             tc_ids = await workflow.execute_activity(
                 store_transcript_claims,
-                args=[self._transcript_id, claims],
+                args=[self._transcript_id, all_claims_for_storage],
                 start_to_close_timeout=timedelta(seconds=15),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
 
-            # Step 4: Batch-create Claim records and link FKs
+            # Filter tc_ids to only worth_checking ones for claim creation
+            # tc_ids are in the same order as all_claims_for_storage
+            worth_checking_tc_ids = [
+                tc_id for tc_id, c in zip(tc_ids, all_claims_for_storage)
+                if c.get("worth_checking", True)
+            ]
+
+            # Step 4: Batch-create Claim records and link FKs (only for worth_checking)
             self._set_phase("submitting")
 
             log.info(workflow.logger, MODULE, "creating_claims",
@@ -253,7 +264,7 @@ class ExtractTranscriptWorkflow:
 
             claim_ids = await workflow.execute_activity(
                 create_claims_for_transcript,
-                args=[self._transcript_id, tc_ids, claims],
+                args=[self._transcript_id, worth_checking_tc_ids, claims],
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
@@ -277,8 +288,33 @@ class ExtractTranscriptWorkflow:
                      "Verification pipeline started",
                      submitted=self._verification_submitted)
 
+        elif self._transcript_id and not claims and all_claims_for_storage:
+            # Skipped claims exist but none worth checking — store them, then mark complete
+            await workflow.execute_activity(
+                store_transcript_claims,
+                args=[self._transcript_id, all_claims_for_storage],
+                start_to_close_timeout=timedelta(seconds=15),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+            await workflow.execute_activity(
+                update_transcript_status,
+                args=[self._transcript_id, "complete"],
+                start_to_close_timeout=timedelta(seconds=15),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+
+            await workflow.execute_activity(
+                finish_transcript_and_start_next,
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+
+            log.info(workflow.logger, MODULE, "no_worth_checking",
+                     "No worth-checking claims, stored skipped claims",
+                     stored=len(all_claims_for_storage))
+
         elif self._transcript_id:
-            # No claims extracted — mark complete and try next queued transcript
+            # No claims at all — mark complete and try next queued transcript
             await workflow.execute_activity(
                 update_transcript_status,
                 args=[self._transcript_id, "complete"],

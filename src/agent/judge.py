@@ -234,6 +234,7 @@ async def judge(
 
     # Invoke the judge LLM
     citations = []
+    judge_rubric = None
     try:
         output = await invoke_llm(
             system_prompt=JUDGE_SYSTEM.format(
@@ -318,6 +319,14 @@ async def judge(
                   sub_claim=sub_claim,
                   precision=output.precision_assessment[:300])
 
+        judge_rubric = {
+            "claim_interpretation": output.claim_interpretation,
+            "key_evidence": [e.model_dump() for e in output.key_evidence],
+            "evidence_direction": output.evidence_direction,
+            "direction_reasoning": output.direction_reasoning,
+            "precision_assessment": output.precision_assessment,
+        }
+
         # Programmatic consistency check (permissive — log only)
         consistency_warnings = _validate_judge_consistency(output)
         for warning in consistency_warnings:
@@ -347,6 +356,7 @@ async def judge(
         "reasoning": reasoning,
         "evidence": evidence_metadata,
         "citations": citations,
+        "judge_rubric": judge_rubric,
     }
 
 

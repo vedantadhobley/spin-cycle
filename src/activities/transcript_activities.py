@@ -108,6 +108,13 @@ async def extract_transcript_batch(
             "claim_type": c.claim_type,
             "worth_checking": c.worth_checking,
             "skip_reason": c.skip_reason,
+            "argument_summary": c.argument_summary,
+            "supports_argument": c.supports_argument,
+            "checkable": c.checkable,
+            "checkability_rationale": c.checkability_rationale,
+            "consequence_if_wrong": c.consequence_if_wrong,
+            "consequence_rationale": c.consequence_rationale,
+            "segment_gist": getattr(c, "_segment_gist", None),
         }
         for c in claims
     ]
@@ -126,12 +133,16 @@ async def extract_transcript_batch(
 async def finalize_extraction(
     transcript_data: dict,
     all_batch_claims: list[list[dict]],
-) -> list[dict]:
+) -> dict:
     """Filter + deduplicate claims from all batches into final claim list.
 
     Runs after all batch activities complete.  Applies consistency enforcement,
     filters to worth_checking, deduplicates across batch boundaries, and
     converts to the final TranscriptClaim format.
+
+    Returns dict with:
+        - worth_checking: list of dicts for verification pipeline
+        - all_claims: list of ALL claims (including skipped) with full metadata for DB storage
     """
     from src.transcript.fetcher import Transcript, TranscriptSegment
     from src.transcript.extractor import (
@@ -147,10 +158,18 @@ async def finalize_extraction(
         segments=[TranscriptSegment(**s) for s in transcript_data["segments"]],
     )
 
+    # Build timestamp → seconds lookup
+    ts_lookup: dict[str, float] = {}
+    for seg in transcript.segments:
+        ts_lookup[seg.timestamp] = seg.timestamp_secs
+
     # Reconstruct ExtractedClaim objects from all batches
     all_claims: list[ExtractedClaim] = []
+    # Keep raw batch data for full metadata preservation
+    all_raw_claims: list[dict] = []
     for batch_claims in all_batch_claims:
         for c in batch_claims:
+            all_raw_claims.append(c)
             all_claims.append(ExtractedClaim(
                 claim_text=c["claim_text"],
                 original_quote=c["original_quote"],
@@ -159,10 +178,12 @@ async def finalize_extraction(
                 claim_type=c["claim_type"],
                 worth_checking=c["worth_checking"],
                 skip_reason=c.get("skip_reason"),
-                # Fields not needed for finalization but required by schema
-                supports_argument=False,
-                checkable=c["worth_checking"],
-                consequence_if_wrong="high" if c["worth_checking"] else "low",
+                argument_summary=c.get("argument_summary"),
+                supports_argument=c.get("supports_argument", False),
+                checkable=c.get("checkable", c["worth_checking"]),
+                checkability_rationale=c.get("checkability_rationale", ""),
+                consequence_if_wrong=c.get("consequence_if_wrong", "high" if c["worth_checking"] else "low"),
+                consequence_rationale=c.get("consequence_rationale", ""),
             ))
 
     log.info(activity.logger, "transcript", "finalize_start",
@@ -172,7 +193,7 @@ async def finalize_extraction(
 
     final_claims = finalize_claims(all_claims, transcript)
 
-    result = [
+    worth_checking = [
         {
             "claim_text": c.claim_text,
             "original_quote": c.original_quote,
@@ -185,12 +206,38 @@ async def finalize_extraction(
         for c in final_claims
     ]
 
+    # Build all_claims list with full metadata for DB storage
+    all_claims_for_storage = [
+        {
+            "claim_text": c["claim_text"],
+            "original_quote": c["original_quote"],
+            "speaker": c["speaker"],
+            "timestamp": c["timestamp"],
+            "timestamp_secs": ts_lookup.get(c["timestamp"], 0.0),
+            "claim_type": c.get("claim_type"),
+            "worth_checking": c.get("worth_checking", True),
+            "skip_reason": c.get("skip_reason"),
+            "argument_summary": c.get("argument_summary"),
+            "supports_argument": c.get("supports_argument"),
+            "checkable": c.get("checkable"),
+            "checkability_rationale": c.get("checkability_rationale"),
+            "consequence_if_wrong": c.get("consequence_if_wrong"),
+            "consequence_rationale": c.get("consequence_rationale"),
+            "segment_gist": c.get("segment_gist"),
+        }
+        for c in all_raw_claims
+    ]
+
     log.info(activity.logger, "transcript", "finalize_done",
              "Extraction finalized",
              input_claims=len(all_claims),
-             output_claims=len(result))
+             worth_checking=len(worth_checking),
+             all_for_storage=len(all_claims_for_storage))
 
-    return result
+    return {
+        "worth_checking": worth_checking,
+        "all_claims": all_claims_for_storage,
+    }
 
 
 @activity.defn
@@ -275,6 +322,15 @@ async def store_transcript_claims(
                 timestamp=c["timestamp"],
                 timestamp_secs=c["timestamp_secs"],
                 claim_type=c.get("claim_type"),
+                worth_checking=c.get("worth_checking", True),
+                skip_reason=c.get("skip_reason"),
+                argument_summary=c.get("argument_summary"),
+                supports_argument=c.get("supports_argument"),
+                checkable=c.get("checkable"),
+                checkability_rationale=c.get("checkability_rationale"),
+                consequence_if_wrong=c.get("consequence_if_wrong"),
+                consequence_rationale=c.get("consequence_rationale"),
+                segment_gist=c.get("segment_gist"),
             )
             session.add(tc)
             await session.flush()

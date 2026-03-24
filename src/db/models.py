@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, String, Float, Boolean, DateTime, ForeignKey, Integer, Text, Enum
+from sqlalchemy import Column, String, Float, Boolean, DateTime, ForeignKey, Integer, Text, Enum, Index
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import DeclarativeBase, relationship
 
@@ -25,11 +25,22 @@ class Claim(Base):
         default="pending",
         nullable=False,
     )
+    # Decompose rubric fields
+    normalized_claim = Column(Text, nullable=True)
+    normalization_changes = Column(JSONB, nullable=True)
+    thesis = Column(Text, nullable=True)
+    key_test = Column(Text, nullable=True)
+    claim_structure = Column(String(64), nullable=True)
+    claim_analysis = Column(Text, nullable=True)
+    structure_justification = Column(Text, nullable=True)
+    interested_parties_reasoning = Column(Text, nullable=True)
+    wikidata_context = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     sub_claims = relationship("SubClaim", back_populates="claim", cascade="all, delete-orphan")
     verdict = relationship("Verdict", back_populates="claim", uselist=False, cascade="all, delete-orphan")
+    interested_parties = relationship("InterestedParty", back_populates="claim", cascade="all, delete-orphan")
 
 
 class SubClaim(Base):
@@ -48,6 +59,13 @@ class SubClaim(Base):
     )
     confidence = Column(Float, nullable=True)
     reasoning = Column(Text, nullable=True)
+
+    # Decompose metadata
+    categories = Column(JSONB, nullable=True)
+    seed_queries = Column(JSONB, nullable=True)
+    category_rationale = Column(Text, nullable=True)
+    # Judge rubric
+    judge_rubric = Column(JSONB, nullable=True)
 
     claim = relationship("Claim", back_populates="sub_claims")
     parent = relationship("SubClaim", remote_side="SubClaim.id", backref="children")
@@ -92,6 +110,7 @@ class Verdict(Base):
     reasoning = Column(Text, nullable=True)
     reasoning_chain = Column(JSONB, nullable=True)
     citations = Column(JSONB, nullable=True)
+    synthesis_rubric = Column(JSONB, nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     claim = relationship("Claim", back_populates="verdict")
@@ -128,10 +147,38 @@ class TranscriptClaim(Base):
     timestamp = Column(String(32), nullable=False)  # "MM:SS"
     timestamp_secs = Column(Float, nullable=False)
     claim_type = Column(String(64), nullable=True)
+    # Extraction rubric fields
+    worth_checking = Column(Boolean, nullable=False, default=True)
+    skip_reason = Column(String(64), nullable=True)
+    argument_summary = Column(Text, nullable=True)
+    supports_argument = Column(Boolean, nullable=True)
+    checkable = Column(Boolean, nullable=True)
+    checkability_rationale = Column(Text, nullable=True)
+    consequence_if_wrong = Column(String(16), nullable=True)
+    consequence_rationale = Column(Text, nullable=True)
+    segment_gist = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     transcript = relationship("TranscriptRecord", back_populates="transcript_claims")
     claim = relationship("Claim")
+
+
+class InterestedParty(Base):
+    """An entity with potential conflict of interest related to a claim."""
+    __tablename__ = "interested_parties"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    claim_id = Column(UUID(as_uuid=True), ForeignKey("claims.id"), nullable=False)
+    entity_name = Column(String(256), nullable=False)
+    role = Column(String(32), nullable=False)  # direct | institutional | affiliated_media | wikidata_expanded
+    source = Column(String(32), nullable=False)  # llm | ner | speaker | wikidata
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    claim = relationship("Claim", back_populates="interested_parties")
+
+    __table_args__ = (
+        Index("ix_interested_parties_entity_claim", "entity_name", "claim_id"),
+    )
 
 
 class SourceRating(Base):
