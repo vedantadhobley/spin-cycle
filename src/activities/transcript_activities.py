@@ -252,6 +252,8 @@ async def store_transcript(transcript_data: dict) -> str:
     from src.db.models import TranscriptRecord
 
     url = transcript_data["url"]
+    log.info(activity.logger, "transcript", "store_start", "Storing transcript",
+             url=url, title=transcript_data.get("title"))
 
     async with async_session() as session:
         result = await session.execute(
@@ -362,6 +364,9 @@ async def create_claims_for_transcript(
     from src.db.models import Claim, TranscriptClaim
 
     claim_ids: list[str] = []
+    log.info(activity.logger, "transcript", "create_claims_start",
+             "Creating Claim records for verification",
+             transcript_id=transcript_id, claim_count=len(claims))
 
     async with async_session() as session:
         async with session.begin():
@@ -400,6 +405,9 @@ async def update_transcript_status(transcript_id: str, status: str) -> None:
     from src.db.models import TranscriptRecord
 
     tid = _uuid_mod.UUID(transcript_id)
+    log.info(activity.logger, "transcript", "status_update",
+             "Updating transcript status",
+             transcript_id=transcript_id, status=status)
 
     async with async_session() as session:
         result = await session.execute(

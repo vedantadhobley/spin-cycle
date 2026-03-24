@@ -73,8 +73,14 @@ async def decompose_claim(claim_text: str, speaker: str | None = None) -> dict:
     Delegates to src/agent/decompose.decompose() for all domain logic.
     If speaker is provided, they're automatically added as an interested party.
     """
+    log.info(activity.logger, "decompose", "start", "Decomposing claim",
+             claim_length=len(claim_text), speaker=speaker)
     from src.agent.decompose import decompose
-    return await decompose(claim_text, speaker=speaker)
+    result = await decompose(claim_text, speaker=speaker)
+    log.info(activity.logger, "decompose", "done", "Decompose complete",
+             fact_count=len(result.get("facts", [])),
+             thesis=result.get("thesis_info", {}).get("thesis", "")[:80])
+    return result
 
 
 @activity.defn
@@ -124,6 +130,8 @@ async def judge_subclaim(
     Normalizes interested_parties for backward compatibility, then
     delegates to src/agent/judge.judge() for all domain logic.
     """
+    log.info(activity.logger, "judge", "start", "Judging sub-claim",
+             sub_claim=sub_claim[:80], evidence_count=len(evidence))
     from src.agent.decompose import normalize_interested_parties
     from src.agent.judge import judge
 
@@ -132,8 +140,12 @@ async def judge_subclaim(
     elif isinstance(interested_parties, list):
         interested_parties = normalize_interested_parties(interested_parties)
 
-    return await judge(claim_text, sub_claim, evidence, interested_parties,
-                       speaker=speaker)
+    result = await judge(claim_text, sub_claim, evidence, interested_parties,
+                         speaker=speaker)
+    log.info(activity.logger, "judge", "done", "Judge complete",
+             sub_claim=sub_claim[:80],
+             verdict=result.get("verdict"), confidence=result.get("confidence"))
+    return result
 
 
 @activity.defn
@@ -146,8 +158,14 @@ async def synthesize_verdict(
 
     Delegates to src/agent/synthesize.synthesize() for all domain logic.
     """
+    log.info(activity.logger, "synthesize", "start", "Synthesizing verdict",
+             child_count=len(child_results),
+             has_thesis=bool(thesis_info and thesis_info.get("thesis")))
     from src.agent.synthesize import synthesize
-    return await synthesize(claim_text, child_results, thesis_info)
+    result = await synthesize(claim_text, child_results, thesis_info)
+    log.info(activity.logger, "synthesize", "done", "Synthesis complete",
+             verdict=result.get("verdict"), confidence=result.get("confidence"))
+    return result
 
 
 @activity.defn

@@ -360,6 +360,9 @@ class VerifyClaimWorkflow:
         self._set_phase("synthesizing")
 
         if len(sub_results) == 1:
+            log.info(workflow.logger, MODULE, "single_fact_skip",
+                     "Single fact — skipping synthesis, using judge result directly",
+                     claim_id=claim_id)
             result = sub_results[0]
         else:
             result = await workflow.execute_activity(
