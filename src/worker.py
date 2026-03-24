@@ -46,6 +46,7 @@ from src.activities.transcript_activities import (  # noqa: E402
     create_claims_for_transcript,
     update_transcript_status,
     finish_transcript_and_start_next,
+    notify_frontend_refresh,
 )
 
 TASK_QUEUE = "spin-cycle-verify"
@@ -89,6 +90,8 @@ async def main():
             create_claims_for_transcript,
             update_transcript_status,
             finish_transcript_and_start_next,
+            # Frontend notification
+            notify_frontend_refresh,
         ],
         # Allow 2 concurrent activities to match MAX_CONCURRENT=2 in the workflow.
         # The workflow uses a semaphore to run 2 research/judge tasks in parallel,

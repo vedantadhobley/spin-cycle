@@ -510,3 +510,46 @@ async def finish_transcript_and_start_next() -> str | None:
              transcript_id=transcript_id, url=url)
 
     return transcript_id
+
+
+@activity.defn
+async def notify_frontend_refresh() -> bool:
+    """Notify the vedanta-systems frontend to broadcast a refresh to SSE clients.
+
+    Called after verification or transcript completion. The frontend receives
+    a POST and broadcasts a lightweight refresh signal to all connected
+    browser clients, which then refetch data via REST.
+
+    Gracefully handles frontend being unavailable (not a fatal error).
+    """
+    import os
+    import httpx
+
+    api_url = os.getenv("FRONTEND_API_URL", "")
+    if not api_url:
+        log.debug(activity.logger, "notify", "skip",
+                  "FRONTEND_API_URL not set, skipping refresh notification")
+        return False
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.post(f"{api_url}/api/spin-cycle/refresh")
+            if resp.is_success:
+                result = resp.json()
+                log.info(activity.logger, "notify", "frontend_notified",
+                         "Frontend notified",
+                         clients=result.get("clientsNotified", 0))
+                return True
+            else:
+                log.warning(activity.logger, "notify", "frontend_notify_failed",
+                            "Frontend notify failed",
+                            status_code=resp.status_code)
+                return False
+    except httpx.ConnectError:
+        log.debug(activity.logger, "notify", "frontend_unavailable",
+                  "Frontend API not available")
+        return False
+    except Exception as e:
+        log.warning(activity.logger, "notify", "frontend_notify_error",
+                    "Frontend notify error", error=str(e))
+        return False

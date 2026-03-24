@@ -42,6 +42,7 @@ with workflow.unsafe.imports_passed_through():
     )
     from src.activities.transcript_activities import (
         finish_transcript_and_start_next,
+        notify_frontend_refresh,
     )
     from src.utils.logging import log
 
@@ -422,6 +423,13 @@ class VerifyClaimWorkflow:
                     start_to_close_timeout=timedelta(seconds=30),
                     retry_policy=RetryPolicy(maximum_attempts=2),
                 )
+
+        # Notify frontend (fire-and-forget, don't fail workflow)
+        await workflow.execute_activity(
+            notify_frontend_refresh,
+            start_to_close_timeout=timedelta(seconds=10),
+            retry_policy=RetryPolicy(maximum_attempts=1),
+        )
 
         self._set_phase("complete")
         workflow.upsert_search_attributes([

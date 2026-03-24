@@ -30,6 +30,7 @@ with workflow.unsafe.imports_passed_through():
         create_claims_for_transcript,
         update_transcript_status,
         finish_transcript_and_start_next,
+        notify_frontend_refresh,
     )
     from src.workflows.verify import VerifyClaimWorkflow
     from src.transcript.extractor import build_batches
@@ -365,6 +366,13 @@ class ExtractTranscriptWorkflow:
 
             log.info(workflow.logger, MODULE, "no_claims",
                      "No claims extracted, transcript marked complete")
+
+        # Notify frontend (fire-and-forget, don't fail workflow)
+        await workflow.execute_activity(
+            notify_frontend_refresh,
+            start_to_close_timeout=timedelta(seconds=10),
+            retry_policy=RetryPolicy(maximum_attempts=1),
+        )
 
         # Done
         self._set_phase("complete")

@@ -32,8 +32,8 @@ services:
       POSTGRES_HOST: spin-cycle-dev-postgres
       POSTGRES_PORT: "5432"
       POSTGRES_DB: spincycle
-      POSTGRES_USER: spincycle
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-spin-cycle-dev}
+      POSTGRES_USER: scuser
+      POSTGRES_PASSWORD: scpass
       TEMPORAL_HOST: spin-cycle-dev-temporal:7233
       LLAMA_URL: ${LLAMA_URL}
       LLAMA_EMBED_URL: ${LLAMA_EMBED_URL}
@@ -67,9 +67,10 @@ services:
       POSTGRES_HOST: spin-cycle-dev-postgres
       POSTGRES_PORT: "5432"
       POSTGRES_DB: spincycle
-      POSTGRES_USER: spincycle
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-spin-cycle-dev}
+      POSTGRES_USER: scuser
+      POSTGRES_PASSWORD: scpass
       TEMPORAL_HOST: spin-cycle-dev-temporal:7233
+      FRONTEND_API_URL: ${FRONTEND_API_URL:-}
       LLAMA_URL: ${LLAMA_URL}
       LLAMA_EMBED_URL: ${LLAMA_EMBED_URL}
       SERPER_API_KEY: ${SERPER_API_KEY:-}
@@ -97,7 +98,7 @@ services:
       - DB=postgres12
       - DB_PORT=5432
       - POSTGRES_USER=temporal
-      - POSTGRES_PWD=temporal-dev
+      - POSTGRES_PWD=scpass
       - POSTGRES_SEEDS=spin-cycle-dev-temporal-postgres
       - BIND_ON_IP=0.0.0.0
     depends_on:
@@ -135,7 +136,7 @@ services:
     container_name: spin-cycle-dev-temporal-postgres
     environment:
       POSTGRES_USER: temporal
-      POSTGRES_PASSWORD: temporal-dev
+      POSTGRES_PASSWORD: scpass
       POSTGRES_DB: temporal
     volumes:
       - spin-cycle-dev-temporal-postgres:/var/lib/postgresql/data
@@ -154,12 +155,12 @@ services:
     container_name: spin-cycle-dev-postgres
     environment:
       POSTGRES_DB: spincycle
-      POSTGRES_USER: spincycle
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-spin-cycle-dev}
+      POSTGRES_USER: scuser
+      POSTGRES_PASSWORD: scpass
     volumes:
       - spin-cycle-dev-postgres:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U spincycle -d spincycle"]
+      test: ["CMD-SHELL", "pg_isready -U scuser -d spincycle"]
       interval: 5s
       timeout: 5s
       retries: 5
