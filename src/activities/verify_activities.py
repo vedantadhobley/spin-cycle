@@ -94,6 +94,7 @@ async def research_subclaim(
     seed_queries: list[str] | None = None,
     speaker: str | None = None,
     claim_date: str | None = None,
+    claim_text: str = "",
 ) -> dict:
     """Research evidence for a sub-claim using the LangGraph ReAct agent.
 
@@ -115,6 +116,7 @@ async def research_subclaim(
         seed_queries=seed_queries,
         speaker=speaker,
         claim_date=claim_date,
+        claim_text=claim_text,
     )
 
     log.info(activity.logger, "research", "done", "Research complete",

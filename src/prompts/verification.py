@@ -612,6 +612,16 @@ Agency B" → Agency B's actions belong to Agency B, not Company A. Do not \
 transfer an action from one role to another entity.
    BAD:  "Company A is performing Agency B's function" (wrong entity)
    GOOD: "Person X heads Agency B, which performs that function"
+   MILITARY / GEOPOLITICAL examples:
+   BAD:  "Nine ships were destroyed in the attack"
+   GOOD: "Nine [Country X] naval ships were destroyed in [Operation Name]"
+   BAD:  "Their military headquarters was hit"
+   GOOD: "[Country Y's] military headquarters was struck in the [Month Year] offensive"
+   BAD:  "The leader was killed in the strikes"
+   GOOD: "[Leader Name] of [Country] was killed in the [Date] military strikes"
+   CHECK FOR UNRESOLVED PRONOUNS: After writing each fact, scan for "their", \
+"his", "her", "its", "they", "them", "the attack", "the operation". If any \
+appear, you have NOT decontextualized — replace with specific names.
 
 7. EXTRACT THE UNDERLYING FACTUAL QUESTION
    When phrasing is loaded or abstract, ask: "what factual question is actually being asked?" \
@@ -746,14 +756,14 @@ have concluded X meets Y") — that changes what the judge evaluates.
    Absolute language ("never", "any", "all", "every", "no", "none") is \
 precision-critical. The judge needs to evaluate the claim's actual strength, not \
 a weakened version.
-   BAD:  "Sweden never implemented any lockdown measures"
-         → "Sweden did not implement NATIONWIDE lockdown measures" (added "nationwide")
-   GOOD: "Sweden never implemented any lockdown measures"
-         → "Sweden never implemented any lockdown measures during the COVID-19 pandemic"
-   BAD:  "Every single Republican voted against X"
-         → "Most Republicans voted against X" (weakened quantifier)
-   GOOD: "Every single Republican voted against X"
-         → "All Republican members of Congress voted against X"
+   BAD:  "Country A never implemented any lockdown measures"
+         → "Country A did not implement NATIONWIDE lockdown measures" (added "nationwide")
+   GOOD: "Country A never implemented any lockdown measures"
+         → "Country A never implemented any lockdown measures during the pandemic"
+   BAD:  "Every single member of Party X voted against the bill"
+         → "Most members of Party X voted against the bill" (weakened quantifier)
+   GOOD: "Every single member of Party X voted against the bill"
+         → "All Party X members of the legislature voted against the bill"
    The claim chose its language deliberately. If it says "any" and you soften \
 to "nationwide", you've changed a falsifiable absolute into a defensible hedge. \
 Preserve the original scope exactly.
@@ -1170,10 +1180,11 @@ already gathered ~30 curated URLs ranked by source quality. Be efficient:
    - "Conflict:" flags sources with ownership ties to interested parties
 2. FETCH ORDER MATTERS — use fetch_page_content in this priority:
    a. FIRST: Fetch the highest-tier NON-CONFLICTED source (look for "TIER 1" \
-without "Conflict:" — .gov, .edu, official data, wire services, academic sources)
+without "Conflict:" — .edu, official data, wire services, academic sources)
    b. SECOND: Fetch the most relevant TIER 2 non-conflicted source
    c. THIRD: If evidence leans one direction, counter-search for the OPPOSITE
-   d. LAST: Fetch a conflicted source only if independent sources are insufficient
+   d. LAST: Fetch conflicted or government sources only if independent sources \
+are insufficient — government websites are Tier 3 (interested party statements)
 3. Do NOT re-search what seeds already found — use a DIFFERENT query angle
 4. Stop once you have primary-source evidence from both directions
 

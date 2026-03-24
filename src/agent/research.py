@@ -78,7 +78,7 @@ from src.tools.brave import get_brave_tool, is_available as brave_available, sea
 # Container stays running; re-enable after adding relevance filtering.
 from src.tools.legiscan import search_legislation, is_available as legiscan_available
 from src.schemas.interested_parties import InterestedPartiesDict
-from src.utils.evidence_ranker import score_url, tier_label
+from src.utils.evidence_ranker import score_url, source_tier, tier_label
 from src.utils.logging import log, get_logger
 
 MODULE = "research"
@@ -766,8 +766,8 @@ async def _prefetch_seed_pages(
             continue
         seen_urls.add(url)
 
-        tier = seed.get("_tier", "")
-        if tier:  # TIER 1 or TIER 2
+        tier_num = seed.get("_source_tier", 0)
+        if tier_num in (1, 2):  # programmatic tier, not string parsing
             tiered.append(seed)
         else:
             untiered.append(seed)
@@ -1204,6 +1204,7 @@ async def _rank_and_filter_seeds(
 
         # Annotate seed with metadata for _format_seed_results
         r["_tier"] = tier
+        r["_source_tier"] = source_tier(url)
         r["_conflict_flags"] = conflict_flags
 
         scored.append((adjusted_score, r))
@@ -1236,6 +1237,109 @@ async def _rank_and_filter_seeds(
     return ranked
 
 
+# ---------------------------------------------------------------------------
+# Evidence relevance filter — drops off-topic evidence (e.g. Pearl Harbor
+# results when researching a 2026 Iran claim).
+# ---------------------------------------------------------------------------
+
+# Matches 4-digit years in text (standalone or in date-like contexts)
+_YEAR_RE = _re.compile(r"\b(1[5-9]\d{2}|20\d{2})\b")
+
+# Year gap threshold: evidence mentioning a year this far from claim_year
+# (without also mentioning claim_year) is flagged as temporally off-topic.
+_YEAR_GAP_THRESHOLD = 5
+
+
+def _filter_irrelevant_evidence(
+    evidence: list[dict],
+    claim_text: str,
+    sub_claim: str,
+    interested_parties: InterestedPartiesDict | None,
+    claim_date: str | None,
+) -> list[dict]:
+    """Drop evidence that is clearly off-topic for the claim.
+
+    Two complementary checks — BOTH must fail for an item to be dropped:
+
+    1. Date check: if claim_date is available and evidence's most prominent
+       year is far from claim_year without mentioning claim_year → flag.
+    2. Entity anchor check: if evidence mentions zero topic anchors
+       (party names, claim entities, speaker) → flag.
+
+    This is deliberately conservative: if either check passes, the item stays.
+    """
+    if not evidence:
+        return evidence
+
+    # Parse claim year
+    claim_year: int | None = None
+    if claim_date:
+        year_match = _YEAR_RE.search(claim_date)
+        if year_match:
+            claim_year = int(year_match.group(1))
+
+    # Build topic anchor set from interested parties + NER on claim text
+    anchors: set[str] = set()
+    if interested_parties:
+        for name in interested_parties.get("direct", []):
+            anchors.add(name.lower())
+        for name in interested_parties.get("institutional", []):
+            anchors.add(name.lower())
+    # Extract entities from claim text and sub-claim via SpaCy NER
+    from src.utils.ner import extract_entity_names
+    for text in (claim_text, sub_claim):
+        if text:
+            for name in extract_entity_names(text):
+                anchors.add(name.lower())
+    # Discard very short anchors (≤2 chars) that cause false positives
+    anchors = {a for a in anchors if len(a) > 2}
+
+    if not claim_year and not anchors:
+        # No filtering signals available
+        return evidence
+
+    kept = []
+    dropped_count = 0
+    for ev in evidence:
+        content = (ev.get("content", "") or "").lower()
+        title = (ev.get("title", "") or "").lower()
+        text_blob = f"{title} {content}"
+
+        # Check 1: Date relevance
+        date_ok = True  # passes by default if no claim_year
+        if claim_year:
+            years_found = [int(y) for y in _YEAR_RE.findall(text_blob)]
+            if years_found:
+                # Most prominent year = most frequently mentioned
+                from collections import Counter as _Counter
+                year_counts = _Counter(years_found)
+                prominent_year = year_counts.most_common(1)[0][0]
+                if (abs(prominent_year - claim_year) > _YEAR_GAP_THRESHOLD
+                        and claim_year not in years_found):
+                    date_ok = False
+
+        # Check 2: Entity anchor relevance
+        anchor_ok = True  # passes by default if no anchors
+        if anchors:
+            anchor_ok = any(a in text_blob for a in anchors)
+
+        # Drop only if BOTH checks fail
+        if not date_ok and not anchor_ok:
+            dropped_count += 1
+        else:
+            kept.append(ev)
+
+    if dropped_count:
+        log.info(logger, MODULE, "relevance_filter",
+                 "Dropped off-topic evidence items",
+                 dropped=dropped_count, kept=len(kept),
+                 sub_claim=sub_claim[:80],
+                 claim_year=claim_year,
+                 anchor_count=len(anchors))
+
+    return kept
+
+
 async def research_claim(
     sub_claim: str,
     interested_parties: InterestedPartiesDict | None = None,
@@ -1245,6 +1349,7 @@ async def research_claim(
     seed_queries: list[str] | None = None,
     speaker: str | None = None,
     claim_date: str | None = None,
+    claim_text: str = "",
 ) -> tuple[list[dict], InterestedPartiesDict]:
     """Run the research agent to gather evidence for a sub-claim.
 
@@ -1390,6 +1495,9 @@ async def research_claim(
         await asyncio.wait_for(_run_stream(), timeout=timeout_secs)
 
         evidence = extract_evidence(collected_messages)
+        evidence = _filter_irrelevant_evidence(
+            evidence, claim_text, sub_claim, interested_parties, claim_date,
+        )
         log.info(logger, MODULE, "done", "Research agent complete",
                  sub_claim=sub_claim, evidence_count=len(evidence),
                  agent_steps=len(collected_messages),
@@ -1413,6 +1521,9 @@ async def research_claim(
 
         # Extract whatever evidence was gathered before the interruption
         evidence = extract_evidence(collected_messages)
+        evidence = _filter_irrelevant_evidence(
+            evidence, claim_text, sub_claim, interested_parties, claim_date,
+        )
 
         if isinstance(e, asyncio.TimeoutError):
             error_type = "TimeoutError"

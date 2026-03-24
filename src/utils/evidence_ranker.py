@@ -31,7 +31,7 @@ FACTUAL_SCORES = {
     "low": 4,
     "very-low": 2,
 }
-FACTUAL_UNRATED_GOV = 20  # .gov/.edu/.mil — trustworthy even without MBFC
+FACTUAL_UNRATED_GOV = 4   # gov sources must earn rank via MBFC, not TLD
 FACTUAL_UNRATED = 4        # unknown domains — low default, must earn trust via MBFC
 
 # --- MBFC credibility scoring (0-10) ---
@@ -42,8 +42,8 @@ CREDIBILITY_SCORES = {
 }
 CREDIBILITY_UNRATED = 2
 
-# --- Government/institutional TLD scoring (0-15) ---
-GOV_TLD_SCORE = 15   # .gov, .mil
+# --- Government/institutional TLD scoring ---
+GOV_TLD_SCORE = 0    # gov sources must earn rank via MBFC, not TLD
 EDU_TLD_SCORE = 10   # .edu
 
 # --- Content richness thresholds (0-30) ---
@@ -57,6 +57,18 @@ CONTENT_MINIMAL = 200 # 10 points
 CONTENT_FLOOR = 80
 
 
+_GOV_INTL_TLDS = (".gov.uk", ".gov.au", ".gov.ca", ".gc.ca", ".gov.nz", ".gov.in")
+
+
+def _is_gov_domain(domain: str) -> bool:
+    """Check if domain is a government/military TLD."""
+    if not domain:
+        return False
+    if domain.endswith(".gov") or domain.endswith(".mil"):
+        return True
+    return any(domain.endswith(p) for p in _GOV_INTL_TLDS)
+
+
 def _is_legiscan_url(url: str) -> bool:
     """Detect LegiScan evidence by URL since source_type is 'web'."""
     if not url:
@@ -68,11 +80,7 @@ def _tld_score(domain: str) -> int:
     """Score based on domain TLD (.gov/.mil/.edu)."""
     if not domain:
         return 0
-    if domain.endswith(".gov") or domain.endswith(".mil"):
-        return GOV_TLD_SCORE
-    # International government TLDs
-    gov_intl = (".gov.uk", ".gov.au", ".gov.ca", ".gc.ca", ".gov.nz", ".gov.in")
-    if any(domain.endswith(p) for p in gov_intl):
+    if _is_gov_domain(domain):
         return GOV_TLD_SCORE
     if domain.endswith(".edu"):
         return EDU_TLD_SCORE
@@ -105,7 +113,7 @@ def score_url(url: str) -> tuple[int, dict]:
     Returns (score, breakdown) — same shape as score_evidence
     but without content_richness and source_type components.
 
-    Max score: 55 (factual=30 + gov_tld=15 + credibility=10)
+    Max score: 40 (factual=30 + credibility=10, gov_tld=0)
     """
     domain = extract_domain(url) if url else ""
     rating = get_source_rating_sync(url) if url else None
@@ -136,29 +144,84 @@ def score_url(url: str) -> tuple[int, dict]:
     return sum(breakdown.values()), breakdown
 
 
-def tier_label(url: str) -> str:
-    """Human-readable tier label for a URL. Used in seed annotations.
+def source_tier(url: str) -> int:
+    """Programmatic tier classification for a URL.
 
-    TIER 1: gov/edu/mil TLD, or MBFC very-high/high factual
-    TIER 2: MBFC mostly-factual
+    Returns:
+        1: MBFC very-high factual, academic (.edu)
+        2: MBFC high or mostly-factual
+        3: Government/military without qualifying MBFC rating
+        0: Unknown/unrated
+    """
+    domain = extract_domain(url) if url else ""
+    rating = get_source_rating_sync(url) if url else None
+    factual = rating.get("factual_reporting") if rating else None
+
+    if _is_gov_domain(domain):
+        if factual and factual in FACTUAL_SCORES:
+            score = FACTUAL_SCORES[factual]
+            if score >= 30:
+                return 1
+            if score >= 16:
+                return 2
+        return 3
+
+    if domain and domain.endswith(".edu"):
+        return 1
+
+    if factual and factual in FACTUAL_SCORES:
+        score = FACTUAL_SCORES[factual]
+        if score >= 30:
+            return 1
+        if score >= 16:
+            return 2
+
+    if _is_wikipedia(url):
+        return 2
+
+    return 0
+
+
+def tier_label(url: str) -> str:
+    """Human-readable tier label for a URL. Used in seed and judge annotations.
+
+    TIER 1: MBFC very-high factual, academic (.edu)
+    TIER 2: MBFC high factual, mostly-factual
+    Government: identified but NOT assigned a quality tier — gov sources
+        must earn tier placement via MBFC rating like everyone else.
     Empty string for unknown/low-quality sources.
     """
-    _, breakdown = score_url(url)
-    tld = breakdown.get("gov_tld", 0)
-    factual = breakdown.get("factual", 0)
+    domain = extract_domain(url) if url else ""
+    rating = get_source_rating_sync(url) if url else None
+    factual = None
+    if rating:
+        factual = rating.get("factual_reporting")
 
-    if tld >= GOV_TLD_SCORE:
-        return "TIER 1 (government)"
-    if tld >= EDU_TLD_SCORE:
+    # Gov domains: if they have an MBFC factual rating, tier them by that.
+    # Otherwise just label "government" with no tier number.
+    if _is_gov_domain(domain):
+        if factual and factual in FACTUAL_SCORES:
+            score = FACTUAL_SCORES[factual]
+            if score >= 30:
+                return "TIER 1 (government, very high factual)"
+            if score >= 24:
+                return "TIER 2 (government, high factual)"
+            if score >= 16:
+                return "TIER 2 (government, mostly factual)"
+        return "government"
+
+    if domain and domain.endswith(".edu"):
         return "TIER 1 (academic)"
-    if factual >= 30:  # very-high
+
+    # Non-gov: use the score_url breakdown for factual score
+    _, breakdown = score_url(url)
+    factual_score = breakdown.get("factual", 0)
+    if factual_score >= 30:  # very-high
         return "TIER 1 (very high factual)"
-    if factual >= 24:  # high
+    if factual_score >= 24:  # high
         return "TIER 2 (high factual)"
-    if factual >= 16:  # mostly-factual
+    if factual_score >= 16:  # mostly-factual
         return "TIER 2 (mostly factual)"
-    if factual >= FACTUAL_UNRATED_GOV:  # unrated but gov-like
-        return "TIER 1 (institutional)"
     return ""
 
 
@@ -192,6 +255,7 @@ def rank_and_select(
     evidence: list[dict],
     max_items: int = 20,
     max_per_domain: int = 3,
+    max_gov: int = 4,
 ) -> tuple[list[dict], list[dict]]:
     """Rank evidence by quality and select top items with diversity.
 
@@ -199,6 +263,8 @@ def rank_and_select(
     2. Stable sort descending by score
     3. Walk sorted list, capping at max_per_domain per domain
     4. Take first max_items passing the domain cap
+    5. If gov/mil items exceed max_gov, drop lowest-scoring gov items
+       and backfill with non-gov items from the dropped pool
 
     Returns (selected, dropped) where dropped includes reason annotations.
     """
@@ -247,6 +313,37 @@ def rank_and_select(
         domain_counts[domain] += 1
         ev["_rank_score"] = total
         selected.append(ev)
+
+    # Gov/mil category cap: if more than max_gov gov/mil items, keep only
+    # the top-scoring max_gov and backfill from non-gov dropped items.
+    gov_indices = [
+        i for i, ev in enumerate(selected)
+        if _is_gov_domain(extract_domain(ev.get("source_url", "") or ""))
+    ]
+    if len(gov_indices) > max_gov:
+        # Sort gov indices by score ascending so we drop lowest first
+        gov_indices.sort(key=lambda i: selected[i].get("_rank_score", 0))
+        to_remove = gov_indices[: len(gov_indices) - max_gov]
+        removed_gov = [selected[i] for i in to_remove]
+        selected = [ev for i, ev in enumerate(selected) if i not in set(to_remove)]
+        for ev in removed_gov:
+            dropped.append({"evidence": ev, "score": ev.get("_rank_score", 0),
+                            "reason": "gov_cap"})
+
+        # Backfill from non-gov dropped items (those dropped for "cap" reason)
+        backfill_pool = [
+            d for d in dropped
+            if d["reason"] == "cap"
+            and not _is_gov_domain(
+                extract_domain(d["evidence"].get("source_url", "") or "")
+            )
+        ]
+        backfill_pool.sort(key=lambda d: d["score"], reverse=True)
+        slots = max_items - len(selected)
+        for d in backfill_pool[:slots]:
+            d["evidence"]["_rank_score"] = d["score"]
+            selected.append(d["evidence"])
+            dropped.remove(d)
 
     return selected, content_dropped + dropped
 

@@ -458,7 +458,7 @@ column. Doesn't affect verdicts but worth fixing.
 | Multi-entity claim splitting | — | decompose prompt | **OPEN** |
 | Seed query targeting for financial claims | — | decompose prompt | **OPEN** |
 | NULL source_url data hygiene | — | research.py | **OPEN** — low priority |
-| `.gov` over-scoring | — | evidence_ranker.py | **OPEN** — see seed-relevance-filtering.md |
+| `.gov` over-scoring | — | evidence_ranker.py | **FIXED** — GOV_TLD_SCORE=0, FACTUAL_UNRATED_GOV=4 |
 | Seed relevance filtering | — | evidence_ranker.py | **OPEN** — see seed-relevance-filtering.md |
 
 ## Related Documentation
@@ -467,5 +467,5 @@ column. Doesn't affect verdicts but worth fixing.
   new schemas, implementation sequence (Phase 1 COMPLETE)
 - `docs/seed-relevance-filtering.md` — proposed keyword gate + embedding
   similarity for topical relevance filtering
-- `.gov` scoring adjustment also proposed there (GOV_TLD_SCORE 15→5,
-  FACTUAL_UNRATED_GOV 20→12)
+- `.gov` scoring adjustment implemented (GOV_TLD_SCORE=0,
+  FACTUAL_UNRATED_GOV=4) — more aggressive than originally proposed

@@ -116,6 +116,9 @@ Examples (original_quote → claim_text):
 - "I ordered the operation" → "[Speaker Name] ordered the operation"
 - "The policy is working" → "The policy is working" (no bracket — "the
   policy" is clear from segment context)
+- "Their naval building was destroyed" → "[Country X's] naval building was destroyed"
+- "We will defend our allies" → "[Country Y] will defend [its] allies"
+- "We launched the strike on their positions" → "[Country Z] launched the strike on [Country X's] positions"
 
 → Output per claim: context_insertions (list of strings — each bracket
   you inserted, e.g. ["[Governor X]", "[HB 1234]"]).  Empty list if

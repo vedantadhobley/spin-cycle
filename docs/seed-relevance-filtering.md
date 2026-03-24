@@ -11,11 +11,11 @@ topic beats a TIER 2 page about the exact right topic every time.
 
 | Sub-claim | Garbage result | Score | Why it ranked high |
 |-----------|---------------|-------|--------------------|
-| "did Pelosi outperform all hedge funds" | `pmc.ncbi.nlm.nih.gov` (DID medical paper) | 37 (TIER 1 gov) | `.gov` TLD bonus |
+| "did Pelosi outperform all hedge funds" | `pmc.ncbi.nlm.nih.gov` (DID medical paper) | 37 (TIER 1 gov) | `.gov` TLD bonus (old scoring, now fixed) |
 | "did Pelosi outperform all hedge funds" | `psychologytoday.com` (DID article) | ~20 | decent MBFC rating |
 | "did Pelosi outperform all hedge funds" | `d-id.com`, `did.co` (tech companies) | 6 | unknown but not blocked |
-| "Supreme Court precedents 2021-2026" | `history.state.gov/frus1917/d881` (1917 diplomatic cable) | 37 (TIER 1 gov) | `.gov` TLD bonus |
-| "Supreme Court precedents 2021-2026" | `usa.gov/about-the-us` (generic country info) | 37 (TIER 1 gov) | `.gov` TLD bonus |
+| "Supreme Court precedents 2021-2026" | `history.state.gov/frus1917/d881` (1917 diplomatic cable) | 37 (TIER 1 gov) | `.gov` TLD bonus (old scoring, now fixed) |
+| "Supreme Court precedents 2021-2026" | `usa.gov/about-the-us` (generic country info) | 37 (TIER 1 gov) | `.gov` TLD bonus (old scoring, now fixed) |
 | "China renewable energy vs US+EU" | `travelchinaguide.com` | ~6 | not blocked |
 | "China renewable energy vs US+EU" | `newworldencyclopedia.org/entry/China` | ~6 | not blocked |
 
@@ -32,14 +32,15 @@ return off-topic results. SearXNG merges them without relevance filtering.
 produce much cleaner results. The SearXNG container remains running for
 potential future re-enablement with relevance filtering.
 
-### Secondary root cause: `.gov` over-scoring
+### Secondary root cause: `.gov` over-scoring — FIXED
 
-`.gov` gets automatic 35 points (FACTUAL_UNRATED_GOV=20 + GOV_TLD_SCORE=15)
-even without MBFC data. This is higher than a high-factual MBFC outlet (24+0+2=26).
-A `.gov` page about 1917 diplomacy outranks an AP News article about the actual
-claim topic.
+`.gov` previously got automatic 35 points (FACTUAL_UNRATED_GOV=20 +
+GOV_TLD_SCORE=15) even without MBFC data. This was higher than a
+high-factual MBFC outlet (24+0+2=26).
 
-**TODO**: Reduce `.gov` scoring. Suggested: `GOV_TLD_SCORE=5`, `FACTUAL_UNRATED_GOV=12`.
+**Fixed**: `GOV_TLD_SCORE=0`, `FACTUAL_UNRATED_GOV=4`. Unrated `.gov`
+now scores 6 (factual=4 + credibility=2), the same as an unknown domain.
+Gov sources must earn rank via MBFC rating, not TLD.
 
 ---
 
@@ -175,24 +176,25 @@ for seed, sim in zip(candidates_for_embedding, sims):
 
 ---
 
-## `.gov` Scoring Adjustment
+## `.gov` Scoring Adjustment — DONE
 
-Separate change, can be done independently of relevance filtering.
+Implemented more aggressively than originally proposed. Gov sources get
+zero TLD advantage and must earn rank entirely via MBFC rating.
 
-### Current scoring (stacks)
+### Old scoring (stacks)
 - `FACTUAL_UNRATED_GOV = 20` (factual component)
 - `GOV_TLD_SCORE = 15` (TLD component)
 - Total for unrated `.gov`: **37** (higher than MBFC high-factual at ~26)
 
-### Proposed scoring
-- `FACTUAL_UNRATED_GOV = 12` (above unknown=4, below mostly-factual=16)
-- `GOV_TLD_SCORE = 5` (small credibility bonus, not a catapult)
-- Total for unrated `.gov`: **19** (below MBFC high-factual, above unknown)
+### Current scoring (implemented)
+- `FACTUAL_UNRATED_GOV = 4` (same as unknown — no special treatment)
+- `GOV_TLD_SCORE = 0` (zero TLD bonus)
+- Total for unrated `.gov`: **6** (factual=4 + credibility=2, same as unknown)
+- Gov with MBFC high: **34** (factual=24 + credibility=10, competitive)
 
-This means `eia.gov/todayinenergy` (relevant energy data) and
-`history.state.gov/frus1917` (irrelevant 1917 cables) both start at 19,
-but with relevance filtering the former would score much higher for an
-energy claim.
+Gov sources are still *identified* (tier 3 in source_tier, "government"
+label in tier_label, `[USA Government | FBI]` source tags in judge) —
+they just don't get a free scoring boost.
 
 ---
 
@@ -214,7 +216,7 @@ energy claim.
 
 ## Files to Modify
 
-1. `src/utils/evidence_ranker.py` — add `relevance_score()`, adjust `.gov` constants
+1. `src/utils/evidence_ranker.py` — add `relevance_score()` (`.gov` constants already fixed)
 2. `src/agent/research.py` — pass sub-claim text to ranking, apply relevance multiplier
 3. `requirements.txt` — add `sentence-transformers`
 4. `src/utils/relevance.py` (new) — keyword overlap + embedding similarity module
