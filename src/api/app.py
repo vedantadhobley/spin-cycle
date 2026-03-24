@@ -28,8 +28,9 @@ from src.api.routes.health import router as health_router  # noqa: E402
 from src.api.routes.claims import router as claims_router  # noqa: E402
 from src.api.routes.transcripts import router as transcripts_router  # noqa: E402
 from src.db.session import engine, async_session  # noqa: E402
-from src.db.models import Base, Claim  # noqa: E402
+from src.db.models import Base, Claim, TranscriptRecord  # noqa: E402
 from src.workflows.verify import VerifyClaimWorkflow  # noqa: E402
+from src.workflows.extract_transcript import ExtractTranscriptWorkflow  # noqa: E402
 
 TEMPORAL_HOST = os.getenv("TEMPORAL_HOST", "localhost:7233")
 TASK_QUEUE = "spin-cycle-verify"
@@ -86,25 +87,22 @@ async def _register_search_attributes(temporal: TemporalClient):
 
 
 async def _kickstart_queue(temporal: TemporalClient):
-    """Start first queued claim if queue is stalled (no running workflows).
+    """Start first queued claim or transcript if queue is stalled.
 
     Called on API startup to handle edge cases like restarts where
-    queued claims exist but nothing is processing them.
+    queued claims/transcripts exist but nothing is processing them.
     """
-    # Check for running workflows
-    running_count = 0
-    async for _ in temporal.list_workflows(
-        'WorkflowType="VerifyClaimWorkflow" AND ExecutionStatus="Running"'
-    ):
-        running_count += 1
-        break  # Just need to know if any are running
+    # Check for any running workflows (verify OR extract)
+    for query in [
+        'WorkflowType="VerifyClaimWorkflow" AND ExecutionStatus="Running"',
+        'WorkflowType="ExtractTranscriptWorkflow" AND ExecutionStatus="Running"',
+    ]:
+        async for _ in temporal.list_workflows(query):
+            log.info(logger, MODULE, "queue_active",
+                     "Workflow already running, queue is active")
+            return
 
-    if running_count > 0:
-        log.info(logger, MODULE, "queue_active",
-                 "Workflow already running, queue is active")
-        return
-
-    # No running workflows — check for queued claims
+    # No running workflows — check for queued claims first
     async with async_session() as session:
         result = await session.execute(
             select(Claim)
@@ -114,27 +112,54 @@ async def _kickstart_queue(temporal: TemporalClient):
         )
         claim = result.scalar_one_or_none()
 
-        if not claim:
-            log.info(logger, MODULE, "queue_empty", "No queued claims")
+        if claim:
+            claim_id = str(claim.id)
+            claim_text = claim.text
+            claim_speaker = claim.speaker
+
+            claim.status = "pending"
+            await session.commit()
+
+            await temporal.start_workflow(
+                VerifyClaimWorkflow.run,
+                args=[claim_id, claim_text, claim_speaker],
+                id=f"verify-{claim_id}",
+                task_queue=TASK_QUEUE,
+            )
+            log.info(logger, MODULE, "queue_kickstart",
+                     "Started queued claim on startup",
+                     claim_id=claim_id)
             return
 
-        claim_id = str(claim.id)
-        claim_text = claim.text
-        claim_speaker = claim.speaker
-
-        # Update status and start workflow
-        claim.status = "pending"
-        await session.commit()
-
-        await temporal.start_workflow(
-            VerifyClaimWorkflow.run,
-            args=[claim_id, claim_text, claim_speaker],
-            id=f"verify-{claim_id}",
-            task_queue=TASK_QUEUE,
+    # No queued claims — check for queued transcripts
+    async with async_session() as session:
+        result = await session.execute(
+            select(TranscriptRecord)
+            .where(TranscriptRecord.status == "queued")
+            .order_by(TranscriptRecord.created_at.asc())
+            .limit(1)
         )
-        log.info(logger, MODULE, "queue_kickstart",
-                 "Started queued claim on startup",
-                 claim_id=claim_id)
+        transcript = result.scalar_one_or_none()
+
+        if transcript:
+            transcript_id = str(transcript.id)
+            url = transcript.url
+
+            transcript.status = "extracting"
+            await session.commit()
+
+            await temporal.start_workflow(
+                ExtractTranscriptWorkflow.run,
+                args=[url],
+                id=f"extract-{transcript_id}",
+                task_queue=TASK_QUEUE,
+            )
+            log.info(logger, MODULE, "queue_kickstart_transcript",
+                     "Started queued transcript on startup",
+                     transcript_id=transcript_id, url=url)
+            return
+
+    log.info(logger, MODULE, "queue_empty", "No queued claims or transcripts")
 
 
 @asynccontextmanager
@@ -179,6 +204,13 @@ async def lifespan(app: FastAPI):
                 sync_conn.execute(text(
                     "ALTER TABLE claims ADD COLUMN speaker VARCHAR(256)"
                 ))
+            # Transcripts table: status column (existing rows default to 'complete')
+            if inspector.has_table("transcripts"):
+                t_cols = {c["name"] for c in inspector.get_columns("transcripts")}
+                if "status" not in t_cols:
+                    sync_conn.execute(text(
+                        "ALTER TABLE transcripts ADD COLUMN status VARCHAR(32) DEFAULT 'complete' NOT NULL"
+                    ))
         await conn.run_sync(_migrate)
 
     log.info(logger, MODULE, "db_ready", "Database tables ready")

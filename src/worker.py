@@ -43,6 +43,9 @@ from src.activities.transcript_activities import (  # noqa: E402
     finalize_extraction,
     store_transcript,
     store_transcript_claims,
+    create_claims_for_transcript,
+    update_transcript_status,
+    finish_transcript_and_start_next,
 )
 
 TASK_QUEUE = "spin-cycle-verify"
@@ -83,6 +86,9 @@ async def main():
             finalize_extraction,
             store_transcript,
             store_transcript_claims,
+            create_claims_for_transcript,
+            update_transcript_status,
+            finish_transcript_and_start_next,
         ],
         # Allow 2 concurrent activities to match MAX_CONCURRENT=2 in the workflow.
         # The workflow uses a semaphore to run 2 research/judge tasks in parallel,
@@ -91,7 +97,7 @@ async def main():
     )
 
     log.info(logger, MODULE, "ready", "Worker listening",
-             task_queue=TASK_QUEUE, activity_count=12, workflow_count=2)
+             task_queue=TASK_QUEUE, activity_count=15, workflow_count=2)
     await worker.run()
 
 

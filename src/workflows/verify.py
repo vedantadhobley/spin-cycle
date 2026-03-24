@@ -40,6 +40,9 @@ with workflow.unsafe.imports_passed_through():
         store_result,
         start_next_queued_claim,
     )
+    from src.activities.transcript_activities import (
+        finish_transcript_and_start_next,
+    )
     from src.utils.logging import log
 
 MODULE = "workflow"
@@ -387,11 +390,19 @@ class VerifyClaimWorkflow:
         )
 
         # Step 6: Start next queued claim (if any)
-        await workflow.execute_activity(
+        next_claim = await workflow.execute_activity(
             start_next_queued_claim,
             start_to_close_timeout=timedelta(seconds=30),
             retry_policy=RetryPolicy(maximum_attempts=2),
         )
+
+        # No more queued claims — check if transcript is done, start next queued transcript
+        if next_claim is None:
+            await workflow.execute_activity(
+                finish_transcript_and_start_next,
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
 
         self._set_phase("complete")
         workflow.upsert_search_attributes([

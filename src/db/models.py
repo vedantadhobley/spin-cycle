@@ -109,6 +109,7 @@ class TranscriptRecord(Base):
     word_count = Column(Integer, nullable=False)
     segment_count = Column(Integer, nullable=False)
     display_text = Column(Text, nullable=False)  # cleaned, merged same-speaker segments
+    status = Column(String(32), default="queued", nullable=False)  # queued → extracting → verifying → complete → failed
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     transcript_claims = relationship("TranscriptClaim", back_populates="transcript", cascade="all, delete-orphan")

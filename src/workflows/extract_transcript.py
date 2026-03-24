@@ -27,9 +27,11 @@ with workflow.unsafe.imports_passed_through():
         finalize_extraction,
         store_transcript,
         store_transcript_claims,
+        create_claims_for_transcript,
+        update_transcript_status,
+        finish_transcript_and_start_next,
     )
     from src.activities.verify_activities import (
-        create_claim,
         start_next_queued_claim,
     )
     from src.transcript.extractor import build_batches
@@ -96,13 +98,14 @@ class ExtractTranscriptWorkflow:
         workflow.upsert_search_attributes([SA_PHASE.value_set(phase)])
 
     @workflow.run
-    async def run(self, url: str, auto_verify: bool = False) -> dict:
+    async def run(self, url: str) -> dict:
         """Run the transcript extraction pipeline.
+
+        After extraction, batch-creates Claim records, links FKs, and kicks
+        off the verification pipeline. Always verifies — no opt-out.
 
         Args:
             url: Rev.com transcript URL.
-            auto_verify: If True, submit extracted claims to the verification
-                         pipeline as a batch.
 
         Returns:
             Dict with transcript metadata and extracted claims.
@@ -111,7 +114,7 @@ class ExtractTranscriptWorkflow:
 
         log.info(workflow.logger, MODULE, "started",
                  "Starting transcript extraction",
-                 url=url, auto_verify=auto_verify)
+                 url=url)
 
         # Step 1: Fetch and parse transcript
         self._set_phase("fetching")
@@ -234,31 +237,36 @@ class ExtractTranscriptWorkflow:
 
         # Step 3b: Store extracted claims in DB (linked to transcript)
         if self._transcript_id and claims:
-            await workflow.execute_activity(
+            tc_ids = await workflow.execute_activity(
                 store_transcript_claims,
                 args=[self._transcript_id, claims],
                 start_to_close_timeout=timedelta(seconds=15),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
 
-        # Step 4: Optionally submit claims for verification
-        if auto_verify and claims:
+            # Step 4: Batch-create Claim records and link FKs
             self._set_phase("submitting")
 
-            log.info(workflow.logger, MODULE, "submitting_claims",
-                     "Submitting claims for verification",
+            log.info(workflow.logger, MODULE, "creating_claims",
+                     "Batch-creating Claim records for verification",
                      claim_count=len(claims))
 
-            for claim_data in claims:
-                claim_id = await workflow.execute_activity(
-                    create_claim,
-                    args=[claim_data["claim_text"]],
-                    start_to_close_timeout=timedelta(seconds=15),
-                    retry_policy=RetryPolicy(maximum_attempts=3),
-                )
-                self._verification_submitted += 1
+            claim_ids = await workflow.execute_activity(
+                create_claims_for_transcript,
+                args=[self._transcript_id, tc_ids, claims],
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+            self._verification_submitted = len(claim_ids)
 
-            # Start the verification workflow for the first claim
+            # Step 5: Transition to verifying and start first claim
+            await workflow.execute_activity(
+                update_transcript_status,
+                args=[self._transcript_id, "verifying"],
+                start_to_close_timeout=timedelta(seconds=15),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+
             await workflow.execute_activity(
                 start_next_queued_claim,
                 start_to_close_timeout=timedelta(seconds=30),
@@ -268,6 +276,24 @@ class ExtractTranscriptWorkflow:
             log.info(workflow.logger, MODULE, "verification_started",
                      "Verification pipeline started",
                      submitted=self._verification_submitted)
+
+        elif self._transcript_id:
+            # No claims extracted — mark complete and try next queued transcript
+            await workflow.execute_activity(
+                update_transcript_status,
+                args=[self._transcript_id, "complete"],
+                start_to_close_timeout=timedelta(seconds=15),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+
+            await workflow.execute_activity(
+                finish_transcript_and_start_next,
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+
+            log.info(workflow.logger, MODULE, "no_claims",
+                     "No claims extracted, transcript marked complete")
 
         # Done
         self._set_phase("complete")
@@ -281,7 +307,6 @@ class ExtractTranscriptWorkflow:
             "claim_count": self._claim_count,
             "claims": claims,
             "transcript_id": self._transcript_id,
-            "auto_verify": auto_verify,
             "verification_submitted": self._verification_submitted,
         }
 

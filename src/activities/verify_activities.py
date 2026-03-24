@@ -34,7 +34,11 @@ from src.utils.logging import log
 
 
 @activity.defn
-async def create_claim(claim_text: str) -> str:
+async def create_claim(
+    claim_text: str,
+    speaker: str | None = None,
+    source_url: str | None = None,
+) -> str:
     """Create a claim record in the database and return its ID.
 
     This lets workflows be self-contained — you can start a VerifyClaimWorkflow
@@ -49,6 +53,8 @@ async def create_claim(claim_text: str) -> str:
         async with session.begin():
             claim = Claim(
                 text=claim_text,
+                speaker=speaker,
+                source_url=source_url,
                 status="pending",
             )
             session.add(claim)

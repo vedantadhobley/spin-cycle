@@ -1,15 +1,21 @@
 """Temporal activities for transcript extraction.
 
-Four activities:
-  1. fetch_transcript          — fetch + parse a Rev.com transcript
-  2. extract_transcript_batch  — extract claims from one batch of segments
-  3. finalize_extraction       — filter + deduplicate claims across all batches
-  4. store_transcript          — persist cleaned transcript to DB
+Activities:
+  1. fetch_transcript              — fetch + parse a Rev.com transcript
+  2. extract_transcript_batch      — extract claims from one batch of segments
+  3. finalize_extraction           — filter + deduplicate claims across all batches
+  4. store_transcript              — persist cleaned transcript to DB
+  5. store_transcript_claims       — persist extracted claims linked to transcript
+  6. create_claims_for_transcript  — batch-create Claim records + link FKs
+  7. update_transcript_status      — set transcript status field
+  8. finish_transcript_and_start_next — mark transcript complete, start next queued
 
 Each batch is a separate activity so it's visible in Temporal UI.
 The workflow orchestrates batches — Temporal's max_concurrent_activities
 naturally limits GPU contention.
 """
+
+import uuid as _uuid_mod
 
 from temporalio import activity
 
@@ -213,6 +219,7 @@ async def store_transcript(transcript_data: dict) -> str:
             record.word_count = transcript_data["word_count"]
             record.segment_count = len(transcript_data["segments"])
             record.display_text = transcript_data["display_text"]
+            record.status = "extracting"
         else:
             record = TranscriptRecord(
                 url=url,
@@ -222,6 +229,7 @@ async def store_transcript(transcript_data: dict) -> str:
                 word_count=transcript_data["word_count"],
                 segment_count=len(transcript_data["segments"]),
                 display_text=transcript_data["display_text"],
+                status="extracting",
             )
             session.add(record)
 
@@ -239,18 +247,18 @@ async def store_transcript(transcript_data: dict) -> str:
 async def store_transcript_claims(
     transcript_id: str,
     claims: list[dict],
-) -> int:
+) -> list[str]:
     """Persist extracted claims linked to their transcript.
 
     Deletes existing claims for this transcript (re-extraction replaces old results)
-    and inserts the new set. Returns the number of claims stored.
+    and inserts the new set. Returns list of transcript_claim IDs (insertion order).
     """
-    import uuid as _uuid
     from sqlalchemy import delete
     from src.db.session import async_session
     from src.db.models import TranscriptClaim
 
-    tid = _uuid.UUID(transcript_id)
+    tid = _uuid_mod.UUID(transcript_id)
+    tc_ids: list[str] = []
 
     async with async_session() as session:
         # Clear old claims for this transcript (idempotent re-runs)
@@ -259,7 +267,7 @@ async def store_transcript_claims(
         )
 
         for c in claims:
-            session.add(TranscriptClaim(
+            tc = TranscriptClaim(
                 transcript_id=tid,
                 claim_text=c["claim_text"],
                 original_quote=c["original_quote"],
@@ -267,7 +275,10 @@ async def store_transcript_claims(
                 timestamp=c["timestamp"],
                 timestamp_secs=c["timestamp_secs"],
                 claim_type=c.get("claim_type"),
-            ))
+            )
+            session.add(tc)
+            await session.flush()
+            tc_ids.append(str(tc.id))
 
         await session.commit()
 
@@ -275,4 +286,161 @@ async def store_transcript_claims(
              "Transcript claims stored",
              transcript_id=transcript_id, claim_count=len(claims))
 
-    return len(claims)
+    return tc_ids
+
+
+@activity.defn
+async def create_claims_for_transcript(
+    transcript_id: str,
+    transcript_claim_ids: list[str],
+    claims: list[dict],
+) -> list[str]:
+    """Batch-create Claim records and link them to TranscriptClaims via FK.
+
+    Single transaction: creates all Claim records with status="queued",
+    sets speaker/source_url, and writes claim_id back to each TranscriptClaim.
+    Returns list of claim_id strings (insertion order).
+    """
+    from sqlalchemy import select
+    from src.db.session import async_session
+    from src.db.models import Claim, TranscriptClaim
+
+    claim_ids: list[str] = []
+
+    async with async_session() as session:
+        async with session.begin():
+            for tc_id_str, claim_data in zip(transcript_claim_ids, claims):
+                # Create the Claim record
+                claim = Claim(
+                    text=claim_data["claim_text"],
+                    speaker=claim_data.get("speaker"),
+                    source_url=claim_data.get("source_url"),
+                    status="queued",
+                )
+                session.add(claim)
+                await session.flush()
+                claim_ids.append(str(claim.id))
+
+                # Link TranscriptClaim → Claim
+                tc_id = _uuid_mod.UUID(tc_id_str)
+                result = await session.execute(
+                    select(TranscriptClaim).where(TranscriptClaim.id == tc_id)
+                )
+                tc = result.scalar_one()
+                tc.claim_id = claim.id
+
+    log.info(activity.logger, "transcript", "claims_created",
+             "Batch-created Claim records and linked FKs",
+             transcript_id=transcript_id, claim_count=len(claim_ids))
+
+    return claim_ids
+
+
+@activity.defn
+async def update_transcript_status(transcript_id: str, status: str) -> None:
+    """Update a transcript's status field."""
+    from sqlalchemy import select
+    from src.db.session import async_session
+    from src.db.models import TranscriptRecord
+
+    tid = _uuid_mod.UUID(transcript_id)
+
+    async with async_session() as session:
+        result = await session.execute(
+            select(TranscriptRecord).where(TranscriptRecord.id == tid)
+        )
+        record = result.scalar_one()
+        record.status = status
+        await session.commit()
+
+    log.info(activity.logger, "transcript", "status_updated",
+             "Transcript status updated",
+             transcript_id=transcript_id, status=status)
+
+
+@activity.defn
+async def finish_transcript_and_start_next() -> str | None:
+    """Mark completed transcripts and start the next queued one.
+
+    1. Find transcripts with status='verifying' where ALL linked claims are verified
+    2. Mark them 'complete'
+    3. Find oldest 'queued' transcript and start its ExtractTranscriptWorkflow
+    4. Return transcript_id if started, None if pipeline is idle
+    """
+    import os
+    from sqlalchemy import select, func
+    from temporalio.client import Client as TemporalClient
+    from src.db.session import async_session
+    from src.db.models import TranscriptRecord, TranscriptClaim, Claim
+
+    TEMPORAL_HOST = os.getenv("TEMPORAL_HOST", "localhost:7233")
+    TASK_QUEUE = "spin-cycle-verify"
+
+    async with async_session() as session:
+        # Step 1: Find verifying transcripts where all claims are done
+        verifying = await session.execute(
+            select(TranscriptRecord).where(TranscriptRecord.status == "verifying")
+        )
+        for transcript in verifying.scalars().all():
+            # Count total linked claims vs verified claims
+            total = await session.execute(
+                select(func.count()).select_from(TranscriptClaim)
+                .where(TranscriptClaim.transcript_id == transcript.id)
+                .where(TranscriptClaim.claim_id.isnot(None))
+            )
+            total_count = total.scalar()
+
+            verified = await session.execute(
+                select(func.count()).select_from(TranscriptClaim)
+                .join(Claim, TranscriptClaim.claim_id == Claim.id)
+                .where(TranscriptClaim.transcript_id == transcript.id)
+                .where(Claim.status == "verified")
+            )
+            verified_count = verified.scalar()
+
+            if total_count > 0 and total_count == verified_count:
+                transcript.status = "complete"
+                log.info(activity.logger, "transcript", "complete",
+                         "Transcript verification complete",
+                         transcript_id=str(transcript.id),
+                         verified_claims=verified_count)
+
+        await session.commit()
+
+    # Step 2: Find next queued transcript
+    async with async_session() as session:
+        result = await session.execute(
+            select(TranscriptRecord)
+            .where(TranscriptRecord.status == "queued")
+            .order_by(TranscriptRecord.created_at.asc())
+            .with_for_update()
+            .limit(1)
+        )
+        queued = result.scalar_one_or_none()
+
+        if not queued:
+            log.info(activity.logger, "transcript", "queue_empty",
+                     "No queued transcripts")
+            return None
+
+        transcript_id = str(queued.id)
+        url = queued.url
+        queued.status = "extracting"
+        await session.commit()
+
+    # Step 3: Start extraction workflow
+    from src.workflows.extract_transcript import ExtractTranscriptWorkflow
+
+    temporal = await TemporalClient.connect(TEMPORAL_HOST)
+    await temporal.start_workflow(
+        ExtractTranscriptWorkflow.run,
+        args=[url],
+        id=f"extract-{transcript_id}",
+        task_queue=TASK_QUEUE,
+    )
+
+    log.info(activity.logger, "transcript", "next_started",
+             "Started next queued transcript",
+             transcript_id=transcript_id, url=url)
+
+    return transcript_id
