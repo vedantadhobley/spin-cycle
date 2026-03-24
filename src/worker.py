@@ -27,6 +27,7 @@ from temporalio.client import Client  # noqa: E402
 from temporalio.worker import Worker  # noqa: E402
 
 from src.workflows.verify import VerifyClaimWorkflow  # noqa: E402
+from src.workflows.extract_transcript import ExtractTranscriptWorkflow  # noqa: E402
 from src.activities.verify_activities import (  # noqa: E402
     create_claim,
     decompose_claim,
@@ -35,6 +36,13 @@ from src.activities.verify_activities import (  # noqa: E402
     synthesize_verdict,
     store_result,
     start_next_queued_claim,
+)
+from src.activities.transcript_activities import (  # noqa: E402
+    fetch_transcript,
+    extract_transcript_batch,
+    finalize_extraction,
+    store_transcript,
+    store_transcript_claims,
 )
 
 TASK_QUEUE = "spin-cycle-verify"
@@ -59,8 +67,9 @@ async def main():
     worker = Worker(
         client,
         task_queue=TASK_QUEUE,
-        workflows=[VerifyClaimWorkflow],
+        workflows=[VerifyClaimWorkflow, ExtractTranscriptWorkflow],
         activities=[
+            # Verification pipeline
             create_claim,
             decompose_claim,
             research_subclaim,
@@ -68,6 +77,12 @@ async def main():
             synthesize_verdict,
             store_result,
             start_next_queued_claim,
+            # Transcript extraction
+            fetch_transcript,
+            extract_transcript_batch,
+            finalize_extraction,
+            store_transcript,
+            store_transcript_claims,
         ],
         # Allow 2 concurrent activities to match MAX_CONCURRENT=2 in the workflow.
         # The workflow uses a semaphore to run 2 research/judge tasks in parallel,
@@ -76,7 +91,7 @@ async def main():
     )
 
     log.info(logger, MODULE, "ready", "Worker listening",
-             task_queue=TASK_QUEUE, activity_count=7, workflow_count=1)
+             task_queue=TASK_QUEUE, activity_count=12, workflow_count=2)
     await worker.run()
 
 

@@ -249,6 +249,7 @@ async def judge(
             semantic_validator=validate_judge,
             max_retries=2,
             temperature=0,
+            max_tokens=16384,
             activity_name="judge",
         )
 

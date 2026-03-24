@@ -96,6 +96,7 @@ async def synthesize(
             semantic_validator=validate_synthesize,
             max_retries=2,
             temperature=0,
+            max_tokens=16384,
             activity_name="synthesize",
         )
 

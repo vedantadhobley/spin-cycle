@@ -362,6 +362,7 @@ async def _validate_subclaim_quality(
             schema=SubclaimQualityCheck,
             max_retries=1,
             temperature=0.3,
+            max_tokens=16384,
             activity_name="subclaim_quality",
         )
     except LLMInvocationError as e:
@@ -442,6 +443,7 @@ async def decompose(claim_text: str, speaker: str | None = None) -> dict:
             semantic_validator=validate_normalize,
             max_retries=1,
             temperature=0,
+            max_tokens=16384,
             activity_name="normalize",
         )
         normalized = norm_output.normalized_claim
@@ -469,6 +471,7 @@ async def decompose(claim_text: str, speaker: str | None = None) -> dict:
             semantic_validator=validate_decompose,
             max_retries=2,
             temperature=0,
+            max_tokens=16384,
             activity_name="decompose",
         )
 
@@ -496,6 +499,7 @@ async def decompose(claim_text: str, speaker: str | None = None) -> dict:
                         semantic_validator=validate_decompose,
                         max_retries=1,
                         temperature=0.1,
+                        max_tokens=16384,
                         activity_name="decompose_retry",
                     )
                     clean_facts = output.facts

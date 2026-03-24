@@ -97,6 +97,42 @@ class Verdict(Base):
     claim = relationship("Claim", back_populates="verdict")
 
 
+class TranscriptRecord(Base):
+    """A stored transcript with cleaned display text."""
+    __tablename__ = "transcripts"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    url = Column(String(2048), nullable=False, unique=True)
+    title = Column(String(512), nullable=False)
+    date = Column(String(64), nullable=True)
+    speakers = Column(JSONB, nullable=False)  # list of speaker names
+    word_count = Column(Integer, nullable=False)
+    segment_count = Column(Integer, nullable=False)
+    display_text = Column(Text, nullable=False)  # cleaned, merged same-speaker segments
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    transcript_claims = relationship("TranscriptClaim", back_populates="transcript", cascade="all, delete-orphan")
+
+
+class TranscriptClaim(Base):
+    """A claim extracted from a transcript, linking extraction to verification."""
+    __tablename__ = "transcript_claims"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    transcript_id = Column(UUID(as_uuid=True), ForeignKey("transcripts.id"), nullable=False)
+    claim_id = Column(UUID(as_uuid=True), ForeignKey("claims.id"), nullable=True)  # set when sent to verification
+    claim_text = Column(Text, nullable=False)  # contextualized with [brackets]
+    original_quote = Column(Text, nullable=False)  # speaker's exact words — used for inline highlighting
+    speaker = Column(String(256), nullable=False)
+    timestamp = Column(String(32), nullable=False)  # "MM:SS"
+    timestamp_secs = Column(Float, nullable=False)
+    claim_type = Column(String(64), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    transcript = relationship("TranscriptRecord", back_populates="transcript_claims")
+    claim = relationship("Claim")
+
+
 class SourceRating(Base):
     """Cached media bias/factual ratings from MBFC and similar services."""
     __tablename__ = "source_ratings"

@@ -26,12 +26,63 @@ from temporalio.client import Client as TemporalClient  # noqa: E402
 
 from src.api.routes.health import router as health_router  # noqa: E402
 from src.api.routes.claims import router as claims_router  # noqa: E402
+from src.api.routes.transcripts import router as transcripts_router  # noqa: E402
 from src.db.session import engine, async_session  # noqa: E402
 from src.db.models import Base, Claim  # noqa: E402
 from src.workflows.verify import VerifyClaimWorkflow  # noqa: E402
 
 TEMPORAL_HOST = os.getenv("TEMPORAL_HOST", "localhost:7233")
 TASK_QUEUE = "spin-cycle-verify"
+
+
+async def _register_search_attributes(temporal: TemporalClient):
+    """Register custom search attributes for workflow visibility in Temporal UI.
+
+    Idempotent — checks what's already registered and only adds missing ones.
+    Called on every API startup.
+    """
+    from temporalio.api.operatorservice.v1 import (
+        AddSearchAttributesRequest,
+        ListSearchAttributesRequest,
+    )
+    from temporalio.api.enums.v1 import IndexedValueType
+
+    # All custom search attributes used by our workflows
+    required = {
+        # VerifyClaimWorkflow
+        "Phase": IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD,
+        "FactCount": IndexedValueType.INDEXED_VALUE_TYPE_INT,
+        "ResearchProgress": IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD,
+        "JudgeProgress": IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD,
+        "Verdict": IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD,
+        "Confidence": IndexedValueType.INDEXED_VALUE_TYPE_DOUBLE,
+        # ExtractTranscriptWorkflow
+        "ClaimCount": IndexedValueType.INDEXED_VALUE_TYPE_INT,
+        "TranscriptTitle": IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD,
+    }
+
+    # Check what's already registered
+    resp = await temporal.operator_service.list_search_attributes(
+        ListSearchAttributesRequest(namespace="default")
+    )
+    existing = set(resp.custom_attributes.keys())
+
+    missing = {k: v for k, v in required.items() if k not in existing}
+    if not missing:
+        log.info(logger, MODULE, "search_attrs_ok",
+                 "All search attributes already registered",
+                 count=len(required))
+        return
+
+    await temporal.operator_service.add_search_attributes(
+        AddSearchAttributesRequest(
+            namespace="default",
+            search_attributes=missing,
+        )
+    )
+    log.info(logger, MODULE, "search_attrs_registered",
+             "Registered missing search attributes",
+             registered=list(missing.keys()))
 
 
 async def _kickstart_queue(temporal: TemporalClient):
@@ -145,6 +196,9 @@ async def lifespan(app: FastAPI):
     log.info(logger, MODULE, "temporal_connected", "Connected to Temporal",
              temporal_host=TEMPORAL_HOST)
 
+    # Register custom search attributes (idempotent — skips existing)
+    await _register_search_attributes(temporal_client)
+
     # Kickstart queue if needed (handles restarts with orphaned queued claims)
     await _kickstart_queue(temporal_client)
 
@@ -164,3 +218,4 @@ app = FastAPI(
 
 app.include_router(health_router)
 app.include_router(claims_router, prefix="/claims", tags=["claims"])
+app.include_router(transcripts_router, prefix="/transcripts", tags=["transcripts"])

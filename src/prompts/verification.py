@@ -436,6 +436,17 @@ WHAT YOU DO NOT DO:
 - Do NOT change meaning — only clarify the factual questions being asked
 - Do NOT touch direct quotes (attributed content stays verbatim)
 - Do NOT expand claims — you may shorten them by removing opinions
+- Do NOT add pedantic precision that creates falsifiable technicalities. \
+Normalize to common understanding, not technical definitions:
+  - "second largest country by land area" → "second largest country by area" \
+(nobody means land-only vs total area)
+  - "the biggest city in Europe" → keep as-is (do not add "by population" \
+or "by area" — verify the common understanding)
+- Do NOT weaken characterizations that map to institutional assessments. \
+Words like "terrorized", "corrupt", "authoritarian", "genocide", \
+"disproportionate" sound loaded but correspond to formal designations or \
+evaluations by governments, courts, or international bodies. Keep them — \
+the pipeline verifies whether the characterization is warranted.
 
 If the claim is already neutral and precise, return it unchanged with empty changes.
 

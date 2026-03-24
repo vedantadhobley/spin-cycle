@@ -23,19 +23,22 @@ if not LLAMA_URL:
 MODEL = os.getenv("LLAMA_MODEL", "Qwen3.5-122B-A10B")
 
 
-def get_llm(temperature: float = 0.1) -> ChatOpenAI:
+def get_llm(temperature: float = 0.1, max_tokens: int = 8192) -> ChatOpenAI:
     """Get the LLM client with thinking disabled.
 
     Args:
         temperature: 0.0 = deterministic, 1.0 = creative.
             Default 0.1 for fact-checking — consistent, conservative.
+        max_tokens: Maximum output tokens. Default 8192, sufficient for
+            verification pipeline calls. Callers processing large inputs
+            (e.g. transcript extraction) may need higher values.
     """
     client = ChatOpenAI(
         base_url=f"{LLAMA_URL}/v1",
         api_key="not-needed",
         model=MODEL,
         temperature=temperature,
-        max_tokens=8192,
+        max_tokens=max_tokens,
         extra_body={"chat_template_kwargs": {"enable_thinking": False}},
     )
     log.debug(logger, MODULE, "llm_init", "LLM client created (thinking=off)",
