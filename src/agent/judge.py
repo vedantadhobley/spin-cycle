@@ -11,7 +11,7 @@ from datetime import date
 from urllib.parse import urlparse
 
 from src.llm import invoke_llm, LLMInvocationError, validate_judge
-from src.prompts.verification import JUDGE_SYSTEM, JUDGE_USER
+from src.prompts.verification import JUDGE_SYSTEM, JUDGE_USER, build_claim_date_line
 from src.schemas.llm_outputs import JudgeOutput
 from src.db.session import get_sync_session
 from src.db.models import SourceRating
@@ -162,6 +162,7 @@ async def judge(
     evidence: list[dict],
     interested_parties: InterestedPartiesDict,
     speaker: str | None = None,
+    claim_date: str | None = None,
 ) -> dict:
     """Evaluate evidence and return a verdict.
 
@@ -239,6 +240,7 @@ async def judge(
         output = await invoke_llm(
             system_prompt=JUDGE_SYSTEM.format(
                 current_date=date.today().isoformat(),
+                claim_date_line=build_claim_date_line(claim_date),
             ),
             user_prompt=JUDGE_USER.format(
                 claim_text=claim_text,

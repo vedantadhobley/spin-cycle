@@ -38,6 +38,7 @@ from datetime import date
 from src.llm import invoke_llm, LLMInvocationError, validate_normalize, validate_decompose
 from src.prompts.verification import (
     NORMALIZE_SYSTEM, NORMALIZE_USER, DECOMPOSE_SYSTEM, DECOMPOSE_USER,
+    build_claim_date_line,
 )
 from src.schemas.llm_outputs import (
     NormalizeOutput, DecomposeOutput, AtomicFact, SubclaimQualityCheck,
@@ -445,7 +446,8 @@ def _validate_decompose_consistency(output: DecomposeOutput) -> None:
                         structure=structure)
 
 
-async def decompose(claim_text: str, speaker: str | None = None) -> dict:
+async def decompose(claim_text: str, speaker: str | None = None,
+                    claim_date: str | None = None) -> dict:
     """Full decompose pipeline: normalize → extract → quality validate → NER → Wikidata.
 
     Pipeline:
@@ -479,9 +481,11 @@ async def decompose(claim_text: str, speaker: str | None = None) -> dict:
     # Step 1: Normalize claim
     norm_output = None
     today = date.today().isoformat()
+    claim_date_line = build_claim_date_line(claim_date)
     try:
         norm_output = await invoke_llm(
-            system_prompt=NORMALIZE_SYSTEM.format(current_date=today),
+            system_prompt=NORMALIZE_SYSTEM.format(
+                current_date=today, claim_date_line=claim_date_line),
             user_prompt=NORMALIZE_USER.format(
                 claim_text=claim_text, speaker_line=speaker_line),
             schema=NormalizeOutput,
@@ -505,7 +509,8 @@ async def decompose(claim_text: str, speaker: str | None = None) -> dict:
                     "Normalization failed, using raw claim", claim=claim_text)
 
     # Step 2: Decompose the NORMALIZED claim
-    decompose_system_with_patterns = DECOMPOSE_SYSTEM.format(current_date=today) + "\n\n" + get_linguistic_patterns()
+    decompose_system_with_patterns = DECOMPOSE_SYSTEM.format(
+        current_date=today, claim_date_line=claim_date_line) + "\n\n" + get_linguistic_patterns()
 
     try:
         output = await invoke_llm(

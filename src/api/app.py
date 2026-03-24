@@ -211,6 +211,12 @@ async def lifespan(app: FastAPI):
                     sync_conn.execute(text(
                         "ALTER TABLE transcripts ADD COLUMN status VARCHAR(32) DEFAULT 'complete' NOT NULL"
                     ))
+            # Claims table: claim_date for temporal context
+            c_cols = {c["name"] for c in inspector.get_columns("claims")}
+            if "claim_date" not in c_cols:
+                sync_conn.execute(text(
+                    "ALTER TABLE claims ADD COLUMN claim_date VARCHAR(64)"
+                ))
             # Claims table: decompose rubric columns
             c_cols = {c["name"] for c in inspector.get_columns("claims")}
             claim_migrations = {

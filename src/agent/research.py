@@ -67,7 +67,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langgraph.prebuilt import create_react_agent
 
 from src.llm import get_llm
-from src.prompts.verification import RESEARCH_SYSTEM, RESEARCH_USER
+from src.prompts.verification import RESEARCH_SYSTEM, RESEARCH_USER, build_claim_date_line
 from src.tools.web_search import get_web_search_tool
 from src.tools.wikipedia import get_wikipedia_tool
 from src.tools.page_fetcher import get_page_fetcher_tool
@@ -349,7 +349,8 @@ def _build_tool_list() -> list:
     return tools
 
 
-def build_research_agent(interested_parties_context: str = ""):
+def build_research_agent(interested_parties_context: str = "",
+                         claim_date: str | None = None):
     """Build a ReAct agent for evidence gathering.
 
     Tools are dynamically loaded based on configured API keys.
@@ -375,7 +376,10 @@ def build_research_agent(interested_parties_context: str = ""):
     llm = get_llm(temperature=0)
     tools = _build_tool_list()
 
-    prompt = RESEARCH_SYSTEM.format(current_date=date.today().isoformat())
+    prompt = RESEARCH_SYSTEM.format(
+        current_date=date.today().isoformat(),
+        claim_date_line=build_claim_date_line(claim_date),
+    )
 
     # Inject interested parties context into the prompt
     if interested_parties_context:
@@ -1240,6 +1244,7 @@ async def research_claim(
     categories: list[str] | None = None,
     seed_queries: list[str] | None = None,
     speaker: str | None = None,
+    claim_date: str | None = None,
 ) -> tuple[list[dict], InterestedPartiesDict]:
     """Run the research agent to gather evidence for a sub-claim.
 
@@ -1362,7 +1367,7 @@ async def research_claim(
     collected_messages: list = list(seed_messages) + list(prefetch_messages)
 
     try:
-        agent = build_research_agent(wikidata_context)
+        agent = build_research_agent(wikidata_context, claim_date=claim_date)
         input_msg = HumanMessage(
             content=RESEARCH_USER.format(
                 sub_claim=sub_claim,

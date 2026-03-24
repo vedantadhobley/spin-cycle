@@ -11,6 +11,7 @@ class ClaimSubmit(BaseModel):
     source: Optional[str] = Field(None, description="URL where the claim was found")
     source_name: Optional[str] = Field(None, description="Name of the source (e.g., 'BBC News')")
     speaker: Optional[str] = Field(None, description="Person or entity making the claim")
+    claim_date: Optional[str] = Field(None, description="When the claim was made (ISO date or free text)")
 
     @field_validator("text")
     @classmethod

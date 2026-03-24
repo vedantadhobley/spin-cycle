@@ -31,9 +31,7 @@ with workflow.unsafe.imports_passed_through():
         update_transcript_status,
         finish_transcript_and_start_next,
     )
-    from src.activities.verify_activities import (
-        start_next_queued_claim,
-    )
+    from src.workflows.verify import VerifyClaimWorkflow
     from src.transcript.extractor import build_batches
     from src.utils.logging import log
 
@@ -264,13 +262,14 @@ class ExtractTranscriptWorkflow:
 
             claim_ids = await workflow.execute_activity(
                 create_claims_for_transcript,
-                args=[self._transcript_id, worth_checking_tc_ids, claims],
+                args=[self._transcript_id, worth_checking_tc_ids, claims,
+                      transcript_data.get("date")],
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
             self._verification_submitted = len(claim_ids)
 
-            # Step 5: Transition to verifying and start first claim
+            # Step 5: Transition to verifying, run child verification workflows
             await workflow.execute_activity(
                 update_transcript_status,
                 args=[self._transcript_id, "verifying"],
@@ -278,15 +277,51 @@ class ExtractTranscriptWorkflow:
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
 
+            self._set_phase("verifying")
+            transcript_date = transcript_data.get("date")
+
+            log.info(workflow.logger, MODULE, "verification_started",
+                     "Starting sequential child verification workflows",
+                     claim_count=len(claim_ids))
+
+            verified = 0
+            failed = 0
+            for claim_id_str, claim_data in zip(claim_ids, claims):
+                try:
+                    await workflow.execute_child_workflow(
+                        VerifyClaimWorkflow.run,
+                        args=[claim_id_str, claim_data["claim_text"],
+                              claim_data.get("speaker"), transcript_date,
+                              True],  # is_child=True
+                        id=f"verify-{claim_id_str}",
+                        task_queue="spin-cycle-verify",
+                    )
+                    verified += 1
+                except Exception as e:
+                    failed += 1
+                    log.warning(workflow.logger, MODULE,
+                                "child_verify_failed",
+                                "Child verification workflow failed",
+                                claim_id=claim_id_str,
+                                error=str(e))
+
+            log.info(workflow.logger, MODULE, "verification_done",
+                     "All child verifications complete",
+                     verified=verified, failed=failed)
+
+            # Mark transcript complete and start next queued transcript
             await workflow.execute_activity(
-                start_next_queued_claim,
+                update_transcript_status,
+                args=[self._transcript_id, "complete"],
+                start_to_close_timeout=timedelta(seconds=15),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+
+            await workflow.execute_activity(
+                finish_transcript_and_start_next,
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
-
-            log.info(workflow.logger, MODULE, "verification_started",
-                     "Verification pipeline started",
-                     submitted=self._verification_submitted)
 
         elif self._transcript_id and not claims and all_claims_for_storage:
             # Skipped claims exist but none worth checking — store them, then mark complete

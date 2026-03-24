@@ -166,6 +166,7 @@ services:
     restart: unless-stopped
     networks:
       - spin-cycle-dev
+      - luv-dev
 
   # ADMINER - lightweight Postgres web UI
   adminer:

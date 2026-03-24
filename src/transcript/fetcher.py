@@ -234,15 +234,49 @@ async def fetch_transcript(url: str) -> Transcript:
     title_tag = soup.find("h1")
     title = title_tag.get_text(strip=True) if title_tag else ""
 
-    # Extract date from meta or time-ago elements
+    # Extract date — try multiple sources in priority order
     date = None
+    # 1. Rev.com time-ago element
     time_tag = soup.find("span", class_="time-ago")
     if time_tag and time_tag.get("data-original-date"):
         date = time_tag["data-original-date"]
+    # 2. OpenGraph / article meta tag
     if not date:
         meta_date = soup.find("meta", {"property": "article:published_time"})
         if meta_date:
             date = meta_date.get("content", "")
+    # 3. JSON-LD structured data (schema.org datePublished)
+    if not date:
+        import json as _json
+
+        def _find_date_published(obj):
+            """Recursively search JSON-LD for datePublished."""
+            if isinstance(obj, dict):
+                if "datePublished" in obj:
+                    return obj["datePublished"]
+                for v in obj.values():
+                    found = _find_date_published(v)
+                    if found:
+                        return found
+            elif isinstance(obj, list):
+                for item in obj:
+                    found = _find_date_published(item)
+                    if found:
+                        return found
+            return None
+
+        for script_tag in soup.find_all("script", type="application/ld+json"):
+            try:
+                ld = _json.loads(script_tag.string or "")
+                found = _find_date_published(ld)
+                if found:
+                    date = found
+                    break
+            except (ValueError, TypeError):
+                pass
+    # Normalize to date-only (strip time portion if present)
+    if date and "T" in date:
+        date = date.split("T")[0]
 
     # Extract transcript content — pick the largest rich-text div
     content_div = _find_transcript_div(soup)

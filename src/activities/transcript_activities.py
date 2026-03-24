@@ -352,12 +352,13 @@ async def create_claims_for_transcript(
     transcript_id: str,
     transcript_claim_ids: list[str],
     claims: list[dict],
+    transcript_date: str | None = None,
 ) -> list[str]:
     """Batch-create Claim records and link them to TranscriptClaims via FK.
 
     Single transaction: creates all Claim records with status="queued",
-    sets speaker/source_url, and writes claim_id back to each TranscriptClaim.
-    Returns list of claim_id strings (insertion order).
+    sets speaker/source_url/claim_date, and writes claim_id back to each
+    TranscriptClaim. Returns list of claim_id strings (insertion order).
     """
     from sqlalchemy import select
     from src.db.session import async_session
@@ -376,6 +377,7 @@ async def create_claims_for_transcript(
                     text=claim_data["claim_text"],
                     speaker=claim_data.get("speaker"),
                     source_url=claim_data.get("source_url"),
+                    claim_date=transcript_date,
                     status="queued",
                 )
                 session.add(claim)

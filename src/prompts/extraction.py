@@ -7,6 +7,7 @@ result with an assertion_count forcing field.
 Key forcing fields:
 - `assertion_count`: Forces the model to scan each segment before listing claims.
 - `argument_summary`: Forces the model to articulate what argument the fact serves.
+- `context_insertions`: Forces the model to explicitly list every bracket it inserted.
 - `worth_checking`: Final gate, enforced programmatically from checkable + consequence.
 """
 
@@ -90,11 +91,35 @@ State WHY in consequence_rationale (1 sentence).
 True when checkable AND consequence_if_wrong=high.  Provide skip_reason
 when false.
 
-## Step 4 — Contextual Bracketing
+## Step 4 — Contextual Bracketing (REQUIRED for worth_checking claims)
 
-For worth_checking claims, resolve pronouns and ambiguous references
-using square brackets.  Keep original words intact outside brackets.
-Only add context unambiguously clear from the transcript.
+Resolve pronouns and ambiguous references using square brackets so the
+claim is self-contained WITHOUT the transcript.  Keep original words
+intact outside brackets.  Only add context unambiguously clear from
+the transcript.
+
+WHEN to bracket:
+- Pronouns referring to specific entities: "he", "she", "they", "their",
+  "it", "this", "these", "we", "our", "I"
+- Ambiguous noun phrases: "the company", "the bill", "that country"
+
+WHEN NOT to bracket:
+- Terms already named in the original quote (don't re-bracket what's
+  already explicit)
+- Temporal references ("yesterday", "36 hours ago") — these are temporal,
+  not referential
+- If the referent is genuinely ambiguous, leave the pronoun — do NOT guess
+
+Examples (original_quote → claim_text):
+- "He signed the bill yesterday" → "[Governor X] signed [HB 1234] yesterday"
+- "Their exports dropped 40%" → "[Country Y's] exports dropped 40%"
+- "I ordered the operation" → "[Speaker Name] ordered the operation"
+- "The policy is working" → "The policy is working" (no bracket — "the
+  policy" is clear from segment context)
+
+→ Output per claim: context_insertions (list of strings — each bracket
+  you inserted, e.g. ["[Governor X]", "[HB 1234]"]).  Empty list if
+  no insertions needed.
 
 ## Step 5 — Restatements
 
@@ -135,8 +160,8 @@ Return your analysis as JSON matching this schema:
       "assertion_count": 5,
       "claims": [
         {{
-          "claim_text": "The contextualized claim with [brackets] resolving references",
-          "original_quote": "The speaker's exact words without modification",
+          "claim_text": "[Speaker Name] signed [HB 1234] into law, affecting [state's] education budget",
+          "original_quote": "I signed the bill into law, affecting our education budget",
           "speaker": "Speaker Name",
           "timestamp": "MM:SS",
           "claim_type": "quantitative|historical|causal|comparative|attribution|other",
@@ -146,6 +171,7 @@ Return your analysis as JSON matching this schema:
           "checkability_rationale": "Why checkable or not (1 sentence)",
           "consequence_if_wrong": "high",
           "consequence_rationale": "Why high/low/none consequence (1 sentence)",
+          "context_insertions": ["[Speaker Name]", "[HB 1234]", "[state's]"],
           "worth_checking": true,
           "skip_reason": null
         }}

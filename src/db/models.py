@@ -20,6 +20,7 @@ class Claim(Base):
     source_url = Column(String(2048), nullable=True)
     source_name = Column(String(256), nullable=True)
     speaker = Column(String(256), nullable=True)
+    claim_date = Column(String(64), nullable=True)  # when the claim was made (from transcript, article, etc.)
     status = Column(
         Enum("queued", "pending", "processing", "verified", "flagged", name="claim_status"),
         default="pending",

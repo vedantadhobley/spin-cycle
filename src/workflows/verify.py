@@ -126,7 +126,9 @@ class VerifyClaimWorkflow:
 
     @workflow.run
     async def run(self, claim_id: str | None, claim_text: str,
-                  speaker: str | None = None) -> dict:
+                  speaker: str | None = None,
+                  claim_date: str | None = None,
+                  is_child: bool = False) -> dict:
         """Run the verification pipeline.
 
         Args:
@@ -135,6 +137,10 @@ class VerifyClaimWorkflow:
             claim_text: The claim to verify.
             speaker: Optional name of the person making the claim.
                      Automatically added as an interested party.
+            claim_date: When the claim was made (e.g. transcript date).
+                       Used to anchor temporal references like "36 hours ago".
+            is_child: True when started as a child of ExtractTranscriptWorkflow.
+                      Skips queue chaining (parent orchestrates sequentially).
         """
         self._claim_text = claim_text
 
@@ -158,7 +164,7 @@ class VerifyClaimWorkflow:
 
         decomposition = await workflow.execute_activity(
             decompose_claim,
-            args=[claim_text, speaker],
+            args=[claim_text, speaker, claim_date],
             start_to_close_timeout=timedelta(seconds=180),
             retry_policy=RetryPolicy(maximum_attempts=3),
         )
@@ -218,7 +224,8 @@ class VerifyClaimWorkflow:
             result = await workflow.execute_activity(
                 research_subclaim,
                 args=[fact_text, interested_parties,
-                      fact_categories, fact_seed_queries, speaker],
+                      fact_categories, fact_seed_queries, speaker,
+                      claim_date],
                 start_to_close_timeout=timedelta(seconds=420),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
@@ -300,7 +307,8 @@ class VerifyClaimWorkflow:
             """Judge a single fact given its evidence."""
             result = await workflow.execute_activity(
                 judge_subclaim,
-                args=[claim_text, fact_text, evidence, merged_p, speaker],
+                args=[claim_text, fact_text, evidence, merged_p, speaker,
+                      claim_date],
                 start_to_close_timeout=timedelta(seconds=300),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
@@ -367,7 +375,7 @@ class VerifyClaimWorkflow:
         else:
             result = await workflow.execute_activity(
                 synthesize_verdict,
-                args=[claim_text, sub_results, thesis_info],
+                args=[claim_text, sub_results, thesis_info, claim_date],
                 start_to_close_timeout=timedelta(seconds=300),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
@@ -392,20 +400,21 @@ class VerifyClaimWorkflow:
             retry_policy=RetryPolicy(maximum_attempts=3),
         )
 
-        # Step 6: Start next queued claim (if any)
-        next_claim = await workflow.execute_activity(
-            start_next_queued_claim,
-            start_to_close_timeout=timedelta(seconds=30),
-            retry_policy=RetryPolicy(maximum_attempts=2),
-        )
-
-        # No more queued claims — check if transcript is done, start next queued transcript
-        if next_claim is None:
-            await workflow.execute_activity(
-                finish_transcript_and_start_next,
+        # Step 6: Queue chaining (only for standalone workflows, not children)
+        if not is_child:
+            next_claim = await workflow.execute_activity(
+                start_next_queued_claim,
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
+
+            # No more queued claims — check if transcript is done
+            if next_claim is None:
+                await workflow.execute_activity(
+                    finish_transcript_and_start_next,
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
+                )
 
         self._set_phase("complete")
         workflow.upsert_search_attributes([

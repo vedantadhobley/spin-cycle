@@ -9,7 +9,7 @@ import re
 from datetime import date
 
 from src.llm import invoke_llm, LLMInvocationError, validate_synthesize
-from src.prompts.verification import SYNTHESIZE_SYSTEM, SYNTHESIZE_USER
+from src.prompts.verification import SYNTHESIZE_SYSTEM, SYNTHESIZE_USER, build_claim_date_line
 from src.schemas.llm_outputs import SynthesizeOutput
 from src.utils.logging import log, get_logger
 
@@ -21,6 +21,7 @@ async def synthesize(
     claim_text: str,
     child_results: list[dict],
     thesis_info: dict | None = None,
+    claim_date: str | None = None,
 ) -> dict:
     """Combine child verdicts into a final overall verdict.
 
@@ -86,6 +87,7 @@ async def synthesize(
         output = await invoke_llm(
             system_prompt=SYNTHESIZE_SYSTEM.format(
                 current_date=date.today().isoformat(),
+                claim_date_line=build_claim_date_line(claim_date),
                 synthesis_context=synthesis_context,
             ),
             user_prompt=SYNTHESIZE_USER.format(

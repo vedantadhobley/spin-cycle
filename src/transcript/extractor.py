@@ -72,6 +72,7 @@ class ExtractedClaim(BaseModel):
     checkability_rationale: str = Field(default="", description="Why checkable or not (1 sentence)")
     consequence_if_wrong: Consequence = Field(..., description="If wrong, does it matter?")
     consequence_rationale: str = Field(default="", description="Why high/low/none consequence (1 sentence)")
+    context_insertions: list[str] = Field(default_factory=list, description="Brackets inserted in claim_text, e.g. ['[Iran\\'s]', '[President Trump]']")
     worth_checking: bool = Field(..., description="Final call: checkable AND consequence=high")
     skip_reason: Optional[SkipReason] = Field(None, description="Why not worth checking")
 

@@ -140,6 +140,7 @@ async def submit_claim(
         source_url=body.source,
         source_name=body.source_name,
         speaker=body.speaker,
+        claim_date=body.claim_date,
         status=initial_status,
     )
     session.add(claim)
@@ -155,7 +156,7 @@ async def submit_claim(
     else:
         await temporal.start_workflow(
             VerifyClaimWorkflow.run,
-            args=[claim_id, body.text, body.speaker],
+            args=[claim_id, body.text, body.speaker, body.claim_date],
             id=f"verify-{claim_id}",
             task_queue=TASK_QUEUE,
         )
@@ -198,6 +199,7 @@ async def submit_claims_batch(
             source_url=item.source,
             source_name=item.source_name,
             speaker=item.speaker,
+            claim_date=item.claim_date,
             status=initial_status,
         )
         session.add(claim)
@@ -209,7 +211,7 @@ async def submit_claims_batch(
         if initial_status == "pending":
             await temporal.start_workflow(
                 VerifyClaimWorkflow.run,
-                args=[claim_id, item.text, item.speaker],
+                args=[claim_id, item.text, item.speaker, item.claim_date],
                 id=f"verify-{claim_id}",
                 task_queue=TASK_QUEUE,
             )

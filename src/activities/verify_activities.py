@@ -67,16 +67,19 @@ async def create_claim(
 
 
 @activity.defn
-async def decompose_claim(claim_text: str, speaker: str | None = None) -> dict:
+async def decompose_claim(claim_text: str, speaker: str | None = None,
+                          claim_date: str | None = None) -> dict:
     """Normalize and extract atomic verifiable facts and thesis from a claim.
 
     Delegates to src/agent/decompose.decompose() for all domain logic.
     If speaker is provided, they're automatically added as an interested party.
     """
     log.info(activity.logger, "decompose", "start", "Decomposing claim",
-             claim_length=len(claim_text), speaker=speaker)
+             claim_length=len(claim_text), speaker=speaker,
+             claim_date=claim_date)
     from src.agent.decompose import decompose
-    result = await decompose(claim_text, speaker=speaker)
+    result = await decompose(claim_text, speaker=speaker,
+                             claim_date=claim_date)
     log.info(activity.logger, "decompose", "done", "Decompose complete",
              fact_count=len(result.get("facts", [])),
              thesis=result.get("thesis_info", {}).get("thesis", "")[:80])
@@ -90,6 +93,7 @@ async def research_subclaim(
     categories: list[str] | None = None,
     seed_queries: list[str] | None = None,
     speaker: str | None = None,
+    claim_date: str | None = None,
 ) -> dict:
     """Research evidence for a sub-claim using the LangGraph ReAct agent.
 
@@ -110,6 +114,7 @@ async def research_subclaim(
         categories=categories,
         seed_queries=seed_queries,
         speaker=speaker,
+        claim_date=claim_date,
     )
 
     log.info(activity.logger, "research", "done", "Research complete",
@@ -124,6 +129,7 @@ async def judge_subclaim(
     evidence: list[dict],
     interested_parties: dict | list | None = None,
     speaker: str | None = None,
+    claim_date: str | None = None,
 ) -> dict:
     """Judge a sub-claim based on collected evidence.
 
@@ -141,7 +147,7 @@ async def judge_subclaim(
         interested_parties = normalize_interested_parties(interested_parties)
 
     result = await judge(claim_text, sub_claim, evidence, interested_parties,
-                         speaker=speaker)
+                         speaker=speaker, claim_date=claim_date)
     log.info(activity.logger, "judge", "done", "Judge complete",
              sub_claim=sub_claim[:80],
              verdict=result.get("verdict"), confidence=result.get("confidence"))
@@ -153,6 +159,7 @@ async def synthesize_verdict(
     claim_text: str,
     child_results: list[dict],
     thesis_info: dict | None = None,
+    claim_date: str | None = None,
 ) -> dict:
     """Combine child verdicts into a final overall verdict.
 
@@ -162,7 +169,8 @@ async def synthesize_verdict(
              child_count=len(child_results),
              has_thesis=bool(thesis_info and thesis_info.get("thesis")))
     from src.agent.synthesize import synthesize
-    result = await synthesize(claim_text, child_results, thesis_info)
+    result = await synthesize(claim_text, child_results, thesis_info,
+                              claim_date=claim_date)
     log.info(activity.logger, "synthesize", "done", "Synthesis complete",
              verdict=result.get("verdict"), confidence=result.get("confidence"))
     return result
@@ -356,6 +364,7 @@ async def start_next_queued_claim() -> str | None:
         claim_id = str(claim.id)
         claim_text = claim.text
         claim_speaker = claim.speaker
+        claim_date = claim.claim_date
 
         # Update status to pending before starting workflow
         claim.status = "pending"
@@ -373,7 +382,7 @@ async def start_next_queued_claim() -> str | None:
     temporal = await TemporalClient.connect(TEMPORAL_HOST)
     await temporal.start_workflow(
         VerifyClaimWorkflow.run,
-        args=[claim_id, claim_text, claim_speaker],
+        args=[claim_id, claim_text, claim_speaker, claim_date],
         id=f"verify-{claim_id}",
         task_queue=TASK_QUEUE,
     )

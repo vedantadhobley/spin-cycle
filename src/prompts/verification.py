@@ -336,13 +336,30 @@ counter-evidence to look for.
 """
 
 
+def build_claim_date_line(claim_date: str | None) -> str:
+    """Build the temporal context line for prompts.
+
+    When a claim has a known date (e.g. from a transcript), this line tells
+    the LLM to interpret temporal references relative to that date rather
+    than today. Returns empty string when no date is available.
+    """
+    if not claim_date:
+        return ""
+    return (
+        f"This claim was made on {claim_date}. Interpret ALL temporal "
+        f"references in the claim (\"yesterday\", \"last week\", \"36 hours "
+        f"ago\", \"recently\", \"just\", \"within the past X\") relative to "
+        f"{claim_date}, NOT today's date."
+    )
+
+
 # =============================================================================
 # STEP 0: NORMALIZE — neutralize loaded language, separate opinions from facts
 # =============================================================================
 
 NORMALIZE_SYSTEM = """\
 Today's date: {current_date}
-
+{claim_date_line}
 You are a linguistic preprocessor for a fact-checking pipeline. Your job is to \
 rewrite claims in neutral, researchable language WITHOUT changing their meaning.
 
@@ -471,7 +488,7 @@ Return ONLY the JSON object.\
 
 DECOMPOSE_SYSTEM = """\
 Today's date: {current_date}
-
+{claim_date_line}
 You are a fact-checker's assistant. Your job is to extract verifiable \
 atomic facts from a claim.
 
@@ -997,7 +1014,7 @@ Each fact is an object: {{"text": "...", "categories": ["CATEGORY1", ...], "seed
 
 RESEARCH_SYSTEM = """\
 Today's date: {current_date}
-
+{claim_date_line}
 You are a research assistant tasked with gathering evidence about a specific \
 factual claim. You have access to search tools and a page reader.
 
@@ -1208,7 +1225,7 @@ search for the specific event, action, number, or object mentioned.\
 
 JUDGE_SYSTEM = """\
 Today's date: {current_date}
-
+{claim_date_line}
 You are an impartial fact-checker. You will be given a sub-claim (extracted \
 from a larger claim) and evidence gathered from real sources. Your job is to \
 evaluate the evidence using a structured rubric and render a verdict.
@@ -1494,7 +1511,7 @@ Complete all 5 rubric steps and return the JSON object with all fields.\
 
 SYNTHESIZE_SYSTEM = """\
 Today's date: {current_date}
-
+{claim_date_line}
 You are an impartial fact-checker delivering a verdict to the PUBLIC. \
 You independently broke the claim into checkable facts, researched each \
 against real-world evidence, and judged them. Now combine those findings \
