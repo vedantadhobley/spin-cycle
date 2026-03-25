@@ -70,6 +70,7 @@ async def invoke_llm(
     temperature: float = 0.1,
     temperature_on_retry: float = 0.3,
     max_tokens: int = 8192,
+    thinking: bool = False,
     semantic_validator: Optional[Callable[[T], tuple[bool, str]]] = None,
     activity_name: str = "invoke",
 ) -> T:
@@ -108,7 +109,10 @@ async def invoke_llm(
         
         try:
             # Step 1: INVOKE
-            llm = get_llm(temperature=current_temp, max_tokens=max_tokens)
+            llm = get_llm(
+                temperature=current_temp, max_tokens=max_tokens,
+                thinking=thinking,
+            )
             _t0 = time.monotonic()
             
             response = await llm.ainvoke([
