@@ -217,26 +217,35 @@ def validate_synthesize(output: SynthesizeOutput) -> tuple[bool, str]:
 def validate_extraction(output) -> tuple[bool, str]:
     """Validate extraction output semantically.
 
-    Checks:
-    1. At least one segment exists
-    2. Claims have non-empty claim_text (≥10 chars) and original_quote (≥5 chars)
-
-    Intentionally minimal — rationale fields are forcing fields, not gates.
+    Drops malformed claims in-place rather than failing the entire batch.
+    A 10-minute LLM call shouldn't be retried because one claim has an
+    empty quote.
     """
     if not output.segments:
         return False, "Extraction produced no segments"
 
+    dropped = 0
     for seg in output.segments:
-        for i, claim in enumerate(seg.claims):
+        good_claims = []
+        for claim in seg.claims:
             if not claim.claim_text or len(claim.claim_text.strip()) < 10:
-                return False, (
-                    f"Segment {seg.speaker} ({seg.segment_gist}), "
-                    f"claim {i+1}: claim_text is empty or too short (<10 chars)"
-                )
+                dropped += 1
+                log.warning(logger, MODULE, "extraction_claim_dropped",
+                            f"Dropped claim with short/empty claim_text",
+                            speaker=seg.speaker, gist=seg.segment_gist)
+                continue
             if not claim.original_quote or len(claim.original_quote.strip()) < 5:
-                return False, (
-                    f"Segment {seg.speaker} ({seg.segment_gist}), "
-                    f"claim {i+1}: original_quote is empty or too short (<5 chars)"
-                )
+                dropped += 1
+                log.warning(logger, MODULE, "extraction_claim_dropped",
+                            f"Dropped claim with short/empty original_quote",
+                            speaker=seg.speaker, claim_text=claim.claim_text[:80])
+                continue
+            good_claims.append(claim)
+        seg.claims = good_claims
+
+    if dropped:
+        log.info(logger, MODULE, "extraction_claims_filtered",
+                 f"Filtered {dropped} malformed claims from extraction output",
+                 dropped=dropped)
 
     return True, ""
