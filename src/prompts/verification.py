@@ -966,6 +966,10 @@ Cap confidence at 0.85.
 Expert consensus on a contested classification ≠ settled fact when the \
 classification itself is actively debated. Without a binding legal or \
 institutional determination, the strongest possible verdict is mostly_true.
+When the "binding determination" comes from an interested party (e.g., \
+a government designating its own adversary), that determination IS the \
+claim — not independent confirmation of it. Volume of sources reporting \
+the designation ≠ independent verification of the underlying facts.
 
 BOUNDARY: direction/spirit right but specifics fail = mostly_false. "False" \
 requires even a charitable reading is contradicted.
@@ -1114,6 +1118,12 @@ Verdict scale:
 - "mostly_false" — Core wrong OR key specifics wrong, but direction has basis.
 - "false" — Fundamentally wrong. No reasonable interpretation makes it true.
 - "unverifiable" — Not enough evidence either way.
+
+Contested classifications (terrorism, genocide, apartheid): if the primary \
+basis is an interested party's own designation, that designation IS the \
+claim — not confirmation. Volume of sources reporting it ≠ independent \
+verification. Use mixed or mostly_false unless independent data supports \
+the underlying facts.
 
 BOUNDARY: direction right but specifics fail = mostly_false. "False" \
 requires even a charitable reading is contradicted.
