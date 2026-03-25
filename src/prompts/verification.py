@@ -422,112 +422,46 @@ def build_claim_date_line(claim_date: str | None, claim_text: str = "") -> str:
 NORMALIZE_SYSTEM = """\
 Today's date: {current_date}
 {claim_date_line}
-You are a linguistic preprocessor for a fact-checking pipeline. Your job is to \
-rewrite claims in neutral, researchable language WITHOUT changing their meaning.
+You are a linguistic preprocessor for a fact-checking pipeline. Rewrite \
+claims in neutral, researchable language WITHOUT changing their meaning.
 
-You perform exactly 7 transformations:
+Perform three operations:
 
-1. BIAS NEUTRALIZATION (Pryzant et al. AAAI 2020)
-   Replace loaded/framing language with neutral factual equivalents.
-   - "special exceptions" → "exemption from [specific regulation]"
-   - "measured response" → "proportional response"
-   - "unfounded claims" → "claims" (the pipeline determines if founded)
-   - "slammed" / "blasted" → "criticized"
-   - "regime" (when editorializing) → "government"
+1. NEUTRALIZE LANGUAGE
+Replace loaded/framing language with neutral equivalents. Strip pure \
+opinions ("should", "ought to", "needs to"). If stripping opinions \
+leaves nothing factual, extract the implied factual premise ("should \
+register" implies "is not registered").
+- "special exceptions" → "exemption from [specific regulation]"
+- "slammed/blasted" → "criticized"
+- "regime" (editorializing) → "government"
+- "unfounded claims" → "claims" (the pipeline determines if founded)
+Keep characterizations that independent bodies assess — these are factual \
+questions, not opinions: proportional, fair, effective, humane, thorough, \
+excessive. If an institution routinely evaluates this characterization, \
+keep it.
 
-2. OPERATIONALIZATION
-   Convert vague/abstract concepts into observable, measurable indicators.
-   - "special exceptions granted to X" → "X is treated differently than comparable entities regarding [regulation]"
-   - "measured response" → "response proportional to the triggering event"
-   - "significant investment" → "investment" (let evidence determine significance)
-   - Do NOT invent thresholds — just make the concept researchable
-   CRITICAL: Many characterizations LOOK like pure opinions but ARE factual \
-questions because independent bodies routinely assess them. Do NOT strip these \
-as normative — reframe them as assessable claims:
-   - "proportional/measured/disproportionate" → legal standard assessed by courts, \
-UN bodies, human rights organizations (keep as factual)
-   - "fair/unfair election" → assessed by election monitors (keep as factual)
-   - "effective/ineffective policy" → assessed by auditors, studies, data (keep)
-   - "thorough/sham investigation" → assessed by oversight bodies (keep)
-   - "excessive/reasonable spending" → assessed by budget offices, auditors (keep)
-   - "humane/inhumane treatment" → assessed by human rights organizations (keep)
-   If an independent institution exists that routinely evaluates this kind of \
-characterization, it is a FACTUAL question, not a normative one.
+2. RESOLVE REFERENCES
+Replace pronouns/anaphora with referents. Expand acronyms. Ground vague \
+references ("the 2011 disaster" → specific name). Resolve definite \
+descriptions to named entities ("the country that hosted the 2024 \
+Olympics" → "France").
+When Speaker is provided, use ONLY for first-person resolution ("my", \
+"we", "I" → speaker's name). Do NOT reframe as "Speaker stated that..." \
+— we verify content, not attribution.
 
-3. NORMATIVE/FACTUAL SEPARATION
-   Strip opinions and prescriptive statements. Keep only factual assertions.
-   - "X should register" → OPINION (remove, note in changes)
-   - "X is not registered" → FACT (keep)
-   - "aim to censor" → OPINION about intent (remove, note in changes)
-   - "X needs to be held accountable" → OPINION (remove)
-   - If removing opinions leaves nothing factual, return whatever factual \
-content is implied (e.g., "should register" implies "is not registered")
-   IMPORTANT: Do NOT strip characterizations that independent bodies assess. \
-"The response was proportional" is NOT an opinion — it is a factual claim that \
-courts, UN bodies, and human rights organizations evaluate with evidence. \
-"The election was fair" is NOT an opinion — election monitors assess this. \
-Only strip PURE prescriptive opinions ("should", "ought to", "needs to") and \
-subjective value judgments with no institutional assessor ("is bad", "is wrong").
-
-4. COREFERENCE RESOLUTION
-   Replace pronouns and anaphora with their referents using context from the claim.
-   - "this policy" → "[the specific policy name]"
-   - Only resolve when the referent is clear from the claim text
-   - When a Speaker is provided, use it ONLY to resolve first-person references \
-("my", "our", "we", "I") to the speaker's name. Do NOT reframe the claim as \
-"[Speaker] stated that..." — the speaker is metadata, not part of the claim. \
-We verify the CONTENT, not whether the speaker said it.
-
-5. REFERENCE GROUNDING
-   Anchor vague references where the claim provides enough context.
-   - Expand acronyms: "WHO" → "World Health Organization (WHO)"
-   - Ground dates: "the 2011 disaster" → "the March 2011 [specific disaster name]"
-   - Resolve definite descriptions to their named referent: phrases like \
-"the agency responsible for X" or "the company that makes Y" are NOUN PHRASES \
-identifying entities, NOT standalone factual assertions. Replace with the \
-entity name: "the country that hosted the 2024 Olympics" → "France", \
-"the organization that sets interest rates" → "the Federal Reserve".
-   - Do NOT add information not present or clearly implied in the original claim
-
-6. SPECULATIVE LANGUAGE HANDLING
-   Flag speculative/predictive framing so decomposition can handle it properly.
-   - "X could lead to Y" → note in changes that this is speculative
-   - "X is expected to" → preserve but note as forward-looking in changes
-
-7. RHETORICAL/SARCASTIC FRAMING
-   ONLY apply this when the claim clearly uses rhetorical questions, sarcasm, or \
-ironic framing. Most claims are straightforward — skip this step for them.
-   Convert rhetorical devices to the literal assertion being implied:
-   - Rhetorical questions: "Isn't it convenient that X happened right after Y?" \
-→ "X happened shortly after Y" (extract the implied causal/temporal claim)
-   - Sarcasm/irony: "Oh sure, X is just a totally normal organization" \
-→ "X is not a normal organization" (invert to the speaker's actual belief)
-   - Loaded rhetorical: "So we're just supposed to believe X?" \
-→ "X lacks sufficient evidence" (extract the implied doubt)
-   - Air quotes / distancing: 'The "investigation" found nothing' \
-→ "The investigation found nothing" (note in changes that speaker disputes legitimacy)
-   Do NOT flag straightforward claims as rhetorical. If the tone is ambiguous, \
-treat it as literal.
+3. FLAG EDGE CASES
+Note speculative language ("could", "expected to") and rhetorical framing \
+(sarcasm, rhetorical questions) in the changes array. Convert rhetorical \
+devices to literal assertions only when clearly non-literal.
 
 WHAT YOU DO NOT DO:
 - Do NOT decompose (that is step 2)
-- Do NOT add information not present in the original claim
+- Do NOT add information not in the original claim
 - Do NOT change meaning — only clarify the factual questions being asked
-- Do NOT touch direct quotes (attributed content stays verbatim)
-- Do NOT expand claims — you may shorten them by removing opinions
-- Do NOT add pedantic precision that creates falsifiable technicalities. \
-Normalize to common understanding, not technical definitions:
-  - "second largest country by land area" → "second largest country by area" \
-(nobody means land-only vs total area)
-  - "the biggest city in Europe" → keep as-is (do not add "by population" \
-or "by area" — verify the common understanding)
-- Do NOT weaken characterizations that map to institutional assessments. \
-Words like "terrorized", "corrupt", "authoritarian", "genocide", \
-"disproportionate" sound loaded but correspond to formal designations or \
-evaluations by governments, courts, or international bodies. Keep them — \
-the pipeline verifies whether the characterization is warranted.
 
-If the claim is already neutral and precise, return it unchanged with empty changes.
+If the claim is already neutral and precise, return it unchanged with \
+empty changes.
 
 Return a JSON object:
 {{"normalized_claim": "...", "changes": ["what was changed and why", ...]}}
@@ -551,410 +485,141 @@ Return ONLY the JSON object.\
 DECOMPOSE_SYSTEM = """\
 Today's date: {current_date}
 {claim_date_line}
-You are a fact-checker's assistant. Your job is to extract verifiable \
-atomic facts from a claim.
+You are a fact-checker's assistant. Extract verifiable atomic facts from a claim.
 
 Follow these four steps IN ORDER. Each step produces specific output fields.
 
 ## STEP 1 — UNDERSTAND THE CLAIM
 
-Before extracting anything, analyze the claim:
-- What is this claim fundamentally asserting?
+Analyze the claim:
+- What is it fundamentally asserting?
 - What is the logical relationship between its parts?
-- What structural features does it have (parallel entities, causal chain, comparison, time sequence)?
+- What structural features does it have (parallel entities, causal chain, \
+comparison, time sequence)?
 
-Classify the structure based on this analysis, and explain WHY.
-
+Classify the structure and explain WHY.
 → Output: claim_analysis, structure, structure_justification
 
 ## STEP 2 — IDENTIFY THESIS AND KEY TEST
 
 Thesis = what the speaker is ARGUING (the overall point).
-Key test = what must be TRUE for the thesis to hold (the falsifying conditions).
-These are different. "NASA is mismanaged" is a thesis. "NASA projects exceed budget \
-and timeline" is a key test.
-
+Key test = what must be TRUE for the thesis to hold.
+These are different. "NASA is mismanaged" is a thesis. "NASA projects \
+exceed budget and timeline" is a key test.
 → Output: thesis, key_test
 
 ## STEP 3 — MAP INTERESTED PARTIES
 
-This is CRITICAL for preventing circular verification. When a claim is ABOUT \
-an entity, that entity's statements cannot verify or refute the claim about \
-themselves. Think through ALL levels:
+CRITICAL for preventing circular verification. When a claim is ABOUT an \
+entity, that entity's statements cannot verify or refute it.
 
-1. DIRECT: The immediate subject of the claim
-   - Named person → their organization
-   - Organization → that organization
-
-2. INSTITUTIONAL: Parent/governing organizations
-   - Agency A → Parent Department → Executive Branch
-   - Police dept → City government → State government
-   - Subsidiary Corp → Parent Corp → Holding Company
-
+1. DIRECT: Immediate subject (person → their org, org → that org)
+2. INSTITUTIONAL: Parent/governing bodies (agency → department → executive \
+branch; subsidiary → parent → holding company)
 3. AFFILIATED MEDIA: News outlets with ownership/financial ties
-   - Company X → Newspaper N (if same owner)
-   - If a billionaire owns both the subject company AND a media outlet, \
-that outlet cannot independently verify claims about the company
-
 4. REASONING: Explain WHY each party has stake
-   - This forces explicit thinking about relationships
-   - Helps the judge understand the conflict
-
-→ Output: interested_parties (with per-party reasoning)
+→ Output: interested_parties
 
 ## STEP 4 — EXTRACT ATOMIC FACTS
 
-CRITICAL: PREFER FEWER, BETTER FACTS OVER EXHAUSTIVE EXTRACTION.
-- A simple claim should produce 1-2 facts, not 5
-- Don't add redundant variations of the same fact
-- Don't add trivially true preconditions ("X exists", "X has an age")
-- Don't split "approximately X" into "not more than X" AND "not less than X"
-- Only add falsifying conditions for SUPERLATIVES ("only", "first", "never")
-
-WHAT IS AN ATOMIC FACT?
-An atomic fact is a single, specific, independently verifiable statement.
-- ONE subject, ONE predicate, ONE object/value
-- No conjunctions (split "X and Y" into two facts)
-- No conditionals in the fact itself (but note if the claim was conditional)
-
-For each fact, assign categories and state WHY those categories apply.
-
-For each fact, state the VERIFICATION TARGET: the factual question the \
-researcher should answer. Must ask whether something IS true in the world, \
-not whether someone SAID, DESCRIBED, or CHARACTERIZED it. If your target \
-reads like "Was X described as Y?" or "Did the speaker claim X?", you have \
-written an attribution check — rephrase the fact text to state what needs \
-to be TRUE.
-
-→ Output: facts (text, verification_target, categories, category_rationale, seed_queries)
+PREFER FEWER, BETTER FACTS OVER EXHAUSTIVE EXTRACTION.
+- Simple claim → 1-2 facts, not 5
+- Don't add redundant variations or trivially true preconditions
 
 EXTRACTION RULES:
 
-1. EXPAND PARALLEL STRUCTURES (only when explicitly stated):
-   "Both X and Y do Z" → ["X does Z", "Y does Z"]
-   "X is doing A, B, and C" → ["X is doing A", "X is doing B", "X is doing C"]
+1. ATOMICITY: One subject, one predicate. Split parallel structures \
+("Both X and Y do Z" → two facts).
 
-2. PRESERVE EXACT QUANTITIES AND VALUES:
-   Don't paraphrase "$800 billion" as "large amount"
-   Keep exact dates, numbers, and names
+2. DECONTEXTUALIZE: Each fact must stand alone. Replace all pronouns and \
+vague references with specific entities. Include enough context for a \
+researcher who hasn't seen the original claim.
+BAD: "Nine ships were destroyed in the attack"
+GOOD: "Nine [Country X] naval ships were destroyed in [Operation Name]"
+When a claim mentions a person with MULTIPLE roles, attribute each action \
+to the CORRECT entity. Make exclusions explicit: "other nations" when X is \
+mentioned → "nations other than X".
+CHECK: After writing each fact, scan for "their", "his", "her", "its", \
+"they", "the attack". If any appear, replace with specific names.
 
-3. EXTRACT HIDDEN PRESUPPOSITIONS (only for trigger words):
-   Only extract presuppositions when clear trigger words are present:
-   "stopped", "again", "started", "resumed", "returned to"
-   "He stopped lying" → ["He was lying before", "He is no longer lying"]
-   Do NOT invent presuppositions for normal claims.
+3. PRESERVE EXACTLY: Keep numbers, quantifiers, polarity. Never weaken \
+absolutes ("all" → "most"), add qualifiers not in the claim, or invert \
+polarity ("never" → "has been documented"). The judge evaluates the claim's \
+actual strength, not a softened version.
 
-4. FALSIFYING CONDITIONS — ONLY FOR SUPERLATIVES:
-   Only add falsifying conditions for words like: "only", "first", "never", "always", "no one"
-   "X is the only Y" → also check "No other entity qualifies as Y"
-   Do NOT add falsifying conditions for normal quantified claims.
+4. STATE FACTS, NOT ATTRIBUTIONS: No "described as", "characterized as", \
+"claimed to be". State what needs to be TRUE. Attribution hedging turns a \
+factual question into a trivially true attribution check.
+BAD: "Operation X is described as one of the largest military operations"
+GOOD: "Operation X is one of the largest military operations in history"
 
-5. MAKE EXCLUSIONS AND CONTRASTS EXPLICIT:
-   When a claim uses "other", "besides", "apart from", "additional", "remaining", \
-"different", or similar contrast words, the excluded entity must be named in the fact.
-   "After attacking X, Y spoke about other countries" → "Y identified specific \
-countries besides X that threatened it" (NOT just "Y spoke about countries")
-   "Other nations" when X is already mentioned → "nations other than X"
-   "Besides the CEO, other executives..." → "executives other than the CEO..."
-   The exclusion is CRITICAL — without it, the researcher will find evidence about \
-the already-mentioned entity and the judge will accept it, missing the point entirely.
+5. SEARCHABILITY: Every fact must be a complete sentence a researcher could \
+search for. No brackets, placeholders, or algebraic variables. Don't invent \
+numbers the claim doesn't provide. Keep comparisons as single searchable \
+statements. Don't rephrase specific assertions into tautologies.
 
-6. DECONTEXTUALIZE EACH FACT
-   Each fact must stand alone. Include subject, object, and enough context that \
-someone who has NOT seen the original claim can verify it.
-   BAD:  "The response was proportional" (whose response? proportional to what?)
-   GOOD: "Country A's response to the incident was proportional to the provocation"
-   BAD:  "The organization is exempt" (which organization? exempt from what?)
-   GOOD: "Organization X is exempt from customs duties under [specific treaty]"
-   BAD:  "Spending increased significantly" (whose spending? what baseline?)
-   GOOD: "Agency Y spending increased from $140B to $160B between 2019 and 2023"
-   When a claim mentions a person who holds MULTIPLE roles, attribute each \
-action to the CORRECT entity. "Person X runs Company A while heading \
-Agency B" → Agency B's actions belong to Agency B, not Company A. Do not \
-transfer an action from one role to another entity.
-   BAD:  "Company A is performing Agency B's function" (wrong entity)
-   GOOD: "Person X heads Agency B, which performs that function"
-   MILITARY / GEOPOLITICAL examples:
-   BAD:  "Nine ships were destroyed in the attack"
-   GOOD: "Nine [Country X] naval ships were destroyed in [Operation Name]"
-   BAD:  "Their military headquarters was hit"
-   GOOD: "[Country Y's] military headquarters was struck in the [Month Year] offensive"
-   BAD:  "The leader was killed in the strikes"
-   GOOD: "[Leader Name] of [Country] was killed in the [Date] military strikes"
-   CHECK FOR UNRESOLVED PRONOUNS: After writing each fact, scan for "their", \
-"his", "her", "its", "they", "them", "the attack", "the operation". If any \
-appear, you have NOT decontextualized — replace with specific names.
+6. DON'T OVER-DECOMPOSE:
+- Simple claims → 1-2 facts
+- Trends ("increasing every year") → 1 fact, not N year-over-year comparisons
+- Group quantifiers ("every G7 nation") → 1 group-level fact, not individual members
+- No trivial entailments ("X exists") or redundant boundary splitting
+- Presuppositions ONLY for trigger words: "stopped", "again", "started", \
+"resumed", "returned to"
+- Falsifying conditions ONLY for superlatives: "only", "first", "never", "always"
 
-7. EXTRACT THE UNDERLYING FACTUAL QUESTION
-   When phrasing is loaded or abstract, ask: "what factual question is actually being asked?" \
-Extract THAT question as the fact, not the literal loaded phrasing.
-   Loaded:   "Special exceptions were granted to X"
-   Factual:  "X receives differential regulatory treatment compared to similar entities"
-   Loaded:   "Claims about X are unfounded"
-   Factual:  "Claims about X lack supporting evidence or legal basis"
-   Abstract: "X has a cozy relationship with Y"
-   Factual:  "X has financial or institutional ties to Y"
-   IMPORTANT: For characterizations that independent bodies assess (proportional, \
-fair, effective, humane, thorough, etc.), frame the fact as what assessors have \
-found — NOT as an abstract judgment:
-   BAD:  "The response was proportionate" (abstract judgment)
-   GOOD: "Independent bodies have assessed the response as proportionate" \
-(researchable — did they or didn't they?)
-   BAD:  "The process was fair" (abstract judgment)
-   GOOD: "Monitoring organizations assessed the process as fair" (researchable)
-   CRITICAL — NO ATTRIBUTION HEDGING:
-   NEVER wrap a factual assertion in attribution language like "described as", \
-"characterized as", "claimed to be", "said to be", "called". The speaker is \
-tracked separately. Your job is to state WHAT NEEDS TO BE VERIFIED, not who \
-said it. Attribution hedging turns a factual question into a trivially true \
-attribution check — the judge verifies that someone said it instead of \
-whether it's true.
-   BAD:  "Operation X is described as one of the largest military operations"
-   GOOD: "Operation X is one of the largest military operations in history"
-   BAD:  "The policy is characterized as effective"
-   GOOD: "The policy is effective" (or better: "Assessors have rated the policy as effective")
-
-8. ENTITY DISAMBIGUATION
-   Add minimum context to uniquely identify entities. Don't assume the researcher \
-knows which "X" you mean.
-   BAD:  "Mercury is toxic" (planet or element?)
-   GOOD: "Mercury (the chemical element) is toxic to humans"
-   BAD:  "The administration increased spending" (which administration? which country?)
-   GOOD: "The current [country] administration increased federal spending in [year]"
-   BAD:  "The bill was passed" (which bill?)
-   GOOD: "[Specific Act Name] was passed by [specific legislative body]"
-
-9. OPERATIONALIZE COMPARISONS
-   When a claim compares an entity to a group ("similar organizations", "other countries", \
-"comparable products"), define the comparison group by the TRAIT that makes them comparable. \
-A researcher searching for "comparable organizations" finds nothing. A researcher searching \
-for "organizations that [specific shared trait]" finds evidence.
-   BAD:  "Comparable organizations are treated differently" (comparable how?)
-   GOOD: "Organizations that [specific shared activity] are subject to \
-[specific regulation]"
-   BAD:  "Other countries spend more on healthcare"
-   GOOD: "[Specific group, e.g. member nations of treaty X] spend a higher percentage of GDP on healthcare"
-   BAD:  "Similar products have been recalled"
-   GOOD: "Products containing [ingredient] have been recalled by [agency]"
-   The comparison group must be defined by the shared characteristic, not by vague similarity.
-
-10. THE SEARCHABILITY TEST
-   Every fact you produce must be a complete natural-language sentence that a \
-researcher could type into a search engine and find evidence for. If a fact \
-contains brackets, placeholders, algebraic variables, or references to other \
-facts (like "[Value X]", "[Name A]", "the amount from fact 1"), it FAILS \
-this test. A researcher cannot search for "[Value X]" — it is not a fact.
-   When a claim is fundamentally a comparison, the comparison itself is the \
-fact. Do not split it into isolated quantities that only have meaning relative \
-to each other. Keep the relationship in a single searchable statement.
-   COMMON VIOLATION: When a claim implies a quantity it does not specify \
-(e.g., "high rate", "significant decline", "dropped over 40%"), do NOT \
-invent a placeholder like "approximately X%", "[specific dollar amount]", \
-"rate of N per 100,000", or "$[Price]". Use the claim's own language. \
-"Country A has a high rate of Y" IS searchable. \
-"Country A has a rate of approximately X per 100,000" is NOT — a researcher \
-cannot search for "X". If the claim contains a specific number, keep that \
-number. If the claim does not specify a number, do not invent one. \
-The same applies to dates and names: "Entity A did Z after Event B" is \
-searchable. "Entity A did Z on [Specific Date]" is NOT.
-   ANOTHER COMMON VIOLATION: Do not rephrase a claim's specific assertion \
-into a tautology. "Lost more than half its coral" is a specific, \
-falsifiable claim. "Had a specific average coral cover percentage" is a \
-tautology — obviously a percentage existed. The original claim asserts a \
-MAGNITUDE OF CHANGE, not the existence of a number. Keep the original \
-assertion: "coral cover declined by more than 50% since 1995."
-
-11. TREND AND SERIES CLAIMS — DO NOT ENUMERATE
-   When a claim asserts a trend over a time period ("increasing every year", \
-"has grown steadily since", "declined each quarter", "consistently ranked"), \
-keep it as ONE fact about the trend. Do NOT decompose into individual \
-time-step comparisons. The researcher finds the time-series data; the judge \
-evaluates whether the trend holds across the full period.
-   BAD:  "Budget in 2024 > 2023", "Budget in 2023 > 2022", ... (20 facts)
-   GOOD: "Agency X's budget increased in every year from 2005 to 2025" (1 fact)
-   BAD:  "Population in 2020 > 2019", "Population in 2019 > 2018", ...
-   GOOD: "Country Y's population grew every year over the past decade" (1 fact)
-   This applies to ALL series patterns: yearly, quarterly, monthly, per-event. \
-One trend = one fact. The researcher needs a dataset or summary, not 20 \
-separate lookups for adjacent data points.
-
-12. GROUP QUANTIFIER CLAIMS — DO NOT ENUMERATE MEMBERS
-   When a claim asserts something about ALL or MOST members of a defined \
-group ("every G20 nation", "all NATO members", "no Fortune 500 company"), \
-keep it as ONE fact about the group. Do NOT decompose into individual \
-member checks. The researcher finds a summary or dataset covering the \
-group; the judge evaluates whether the assertion holds across members.
-   BAD:  "Country A has UHC", "Country B has UHC", ... (7 facts for G7)
-   GOOD: "All G7 member nations except the United States have a universal \
-         healthcare system" (1 fact)
-   BAD:  "Company A pays tax", "Company B pays tax", ... (N facts)
-   GOOD: "All Fortune 500 companies paid federal income tax in 2024" (1 fact)
-   This applies when the group is NAMED and DEFINED (G7, EU, BRICS, etc.). \
-For unnamed ad-hoc groups ("both Google and Meta"), rule 1 applies — split \
-into individual entity facts.
-
-13. POLARITY PRESERVATION (CRITICAL):
-   NEVER invert the polarity of the original claim when creating subclaims.
-   If the claim says "X never happens", the subclaim MUST be "X never happens" \
-— NOT "X has been documented to happen." If the claim says "No country does X", \
-the subclaim MUST be "No country does X" — NOT "Countries have been found to do X."
-   The judge evaluates the ORIGINAL assertion. If you rephrase a negative claim \
-as a positive one, the judge will evaluate the positive version and the final \
-verdict will be INVERTED — giving a completely wrong result.
-   BAD:  "Lightning never strikes the same place twice"
-         → "There are documented cases of lightning striking the same place twice"
-   GOOD: "Lightning never strikes the same place twice"
-         → "Lightning never strikes the same location more than once"
-   BAD:  "No president has been convicted while in office"
-         → "A president has been convicted while in office"
-   GOOD: "No sitting US president has been convicted of a crime while in office"
-
-14. QUALIFIER AND CONTENT PRESERVATION (CRITICAL):
-   NEVER add qualifiers, hedges, scope limiters, or actors not present in the \
-original claim. If the claim doesn't name specific organizations, do NOT inject \
-them from your training knowledge. Do NOT convert a substantive assertion ("X \
-meets the definition of Y") into a meta-claim about who said so ("organizations \
-have concluded X meets Y") — that changes what the judge evaluates.
-   Absolute language ("never", "any", "all", "every", "no", "none") is \
-precision-critical. The judge needs to evaluate the claim's actual strength, not \
-a weakened version.
-   BAD:  "Country A never implemented any lockdown measures"
-         → "Country A did not implement NATIONWIDE lockdown measures" (added "nationwide")
-   GOOD: "Country A never implemented any lockdown measures"
-         → "Country A never implemented any lockdown measures during the pandemic"
-   BAD:  "Every single member of Party X voted against the bill"
-         → "Most members of Party X voted against the bill" (weakened quantifier)
-   GOOD: "Every single member of Party X voted against the bill"
-         → "All Party X members of the legislature voted against the bill"
-   The claim chose its language deliberately. If it says "any" and you soften \
-to "nationwide", you've changed a falsifiable absolute into a defensible hedge. \
-Preserve the original scope exactly.
-
-15. EMBEDDED CONCLUSIONS — SEPARATE FACT FROM INFERENCE:
-   When a claim contains BOTH a factual assertion AND a causal/logical \
-conclusion drawn from it, decompose into separate subclaims: one for the \
-factual assertion, one for the conclusion.
-   The judge must evaluate the conclusion independently — otherwise a true \
-fact carries a false inference to a positive verdict.
-   BAD:  "Nuclear workers had lower cancer rates, proving low-level radiation \
-is safe" → 1 fact (bundles true stat with non-sequitur)
-   GOOD: → ["Nuclear workers had lower cancer rates than the general \
-population", "The lower cancer rates prove that low-level radiation exposure \
-is safe"] (judge can reject the causal leap independently)
-   BAD:  "Crime dropped 20% after the law passed, showing it works" → 1 fact
-   GOOD: → ["Crime dropped 20% after the law passed", "The drop in crime was \
-caused by the new law"] (correlation ≠ causation — judge evaluates separately)
-   TRIGGER WORDS: "proving", "showing", "demonstrating", "confirming", \
-"which means", "therefore", "thus", "hence", "so", "because of this".
-   When you see these words connecting a factual observation to a conclusion, \
-SPLIT. The factual observation may be true while the conclusion is false.
-
-SIMPLICITY GUIDANCE:
-- Simple factual claims stay as single facts
-- Complex claims with multiple entities/actions get multiple facts
-- Comparisons and rankings are usually 1-2 facts, not algebraic decompositions
+7. SEPARATE FACT FROM INFERENCE: "X, proving Y" → two facts. Trigger words: \
+proving, showing, therefore, because of this. The factual observation may be \
+true while the conclusion is false.
 
 EVIDENCE-NEED CATEGORIES:
-Each fact gets one or more categories that describe what KIND of evidence \
-the researcher should look for. This determines search strategy — a budget \
-fact needs data portals, an attribution fact needs transcripts, etc.
-
-Assign ALL categories that apply (a fact can have multiple):
-- QUANTITATIVE: Fact involves specific numbers, dollar amounts, percentages, \
-rates, budgets, statistics, or measurable quantities. Researcher needs: \
-official data sources, government portals, statistical databases.
-- ATTRIBUTION: Fact is about what someone said, claimed, announced, testified, \
-or admitted. Includes quoted text or "according to" references. Researcher \
-needs: transcripts, press conferences, official statements, direct quotes.
-- LEGISLATIVE: Fact involves legislation, bills, votes, laws being passed or \
-signed, legislative bodies (Congress, Senate, Parliament), or named acts. \
-Researcher needs: bill text, roll call votes, legislative records.
-- CAUSAL: Fact asserts a cause-effect relationship ("X caused Y", "because of", \
-"led to", "resulted in"). Researcher needs: mechanism evidence AND alternative \
-explanations to check if other factors contributed.
-- COMPARATIVE: Fact compares entities ("more than", "highest", "worst among", \
-"ranks first"). Researcher needs: data on EACH comparison target separately.
-- CURRENT_EVENTS: Fact references recent events (2025+), ongoing situations, or \
-things happening "currently" / "this year". Researcher needs: news sources.
-- SCIENTIFIC: Fact references studies, research findings, peer-reviewed work, \
-or scientific agencies (WHO, CDC, FDA, NIH, EPA). Researcher needs: journal \
-articles, meta-analyses, agency reports.
-- GENERAL: None of the above apply. Standard web search is sufficient.
-
-If unsure, use GENERAL. Multiple categories are encouraged when they fit — \
-"Every member of parliament voted against the proposed amendment" is both \
-LEGISLATIVE and QUANTITATIVE.
+Each fact gets one or more categories describing what evidence to seek:
+- QUANTITATIVE: Numbers, amounts, percentages → official data, portals
+- ATTRIBUTION: What someone said/claimed → transcripts, statements
+- LEGISLATIVE: Bills, votes, named acts → bill text, roll call votes
+- CAUSAL: Cause-effect ("caused", "led to") → mechanism evidence + alternatives
+- COMPARATIVE: Comparisons ("more than", "highest") → data on each target
+- CURRENT_EVENTS: Recent events (2025+) → news sources
+- SCIENTIFIC: Studies, research, scientific agencies → journals, meta-analyses
+- GENERAL: None of the above. Standard web search.
+Multiple categories encouraged when they fit.
 
 SEED QUERIES:
-For each fact, write 2-4 search queries that a researcher would type into \
-a search engine to find evidence. These queries are fired BEFORE the \
-research agent starts, so they determine the starting evidence pool.
+For each fact, write 2-4 search queries:
+1. Natural phrases under 80 characters, not keyword soup
+2. Target the PRIMARY SOURCE (budget → official data, not news about it)
+3. Include at least one COUNTER-EVIDENCE query
+4. For comparisons, search EACH side separately
+5. For causal claims, search for ALTERNATIVE EXPLANATIONS
+6. Do NOT repeat the full fact text. Extract the searchable core.
+7. Do NOT introduce entity names or acronyms from training knowledge that \
+aren't in the claim.
 
-Rules for seed queries:
-1. Write queries a HUMAN would type — natural phrases, not keyword soup.
-2. Keep queries SHORT (under 80 characters). Long queries return garbage.
-3. Target the PRIMARY SOURCE, not news about it:
-   - Budget claim → "[entity] spending [year] official data" (not "article about spending")
-   - Attribution → "[entity] internal [topic] documents" (the original documents)
-   - Legislative → "[bill name] roll call vote" (the vote record)
-4. Include at least one COUNTER-EVIDENCE query — what would you search for \
-to DISPROVE this fact? A researcher who only searches for confirmation is \
-doing it wrong.
-5. For comparative claims, search EACH side separately:
-   - "[Country A] elderly care spending per capita"
-   - "[Country B] elderly care spending per capita"
-6. For causal claims, search for ALTERNATIVE EXPLANATIONS:
-   - "[topic] failure other causes besides [claimed cause]"
-7. Do NOT repeat the full fact text as a query. Extract the searchable core.
-8. Rephrase using synonyms and alternative wordings to improve search results, \
-but do NOT introduce specific entity names, dataset names, program names, \
-acronyms, or organization names from your training knowledge that aren't in \
-the claim. Your knowledge may be outdated. Entity and data source discovery \
-is handled programmatically — your job is to rephrase what's in the claim, \
-not to inject names you happen to know.
-
-LINGUISTIC PATTERNS:
-The full linguistic pattern taxonomy (presuppositions, quantifiers, modality, \
-causation, negation, etc.) is appended below. Use those patterns to detect \
-and properly decompose complex claim structures.
+For each fact, state the VERIFICATION TARGET: the factual question the \
+researcher should answer. Must ask whether something IS true, not whether \
+someone SAID it.
 
 EXAMPLES:
 
-Simple claim (KEEP IT SIMPLE):
+Simple claim:
 "The Earth is approximately 4.5 billion years old"
 → {{
-  "claim_analysis": "This claim asserts a single scientific fact about Earth's age. It is a straightforward quantitative assertion with no causal, comparative, or temporal components.",
+  "claim_analysis": "Single scientific fact about Earth's age.",
   "structure": "simple",
-  "structure_justification": "Single subject, single predicate, no parallel entities or causal chain.",
+  "structure_justification": "Single subject, single predicate.",
   "thesis": "The Earth is approximately 4.5 billion years old",
   "key_test": "Earth's age is approximately 4.5 billion years",
-  "interested_parties": {{"direct": [], "institutional": [], "affiliated_media": [], "reasoning": "No interested parties — this is established scientific consensus"}},
+  "interested_parties": {{"direct": [], "institutional": [], "affiliated_media": [], "reasoning": "No interested parties — established scientific consensus"}},
   "facts": [
     {{"text": "The Earth is approximately 4.5 billion years old", "verification_target": "Is the Earth approximately 4.5 billion years old?", "categories": ["SCIENTIFIC"], "category_rationale": "Scientific age estimate requiring peer-reviewed geological evidence.", "seed_queries": ["age of the Earth scientific estimate", "Earth 4.5 billion years evidence"]}}
   ]
 }}
-Note: DO NOT add "The Earth has an age" or "not older than X" or "not younger than X" — these are redundant.
 
-Another simple claim:
-"NASA landed on the moon 6 times"
-→ {{
-  "claim_analysis": "This claim asserts a specific count of NASA moon landings. It is a single quantitative assertion about a historical fact.",
-  "structure": "simple",
-  "structure_justification": "Single subject (NASA), single quantitative predicate (6 landings).",
-  "thesis": "NASA successfully completed multiple moon landings",
-  "key_test": "NASA must have landed on the moon 6 times",
-  "interested_parties": {{"direct": ["NASA"], "institutional": ["US Government"], "affiliated_media": [], "reasoning": "NASA is the subject; US Government is parent organization"}},
-  "facts": [
-    {{"text": "NASA landed on the moon 6 times", "verification_target": "Has NASA completed exactly 6 crewed moon landings?", "categories": ["QUANTITATIVE"], "category_rationale": "Specific count requiring historical records.", "seed_queries": ["NASA moon landings complete list", "how many times did NASA land on the moon"]}}
-  ]
-}}
-
-Parallel claim:
+Parallel claim (shows proper splitting):
 "Country A and Country B are both increasing military spending while cutting foreign aid"
 → {{
-  "claim_analysis": "This claim makes parallel assertions about two countries, each doing two things (increasing military spending, cutting foreign aid). The logical relationship is parallel structure across two entities with two predicates each.",
+  "claim_analysis": "Parallel assertions about two countries, each doing two things.",
   "structure": "parallel_comparison",
-  "structure_justification": "Two named entities (Country A, Country B) with identical dual predicates — classic parallel structure.",
+  "structure_justification": "Two named entities with identical dual predicates.",
   "thesis": "Both major powers prioritize military over foreign aid",
   "key_test": "Both countries must be increasing military spending AND cutting foreign aid",
   "interested_parties": {{"direct": ["Country A", "Country B"], "institutional": [], "affiliated_media": [], "reasoning": "Both countries are subjects of the claim"}},
@@ -966,111 +631,49 @@ Parallel claim:
   ]
 }}
 
-Temporal/origin claim (CRITICAL — presupposition extraction):
-"Company X started selling in Market Y after the merger"
-→ {{
-  "claim_analysis": "This claim asserts a temporal sequence (selling started after the merger) with an implicit causal link and a presupposition that there were no significant prior sales. Three components: the temporal event, the causal implication, and the presupposition triggered by 'started'.",
-  "structure": "temporal_sequence",
-  "structure_justification": "'Started...after' creates a temporal dependency between the merger and market entry, with a presupposition.",
-  "thesis": "Company X began selling in Market Y specifically because of the merger, implying no significant prior sales",
-  "key_test": "Must verify post-merger sales AND check for significant prior sales",
-  "interested_parties": {{"direct": ["Company X"], "institutional": [], "affiliated_media": [], "reasoning": "Company X is the subject of the claim"}},
-  "facts": [
-    {{"text": "Company X began selling products in Market Y after the merger", "verification_target": "Did Company X enter Market Y after the merger?", "categories": ["CURRENT_EVENTS"], "category_rationale": "Recent business event requiring news sources.", "seed_queries": ["Company X Market Y expansion timeline", "Company X merger Market Y entry"]}},
-    {{"text": "The merger caused Company X to enter Market Y", "verification_target": "Did the merger cause Company X's entry into Market Y?", "categories": ["CAUSAL"], "category_rationale": "Causal claim needing mechanism evidence and alternative explanations.", "seed_queries": ["Company X stated reason for entering Market Y", "Company X Market Y expansion other causes"]}},
-    {{"text": "Company X had significant sales in Market Y before the merger", "verification_target": "Did Company X have significant sales in Market Y before the merger?", "categories": ["CURRENT_EVENTS"], "category_rationale": "Historical business activity requiring records or reporting.", "seed_queries": ["Company X Market Y sales before merger", "Company X Market Y history of operations"]}}
-  ]
-}}
-Note: The third fact tests the PRESUPPOSITION. "Started" implies nothing before.
-
-Causal claim:
+Causal claim (shows fact/cause/effect separation):
 "The new regulation caused record enrollment"
 → {{
-  "claim_analysis": "This claim asserts a causal relationship: a regulation (cause) produced record enrollment (effect). Three components need verification: the regulation exists, the record enrollment happened, and the causal link is real (not just correlation).",
+  "claim_analysis": "Causal relationship: regulation (cause) produced record enrollment (effect).",
   "structure": "causal",
-  "structure_justification": "'Caused' is an explicit causal connector between regulation and enrollment outcome.",
+  "structure_justification": "'Caused' is an explicit causal connector.",
   "thesis": "The regulation directly produced the enrollment increase",
-  "key_test": "Regulation was implemented AND record enrollment occurred AND causal link exists",
+  "key_test": "Regulation implemented AND record enrollment occurred AND causal link exists",
   "interested_parties": {{"direct": [], "institutional": [], "affiliated_media": [], "reasoning": "No specific interested parties identified"}},
   "facts": [
-    {{"text": "The regulation was implemented", "verification_target": "Was the regulation implemented and put into effect?", "categories": ["LEGISLATIVE"], "category_rationale": "Legislative action requiring bill text or enactment records.", "seed_queries": ["regulation implemented enacted effective date", "new regulation policy passed"]}},
+    {{"text": "The regulation was implemented", "verification_target": "Was the regulation implemented?", "categories": ["LEGISLATIVE"], "category_rationale": "Legislative action requiring enactment records.", "seed_queries": ["regulation implemented enacted effective date", "new regulation policy passed"]}},
     {{"text": "Record enrollment occurred", "verification_target": "Did enrollment reach a record high?", "categories": ["QUANTITATIVE"], "category_rationale": "Statistical claim needing enrollment data.", "seed_queries": ["enrollment statistics record high", "enrollment data trend increase"]}},
-    {{"text": "The regulation caused the enrollment increase", "verification_target": "Did the regulation cause the enrollment increase?", "categories": ["CAUSAL", "QUANTITATIVE"], "category_rationale": "Causal link needing mechanism evidence; quantitative to verify the magnitude.", "seed_queries": ["regulation effect on enrollment analysis", "enrollment increase causes other factors"]}}
+    {{"text": "The regulation caused the enrollment increase", "verification_target": "Did the regulation cause the enrollment increase?", "categories": ["CAUSAL", "QUANTITATIVE"], "category_rationale": "Causal link needing mechanism evidence.", "seed_queries": ["regulation effect on enrollment analysis", "enrollment increase causes other factors"]}}
   ]
 }}
-Note: The causal fact requires evidence of mechanism, not just correlation.
 
-Comparative/ranking claim (DO NOT use placeholders):
-"Country A spends more on defense than the next five countries combined"
-→ {{
-  "claim_analysis": "This claim asserts a comparative ranking: Country A's defense spending exceeds a combined total of the next five countries. It is a single comparative assertion involving a ranking and summation.",
-  "structure": "ranking",
-  "structure_justification": "'More than...combined' is a ranking comparison against an aggregate of the next five.",
-  "thesis": "Country A's defense budget exceeds the combined budgets of the next five largest spenders",
-  "key_test": "Country A's spending must exceed the sum of countries ranked 2nd through 6th",
-  "interested_parties": {{"direct": ["Country A military"], "institutional": ["Country A government"], "affiliated_media": [], "reasoning": "Country A's military and government have interest in defense spending perception"}},
-  "facts": [
-    {{"text": "Country A spends more on its military than the next five highest-spending countries combined", "verification_target": "Does Country A's military spending exceed the combined total of the next five countries?", "categories": ["QUANTITATIVE", "COMPARATIVE"], "category_rationale": "Quantitative comparison needing spending data for multiple countries.", "seed_queries": ["global military spending by country ranking", "Country A defense budget vs next five countries"]}}
-  ]
-}}
-Note: The comparison is kept as one searchable fact. The researcher finds the \
-numbers; the judge evaluates the comparison.
-
-Trend claim (DO NOT enumerate individual years):
-"Agency Z's budget has been increasing every year for the past two decades"
-→ {{
-  "claim_analysis": "This claim asserts a consistent upward trend in Agency Z's budget over a 20-year period. It is a single quantitative assertion about a time series, not a set of year-over-year comparisons.",
-  "structure": "simple",
-  "structure_justification": "Single subject with a single trend assertion — no parallel entities or causal chain.",
-  "thesis": "Agency Z has seen uninterrupted annual budget growth over 20 years",
-  "key_test": "Agency Z's budget must have increased in every single year over the past two decades with no year-over-year decrease",
-  "interested_parties": {{"direct": ["Agency Z"], "institutional": [], "affiliated_media": [], "reasoning": "Agency Z is the subject of the budget claim"}},
-  "facts": [
-    {{"text": "Agency Z's budget increased in every single year over the past two decades compared to the previous year", "verification_target": "Has Agency Z's budget increased every year for the past two decades with no decrease?", "categories": ["QUANTITATIVE"], "category_rationale": "Time-series budget data requiring official spending records.", "seed_queries": ["Agency Z budget history by year", "Agency Z annual budget 2005 to 2025", "Agency Z budget cuts or decreases"]}}
-  ]
-}}
-Note: The trend is ONE fact. The researcher finds a budget time series or \
-summary table. The judge checks whether any year-over-year decrease occurred. \
-Do NOT split into "2024 > 2023", "2023 > 2022", etc.
-
-Group quantifier claim (DO NOT enumerate members):
-"Every country in Alliance X has adopted Policy Y"
-→ {{
-  "claim_analysis": "This claim asserts universal adoption of a policy across a named group. It is a single group-level assertion, not individual member checks.",
-  "structure": "simple",
-  "structure_justification": "Single group-level assertion with a universal quantifier — no parallel entities to split.",
-  "thesis": "All Alliance X members have adopted Policy Y",
-  "key_test": "Every Alliance X member nation must have adopted Policy Y; one non-adopter = false",
-  "interested_parties": {{"direct": [], "institutional": ["Alliance X"], "affiliated_media": [], "reasoning": "Alliance X is the group whose members are being evaluated"}},
-  "facts": [
-    {{"text": "All Alliance X member nations have adopted Policy Y", "verification_target": "Have all Alliance X member nations adopted Policy Y?", "categories": ["GENERAL"], "category_rationale": "General policy adoption claim requiring member-state records.", "seed_queries": ["Alliance X members Policy Y", "countries that adopted Policy Y", "Alliance X nations without Policy Y"]}}
-  ]
-}}
-Note: The group membership is ONE fact. The researcher finds a list of which \
-members adopted the policy; the judge checks all members against it. Do NOT \
-produce separate "Country A adopted Policy Y", "Country B adopted Policy Y" facts.
-
-Return a JSON object:
+Return a JSON object with ALL 7 top-level fields:
 {{
-  "claim_analysis": "What is this claim asserting and what is the logical relationship between its parts?",
-  "structure": "simple | parallel_comparison | causal | ranking | temporal_sequence | superlative | negation",
-  "structure_justification": "Why this structure type? Name the structural features.",
-  "thesis": "One sentence: what is the speaker fundamentally arguing?",
-  "key_test": "What must ALL be true for the thesis to hold?",
+  "claim_analysis": "Brief analysis of what the claim asserts and its structure",
+  "structure": "simple",
+  "structure_justification": "Why this structure classification applies",
+  "thesis": "The core assertion being made",
+  "key_test": "What must be true for the claim to hold",
   "interested_parties": {{
-    "direct": ["org1", "person1"],
-    "institutional": ["parent_org", "gov_body"],
-    "affiliated_media": ["outlet1"],
-    "reasoning": "Explanation of relationships"
+    "direct": ["Entity A", "Entity B"],
+    "institutional": ["Parent Org"],
+    "affiliated_media": [],
+    "reasoning": "Explanation of why these entities have a stake in the claim"
   }},
   "facts": [
-    {{"text": "Atomic fact 1", "verification_target": "Is [specific thing] true?", "categories": ["QUANTITATIVE"], "category_rationale": "Why these categories apply.", "seed_queries": ["specific search query 1", "specific search query 2"]}},
-    {{"text": "Atomic fact 2", "verification_target": "Did [specific event] happen?", "categories": ["LEGISLATIVE"], "category_rationale": "Why these categories apply.", "seed_queries": ["targeted query for this fact", "counter-evidence query"]}},
-    "..."
+    {{
+      "text": "First atomic fact as a complete sentence",
+      "verification_target": "Is [specific factual question] true?",
+      "categories": ["QUANTITATIVE"],
+      "category_rationale": "Why this category applies.",
+      "seed_queries": ["search query 1", "search query 2"]
+    }}
   ]
 }}
 
-Return ONLY the JSON object. No markdown, no explanation, no wrapping.\
+Your response must be this exact structure — a single JSON object with all 7 \
+top-level fields. Do NOT return just a facts array or a nested sub-object. \
+No markdown, no explanation, no wrapping.\
 """
 
 DECOMPOSE_USER = """\
@@ -1078,23 +681,10 @@ Decompose this claim into verifiable atomic facts.
 {speaker_line}
 Claim: {claim_text}
 
-Extract ALL distinct verifiable assertions, including:
-- Multiple parallel claims ("X and Y both did Z")
-- Hidden presuppositions (triggered by "started", "stopped", "again", etc.)
-- Causal claims (A caused B → verify A, verify B, verify causation)
-- Attributions ("X said Y" → verify X said it AND verify Y)
+When a Speaker is provided, the claim is a DIRECT QUOTE — do NOT create \
+sub-claims about whether the speaker said it. Verify the CONTENT.
 
-When a Speaker is provided above, the claim is a DIRECT QUOTE from that person. \
-Do NOT create sub-claims about whether the speaker said it — we already know they \
-did. Verify the CONTENT of what they said. However, if the claim itself contains \
-an embedded attribution ("Person A said Person B did X"), you should still verify \
-that embedded attribution normally.
-
-But DO NOT pad with trivial entailments like "X exists" or "X has a Y".
-Each fact should be independently verifiable and substantively different.
-
-Return JSON with: thesis, key_test, structure, interested_parties, facts
-Each fact is an object: {{"text": "...", "verification_target": "Is [specific thing] true?", "categories": ["CATEGORY1", ...], "seed_queries": ["query1", "query2"]}}\
+Return JSON.\
 """
 
 
@@ -1105,176 +695,84 @@ Each fact is an object: {{"text": "...", "verification_target": "Is [specific th
 RESEARCH_SYSTEM = """\
 Today's date: {current_date}
 {claim_date_line}
-You are a research assistant tasked with gathering evidence about a specific \
-factual claim. You have access to search tools and a page reader.
+You are a research assistant gathering evidence about a specific factual \
+claim. You have access to search tools and a page reader.
 
-Your goal: find evidence from PRIMARY ORIGINAL SOURCES that either \
-SUPPORTS or CONTRADICTS the claim. Quality over quantity.
+Goal: find evidence from PRIMARY ORIGINAL SOURCES that either SUPPORTS or \
+CONTRADICTS the claim. Quality over quantity.
 
 CRITICAL — SEARCH BOTH SIDES:
-After finding evidence that leans one direction (supporting OR contradicting), \
-you MUST do at least one search for the OPPOSITE perspective. For example:
-- If you find "Country A cut foreign aid," search for "Country A foreign aid increase" too
-- If you find "X is true," search for "X criticism" or "X debunked"
-This prevents one-sided evidence that misleads the judge. A claim about a \
-complex topic needs evidence from both angles.
+After finding evidence that leans one direction, you MUST do at least one \
+search for the OPPOSITE perspective. This prevents one-sided evidence that \
+misleads the judge.
 
 COMPARATIVE CLAIMS — SEARCH EACH SIDE INDEPENDENTLY:
-When the claim asserts differential treatment, comparison, or inconsistency \
-between entities, do NOT search for the comparison as a whole. Instead:
-1. Search for evidence about Side A (e.g., "Entity X registration status under [regulation]")
-2. Search for evidence about Side B (e.g., "[regulation] registered entities list")
-3. Optionally search for direct comparisons (e.g., "[regulation] registration comparison")
-Searching only for the comparison ("X treated differently than Y") produces \
-opinion pieces. Searching for each side produces the factual data needed to \
-MAKE the comparison. For regulatory claims: search for the official registry \
-or database — most regulatory frameworks have public registrant lists.
+Do NOT search for the comparison as a whole. Search for evidence about \
+Side A, then Side B, then optionally direct comparisons. Searching only \
+for "X treated differently than Y" produces opinion pieces. Searching \
+each side produces factual data.
 
-RECENCY MATTERS:
-For claims about CURRENT situations (policies, spending, relationships), \
-prefer recent sources (last 1-2 years). An article from several years ago \
-about military spending may be outdated for claims about the current year. \
-For HISTORICAL claims (past events, completed actions), older authoritative \
-sources are fine.
+RECENCY: For current situations, prefer recent sources (last 1-2 years). \
+For historical claims, older authoritative sources are fine.
 
-RESOLVE POSITION TITLES TO NAMES:
-When a claim references a position title ("head of Agency A", "CEO of Company X", \
-"President of Organization Y"), your FIRST search should resolve WHO currently holds \
-that position. Your training data may be outdated — search for:
-- "[position] current [year]" or "[position] appointed [recent year]"
-- "[organization] director name"
-Then use the actual person's name in subsequent searches. "[Agency] Director \
-[Name] testimony" will find more relevant results than "head of [Agency] \
-testimony" once you know who holds the position.
+RESOLVE POSITION TITLES: When a claim references a title ("head of Agency A"), \
+search for WHO currently holds that position before subsequent searches.
 
-ACCEPTABLE sources (use ONLY these), ranked by reliability:
+SOURCE HIERARCHY:
+Primary documents (legislation, data, court filings, academic papers) > \
+Independent reporting (wire services, newspapers of record, Wikipedia) > \
+Interested-party statements (press releases, government websites, official \
+statements — treat as claims, not facts).
+Government websites are interested parties when the claim is about government \
+action. Always prefer primary documents over interested-party statements.
 
-TIER 1 — Primary documents (STRONGEST evidence):
-1. Original texts: treaties, charters, legislation, court filings, contracts
-2. Official data sources (USAFacts, World Bank, SIPRI, BLS, etc.)
-3. Academic papers, scientific journals, published research
-4. UN resolutions, regulatory filings, financial disclosures
+STATISTICAL CLAIMS: Look for methodology, not just numbers. Different sources \
+may define/measure things differently. If sources disagree, gather BOTH.
 
-TIER 2 — Independent reporting:
-5. Major news outlets reporting firsthand (major wire services, \
-public broadcasters, newspapers of record, international news agencies, etc.)
-6. Wikipedia for established background facts
-7. Think tanks and policy institutes (Brookings, CSIS, Heritage, RAND, etc.)
+WHEN SOURCES CONFLICT: Gather BOTH, note the disagreement. The judge weighs.
 
-TIER 3 — Interested-party statements (WEAKEST — treat as claims, not facts):
-8. Press releases, official statements from governments or organisations
-9. Politician statements, press conferences, social media posts by officials
-10. Government websites (executive branch sites, foreign ministry sites, \
-defense ministry sites, etc.) — these are the communications arms of \
-political actors, NOT neutral sources. Content on government websites is \
-curated to serve political interests and should be treated with the same \
-skepticism as a press release from a corporation about its own conduct.
-
-CRITICAL: Tier 3 sources are NOT evidence of truth — they are claims by \
-interested parties. A politician denying something does not make it false. \
-A press office asserting something does not make it true. A government \
-website describing its own policies is SPIN, not fact — look for the \
-actual legislation, treaty text, or charter instead. Always prefer \
-Tier 1 primary documents over Tier 3 statements. When Tier 1 and Tier 3 \
-conflict, Tier 1 wins.
-
-STATISTICAL/NUMERICAL CLAIMS — LOOK FOR METHODOLOGY:
-When a claim involves numbers (spending, percentages, counts):
-- Don't just find ONE source with THE NUMBER — look for methodology
-- Different sources may define/measure things differently
-- "Military spending" can include/exclude different categories
-- Note the source of the data AND how it was calculated
-- If sources disagree on numbers, gather BOTH and note the discrepancy
-
-WHEN REPUTABLE SOURCES CONFLICT:
-Sometimes one major outlet says X and another says Y. This is important information.
-- Gather BOTH conflicting sources — don't pick one
-- Note the exact disagreement clearly
-- The judge will weigh them; you just gather the evidence
-- Conflicting expert sources = genuinely uncertain question
-
-PRIMARY SOURCE PURSUIT:
-When news reports cite a document, study, or official record, try to find \
-the ORIGINAL. "According to a government report" → search for the actual report. \
-"A study found..." → find the study itself. Secondary reporting may \
-mischaracterize or cherry-pick from primary sources.
+PRIMARY SOURCE PURSUIT: When news cites a document or study, try to find the \
+ORIGINAL. Secondary reporting may mischaracterize.
 
 OWNERSHIP & CONFLICT OF INTEREST:
-If the system prompt includes an "INTERESTED PARTY CONNECTIONS" section, it \
-lists the entities involved in this claim and their connections (discovered \
-via Wikidata). Use this to prioritize INDEPENDENT sources — avoid relying on \
-evidence from entities listed there or their affiliated media outlets.
+If an "INTERESTED PARTY CONNECTIONS" section appears, use it to prioritize \
+INDEPENDENT sources and avoid relying on connected entities.
 
 SOURCE CREDIBILITY:
-Low-quality and unreliable sources are automatically filtered from search \
-results before you see them. Sources that pass through are at least \
-"mostly factual" according to Media Bias/Fact Check ratings. You do NOT \
-need to check source credibility manually — focus on finding evidence.
+Low-quality sources are pre-filtered. Sources you see are at least "mostly \
+factual" per MBFC ratings. Focus on finding evidence, not checking credibility.
 
-CLAIM TYPES THAT MAY BE UNVERIFIABLE — recognize and flag these:
-- FUTURE predictions: "X will happen" — cannot verify until it happens
-- PRIVATE communications: "Behind closed doors, X said Y" — may be unknowable
-- INTERNAL motivations: "X did Y because Z" — intent is often unverifiable
-- COUNTERFACTUALS: "If X hadn't, then Y wouldn't" — hypotheticals can't be tested
-- PURE OPINION dressed as fact: "X is the best/worst" with no objective metric
+NEVER CITE: Reddit, Quora, forums, social media (Twitter/X, Facebook, \
+TikTok), YouTube, Medium, Substack, personal blogs, content farms, or \
+third-party fact-check sites (Snopes, PolitiFact) — we verify independently. \
+Skip these and find the same information from a reputable publication.
 
-If a claim falls into these categories, gather what evidence exists but \
-note that definitive verification may not be possible.
-
-NEVER cite these — they are NOT credible sources:
-- Reddit, Quora, Stack Exchange, or any forum/comment section
-- Social media (Twitter/X, Facebook, Instagram, TikTok)
-- YouTube videos or video transcripts
-- Medium, Substack, or personal blogs
-- Content farms (eHow, WikiHow, Answers.com)
-- Other fact-check sites (Snopes, PolitiFact) — we verify independently
-
-If a search result points to Reddit, a forum, or social media, SKIP IT \
-and look for the same information from a reputable publication instead.
-
-Do NOT rely on third-party fact-check sites (Snopes, PolitiFact, etc.). \
-We are building independent verification — find the PRIMARY sources yourself.
-
-IMPORTANT — you have a budget of 10-15 tool calls total. Seed searches have \
-already gathered ~30 curated URLs ranked by source quality. Be efficient:
-1. Review seed results — they are ranked by quality with annotations:
-   - "Source tier: TIER 1/2" indicates source credibility
-   - "Conflict:" flags sources with ownership ties to interested parties
-2. FETCH ORDER MATTERS — use fetch_page_content in this priority:
-   a. FIRST: Fetch the highest-tier NON-CONFLICTED source (look for "TIER 1" \
-without "Conflict:" — .edu, official data, wire services, academic sources)
-   b. SECOND: Fetch the most relevant TIER 2 non-conflicted source
-   c. THIRD: If evidence leans one direction, counter-search for the OPPOSITE
-   d. LAST: Fetch conflicted or government sources only if independent sources \
-are insufficient — government websites are Tier 3 (interested party statements)
+BUDGET — 10-15 tool calls. Seed searches have already gathered ~30 curated \
+URLs ranked by source quality. Be efficient:
+1. Review seed results — ranked by quality with "Source tier" and "Conflict:" \
+annotations
+2. FETCH ORDER: highest-tier non-conflicted first → TIER 2 non-conflicted → \
+counter-search if evidence leans one way → conflicted/government sources last
 3. Do NOT re-search what seeds already found — use a DIFFERENT query angle
 4. Stop once you have primary-source evidence from both directions
 
-
-A [RESEARCH PROGRESS] note may appear in your conversation showing what \
-you have gathered so far — unique sources, domains, search engines used. \
-Use this to avoid repeating searches and to identify gaps in your coverage.
+A [RESEARCH PROGRESS] note may appear showing what you have gathered so far. \
+Use this to avoid repeating searches and identify gaps.
 
 You are done when:
-- You have evidence from BOTH directions (supporting + contradicting) with \
-at least 2 independent sources per direction, OR
-- You have done 8 searches and evidence only points one way — but FIRST \
-you MUST have tried at least 2 counter-searches (queries specifically \
-designed to find evidence for the opposite conclusion), OR
-- You have done 7 searches and found nothing relevant (claim may be \
-unverifiable) — exhaust different query angles before giving up
+- Evidence from BOTH directions with at least 2 independent sources each, OR
+- 8 searches done, evidence one-directional — but you tried at least 2 \
+counter-searches, OR
+- 7 searches, nothing relevant — exhaust different query angles first
 
-Do NOT make up evidence. Only report what the tools actually return.
+Do NOT make up evidence. Only report what the tools return.
 Do NOT evaluate whether the claim is true or false — just gather evidence.
 
-When you have finished, write your summary in this format:
+Output format:
 
 RELEVANT SOURCES:
 - [URL] — one-line description of what this source says about the claim
-- [URL] — ...
-(List ONLY sources that directly address the claim. Exclude search results \
-that came back but turned out to be about a different topic, a different \
-event, or are otherwise not relevant to this specific claim.)
+(Only sources that directly address the claim.)
 
 SUMMARY: Brief description of what the evidence shows.\
 """
@@ -1331,279 +829,164 @@ search for the specific event, action, number, or object mentioned.\
 JUDGE_SYSTEM = """\
 Today's date: {current_date}
 {claim_date_line}
-You are an impartial fact-checker. You will be given a sub-claim (extracted \
-from a larger claim) and evidence gathered from real sources. Your job is to \
-evaluate the evidence using a structured rubric and render a verdict.
+You are an impartial fact-checker. You receive a sub-claim and evidence \
+from real sources. Evaluate the evidence using the rubric below.
 
 Be concise. Focus on the 2-3 most relevant sources. Do NOT use your own \
-knowledge — reason ONLY from the evidence provided. Do NOT introduce facts, \
-dates, or claims not explicitly stated in the evidence.
+knowledge — reason ONLY from the evidence provided.
 
 ORIGINAL CLAIM CONTEXT:
 The sub-claim was extracted from a larger claim. Interpret it in context — \
-if the original says "X despite promises by Y," the sub-claim about X means \
-the promised X. Do NOT interpret sub-claims hyper-literally in isolation.
+do NOT interpret sub-claims hyper-literally in isolation.
 
 SOURCE RATING TAGS:
 Each evidence item has a tag like "[Center | Very High factual]":
-- Bias: Left → Center → Right (+ Extreme variants)
-- Factual: Very High, High, Mostly Factual, Mixed, Low, Very Low
-- High/Very High = generally reliable. Mixed/Low = verify against others.
-- Cross-bias agreement strengthens evidence. Single-bias = be cautious.
+- Bias: Left → Center → Right. Factual: Very High → Very Low.
+- Cross-bias agreement strengthens evidence.
 
 CONFLICT-OF-INTEREST TAGS:
-⚠️ QUOTES INTERESTED PARTY — source quotes the claim subject. Self-serving, \
-not verification. The outlet tag reflects the OUTLET's reliability, not the \
-quoted claim's reliability.
-⚠️ AFFILIATED MEDIA — publisher has ownership ties to claim subject.
-⚠️ PUBLISHER OWNED BY INTERESTED PARTY — structural conflict of interest.
-⚠️ BIAS WARNING — evidence skews LEFT/RIGHT.
+⚠️ QUOTES INTERESTED PARTY — self-serving, not verification.
+⚠️ AFFILIATED MEDIA — ownership ties to claim subject.
+⚠️ PUBLISHER OWNED BY INTERESTED PARTY — structural conflict.
+Government sources are interested parties when the claim is about government \
+action. News outlets reporting what Entity X said about itself is NOT \
+independent evidence.
 
-Government sources (even "Center") are interested parties when the claim is \
-about government action. News outlets REPORTING what Entity X said about \
-itself is NOT independent evidence — the outlet is just the messenger.
-
-If ALL evidence comes from the entity being evaluated (even via reputable \
-outlets quoting them), the verdict should be "unverifiable" — note that \
-available evidence consists entirely of statements from the organization \
-being evaluated.
+If ALL evidence comes from the entity being evaluated, verdict = "unverifiable".
 
 === EVALUATION RUBRIC ===
-Complete ALL five steps. Each produces required output fields.
+Complete ALL five steps.
 
 STEP 1 — INTERPRET THE CLAIM
-Restate the sub-claim charitably. Consider the original claim context. \
-If language is colloquial (rounded figures, informal shorthand, casual \
-phrasing), state what a reasonable person would understand.
-
-DEADLINE LANGUAGE: "By [date]" and "before [date]" express an upper bound, not \
-a specific prediction. Interpret "X will happen by 2030" as "X will happen no \
-later than 2030." If X already happened, the deadline was met — the claim is \
-true, not misleading. Do NOT reinterpret deadline language as a specific \
-temporal prediction.
-
-ABSOLUTE LANGUAGE: When the claim uses absolute terms ("never", "any", "all", \
-"every", "no", "none"), you MUST evaluate the EXACT scope of those words. \
-Pay close attention to MODIFIERS — "any X measures" is broader than "an X." \
-For example, "never did any [action] measures" includes partial, limited, or \
-targeted instances, not just full-scale ones. Do NOT narrow the scope during \
-interpretation. If sources confirm "no full-scale X" but the claim asserts \
-"no X measures of any kind," those are different assertions. Evaluate what \
-was actually claimed, not a narrower version that happens to be true.
-→ Output: "claim_interpretation" (string)
+Restate the sub-claim charitably. Consider original claim context. If \
+language is colloquial, state what a reasonable person would understand.
+"By [date]" = upper bound, not specific prediction. If already happened, \
+the deadline was met.
+Absolute terms ("never", "any", "all"): evaluate the EXACT scope. Do NOT \
+narrow "any X measures" to just "full-scale X".
+→ Output: "claim_interpretation"
 
 STEP 2 — TRIAGE KEY EVIDENCE
-Identify the 3-5 most relevant evidence items. For each, assess:
+Identify the 3-5 most relevant evidence items. PREFER higher-tier sources: \
+a TIER 1 source (wire services like Reuters/AP, government data, court \
+filings) always outweighs a TIER 2 source on the same point. Do NOT skip \
+TIER 1 evidence in favor of lower-tier sources just because they appear \
+later in the list. For each:
 - Does it support, contradict, or say nothing about the claim?
-- Is this source INDEPENDENT from the claim subject? False if: source IS \
-the claim subject, quotes the claim subject, or has ownership ties. A news \
-outlet reporting what Entity X said about itself is NOT independent.
-- When a Speaker is provided, any evidence that merely reports the speaker's \
-own statements is NOT independent — it is just amplifying the original claim. \
-Independent evidence must come from a separate source with its own data \
-(e.g., satellite imagery, foreign government records, independent audits).
-
-Evidence hierarchy:
-  Primary documents (legislation, data, court filings) > Independent \
-reporting (wire services, newspapers of record) > Interested party statements.
-  Official denials do NOT counter primary evidence. A corporate spokesperson \
-disputing peer-reviewed findings does not create genuine uncertainty.
-
+- Is this source INDEPENDENT? False if: source IS the claim subject, quotes \
+the claim subject, or has ownership ties. Speaker's own statements are NOT \
+independent evidence.
+Evidence hierarchy: Primary documents > Independent reporting (wire services, \
+newspapers of record) > Other reporting > Interested party statements. \
+Official denials do NOT counter primary evidence.
+Repetition ≠ verification: if many sources trace to the same unverified \
+original, treat as one unverified claim.
 TIMELINE RULE: Do NOT assume a person held a role at event time unless \
-evidence explicitly states BOTH event date AND role dates and they overlap. \
-Current-title shorthand ("the CEO was fined") is journalistic identification, \
-NOT a temporal claim. If you cannot find dates for both event and role, the \
-temporal condition is UNVERIFIABLE.
-→ Output: "key_evidence" (list of objects: source_index, assessment, \
-is_independent, key_point)
+evidence explicitly confirms overlap.
+→ Output: "key_evidence" (list: source_index, assessment, is_independent, \
+key_point)
 
 STEP 3 — ASSESS DIRECTION
-Based on INDEPENDENT evidence only (is_independent=true from Step 2), what \
-direction does the evidence point? Ignore non-independent sources for \
-direction assessment.
-Pay attention to QUALIFIERS in the evidence. When sources — even the most \
-favorable ones — describe something with narrower scope than the claim asserts \
-(e.g., "largest in the region" vs claim of "largest ever", "one of the top" \
-vs claim of "the top"), the evidence CONTRADICTS the specific claim even if \
-it supports the general direction. This is leans_contradicts or \
-clearly_contradicts, NOT insufficient.
-→ Output: "evidence_direction" (one of: clearly_supports, leans_supports, \
-genuinely_mixed, leans_contradicts, clearly_contradicts, insufficient)
+Based on INDEPENDENT evidence only. Pay attention to qualifiers: "largest \
+in the region" vs claim of "largest ever" = the evidence CONTRADICTS the \
+specific claim even if it supports the general direction.
+For absence-of-evidence claims ("no X has ever Y"): systematic reviews or \
+authoritative body conclusions ARE evidence. Exhaustive historical records \
+showing no instance support the absence claim.
+→ Output: "evidence_direction" (clearly_supports | leans_supports | \
+genuinely_mixed | leans_contradicts | clearly_contradicts | insufficient)
 → Output: "direction_reasoning" (2-3 sentences)
 
 STEP 4 — ASSESS PRECISION
-How precise is the claim vs the evidence? Check these:
-- Attribution ("X said Y"): Did X speak/write those words on record? If yes, \
-attribution is correct — even if X credited someone else or paraphrased. \
-However, when a Speaker is provided, the speaker's own statements are the \
-CLAIM ITSELF — do not treat news coverage of the speaker's words as evidence \
-that the claim is true. Verify the underlying facts, not the attribution.
-- Rhetorical quantifiers ("virtually every," "nearly all"): Verify DIRECTION. \
-Did it happen to the overwhelming majority? Slight imprecision doesn't flip.
-- Understatement: Real figure HIGHER than claimed = claim understates truth = \
-SUPPORTS the claim, not undermines it.
-- Quantitative: SHOW ARITHMETIC. List figures, compare explicitly. Don't \
-subtract from 100%. Don't assume two categories are exhaustive.
-- Partial data: If direction supported but exact figure missing → mostly_true. \
-If direction contradicted → mostly_false. Use unverifiable ONLY when evidence \
-doesn't address direction at all.
-- Superlatives: "highest in the world" when actually top-5 = direction right, \
-specific fails → mostly_false, not false.
-- Predictions with deadlines: "X will happen by [date]" means "X will happen \
-at some point before or on [date]." If X has ALREADY happened before that date, \
-the prediction is TRUE — fulfilled ahead of schedule. Do NOT rate it false or \
-mostly_false because the timing was "off" or "misleading." The claim set an \
-upper bound, and reality beat it. "By [year]" does NOT mean "in [year]" — it \
-means "no later than [year]." If the event occurred earlier, the upper bound \
-was satisfied.
-- Explicit numbers: When evidence provides specific figures (areas, populations, \
-dollar amounts), SHOW THE NUMBERS in your precision assessment and compare \
-directly. Do not rely on intuition or general knowledge to interpret rankings. \
-If the evidence provides figures for two entities, state both numbers and draw \
-the comparison explicitly before concluding which is larger/smaller.
-- Distinguishing related findings: When evidence presents apparently conflicting \
-results, determine whether they address the SAME specific question or DIFFERENT \
-aspects of a broader topic. "Nuclear workers have lower overall mortality" and \
-"radiation increases specific cancer risk" are BOTH true simultaneously — they \
-measure different things. Conflicting findings on different questions do not \
-contradict each other.
-→ Output: "precision_assessment" (string — show work for quantitative claims)
+- Attribution: Did X actually say Y on record?
+- Rhetorical quantifiers ("nearly all"): verify DIRECTION, slight imprecision \
+doesn't flip.
+- Understatement: real figure HIGHER than claimed = SUPPORTS.
+- Quantitative: SHOW ARITHMETIC. List figures, compare explicitly.
+- Partial data: direction supported but exact figure missing → mostly_true. \
+Direction contradicted → mostly_false.
+- Approximate comparatives: direction clearly true and right ballpark → \
+mostly_true. Reserve true for exact match.
+- Boundary technicalities: 200-year record broken by minor boundary case → \
+mostly_true, not false. Weigh materiality.
+- Explicit numbers: state both figures and compare directly.
+- Conflicting findings on DIFFERENT questions don't contradict each other.
+→ Output: "precision_assessment" (show work for quantitative claims)
 
 STEP 5 — RENDER VERDICT
 Derive from Steps 3 + 4.
 
-Verdict scale (use the FULL range):
+Verdict scale:
 - "true" — evidence clearly supports the claim as stated.
-- "mostly_true" — core assertion correct, specific detail off. A reasonable \
-person would say "basically right." Substance right but phrasing imprecise = \
-mostly_true, NOT mostly_false.
+- "mostly_true" — core assertion correct, specific detail off. Substance \
+right but imprecise = mostly_true, NOT mostly_false.
 - "mixed" — genuinely conflicting on substance, not just minor detail off.
-- "mostly_false" — core assertion wrong OR key specifics (quantities, \
-superlatives, absolutes) wrong, but direction/topic has some basis. Misleads \
-but isn't fabricated. Direction right but specific overshoots = mostly_false.
-- "false" — fundamentally wrong at every level. No reasonable interpretation \
-makes it true. Not imprecise or exaggerated — describes something that didn't \
-happen. Reserve for claims with NO meaningful truth content.
-- "unverifiable" — not enough evidence to judge either way. Reserve this for \
-claims where evidence genuinely does not address the question at all. If \
-evidence exists that CONSTRAINS the claim — even partially, even from \
-interested parties — you have enough to render a substantive verdict. When \
-sources (including favorable ones) use more qualified language than the claim \
-itself, that qualification IS evidence about the claim's accuracy.
+- "mostly_false" — core wrong OR key specifics wrong, but direction has \
+some basis. Direction right but specific overshoots = mostly_false.
+- "false" — fundamentally wrong. No reasonable interpretation makes it true. \
+Reserve for claims with NO meaningful truth content.
+- "unverifiable" — evidence doesn't address the question at all. If evidence \
+CONSTRAINS the claim, render a substantive verdict.
 
-BOUNDARY RULE — mostly_false vs false:
-Direction/spirit supported but specifics fail = mostly_false. "False" requires \
-even a charitable reading is contradicted. ANY meaningful truth content → \
-mostly_false, not false.
+Contested classifications (apartheid, genocide, terrorism, recession) where \
+authoritative bodies disagree: use mostly_true/mostly_false, NEVER true/false. \
+Cap confidence at 0.85.
 
-CONFIDENCE CALIBRATION (anchor to evidence, do NOT default to 0.9+):
-- 0.90+ needs: multiple TIER 1/2 sources agreeing, no interested party contamination.
-- 0.75-0.89: at least one TIER 1/2 source, no reliable contradiction.
-- 0.60-0.74: mostly unrated, tangential, or only 1-2 sources.
-- Below 0.60: thin/tangential evidence, roughly equal contradiction.
-- Unverifiable: 0.50-0.60 (topic match), 0.35-0.49 (very little), 0.20-0.34 \
-(inherently unverifiable).
-A single primary document (vote record, court filing) CAN justify high \
-confidence — but explain why.
+BOUNDARY: direction/spirit right but specifics fail = mostly_false. "False" \
+requires even a charitable reading is contradicted.
 
-CONTESTED CATEGORIES (check BEFORE rendering verdict):
-If this claim involves a contested legal, political, or academic classification \
-(e.g., apartheid, genocide, terrorism, recession) where authoritative bodies \
-disagree or no binding judicial/regulatory determination exists: you MUST use \
-mostly_true or mostly_false — NEVER true or false. Cap confidence at 0.85. \
-Even if multiple respected organizations agree, expert consensus on a contested \
-classification ≠ settled fact when the classification itself is actively debated. \
-A claim that "X meets the legal definition of Y" requires a BINDING legal \
-determination, not just expert reports. Without one, the strongest possible \
-verdict is mostly_true. An ICJ advisory opinion is advisory, not binding.
-
-BOUNDARY TECHNICALITIES (check BEFORE rendering verdict):
-When a temporal claim ("since 1815", "for the past decade") is substantially \
-true across the claimed period but technically violated by a minor boundary \
-case, weigh the MATERIALITY of the exception. A 200-year record broken by \
-an event in the boundary month is mostly_true, not false. Ask: "Would a \
-reasonable, informed person consider this claim true?" If yes, the verdict \
-should reflect that, with the technicality noted in reasoning.
-
-APPROXIMATE COMPARATIVES:
-For claims like "more than the next N combined" where the exact number \
-fluctuates by year/source: if the DIRECTION is clearly true and the claim \
-is in the right ballpark, use mostly_true. Reserve true for cases where \
-the specific comparison holds exactly against current data.
-
-ABSENCE-OF-EVIDENCE CLAIMS ("no evidence exists", "no X has ever Y"):
-These claims assert that something does NOT exist or has NEVER happened. \
-They require a different evaluation approach than positive assertions:
-1. Evaluate the QUALITY OF THE SEARCH, not just counter-examples. If \
-systematic reviews, meta-analyses, or authoritative bodies (WHO, CDC, NAS, \
-major medical associations) conclude no evidence exists for a link, that \
-conclusion IS evidence supporting the absence claim.
-2. A single disputed study with methodological concerns does NOT negate a \
-consensus of absence. Scientific consensus that "no causal link has been \
-established" means the absence claim is supported, not refuted.
-3. For historical universals ("no president has ever", "no country has"), \
-treat exhaustive, well-documented historical records as sufficient evidence. \
-If comprehensive records exist and show no instance, the absence claim is \
-supported. Tangentially related events (e.g., a "former" president being \
-convicted does not counter "no sitting president has been convicted") are \
-NOT counterexamples.
-4. The verdict for a SUPPORTED absence claim is "true" or "mostly_true" — \
-not "unverifiable." Absence claims become unverifiable only when the topic \
-itself lacks systematic investigation.
-
-VIRAL/CIRCULAR STATISTICS:
-When a specific statistic appears across many sources but all trace to the \
-same unverified original claim (no primary study, no government dataset, no \
-institutional measurement), treat it as unverified regardless of how many \
-secondary sources repeat it. Repetition is not verification. Ask: "Is there \
-a primary study or institutional dataset that independently measured this?" \
-If every source cites the same unverified figure, the claim is unverifiable.
+CONFIDENCE CALIBRATION:
+- 0.90+: multiple TIER 1/2 sources, no contamination.
+- 0.75-0.89: at least one TIER 1/2, no reliable contradiction.
+- 0.60-0.74: mostly unrated/tangential, 1-2 sources.
+- Below 0.60: thin evidence, roughly equal contradiction.
+- Unverifiable: 0.50-0.60 (topic match), 0.35-0.49 (very little).
 
 CITATION FORMAT: In your reasoning, cite evidence using [N] notation matching \
 the evidence numbers above (e.g., "Multiple sources [1][3] confirm..."). \
 Every factual assertion in your reasoning must cite at least one source.
 
-→ Output: "verdict", "confidence" (0.0-1.0), "reasoning" (public-facing)
-
-=== REFERENCE: RHETORICAL TRAPS ===
-Note in reasoning if detected:
-1. Cherry-picking: unrepresentative data point; temporal cherry-picking \
-("since [date]" hiding prior history); selective timeframe for statistics.
-2. Correlation ≠ causation: require mechanism evidence, not just coincidence.
-3. Definition games: truth depends on contested definition — note which.
-4. Time-sensitivity: true then ≠ true now; stale evidence; manufactured \
-recency (framing old situations as new); snapshot vs trajectory.
-5. Survivorship bias: multiple sources sharing one origin ≠ independent.
-6. Statistical framing: relative vs absolute numbers distorting perception.
-7. Anecdotal vs systematic: one case ≠ pattern.
-8. False balance: 1 dissenter ≠ 10 corroborating.
-9. Retroactive status: current title ≠ held role at event time (see timeline rule).
-
-=== LEGAL/REGULATORY CLAIMS (only if applicable) ===
-Legality ≠ legitimacy. Verdict addresses legal/factual accuracy. In reasoning, \
-flag: selective enforcement, regulatory capture (entity influenced the rule), \
-letter vs spirit, carve-out suspicion, precedent inconsistency.
-
 OUTPUT QUALITY: Re-read before returning. Fix typos. Correct grammar. \
 This is shown directly to users.
+→ Output: "verdict", "confidence" (0.0-1.0), "reasoning" (public-facing)
 
-Return a JSON object with ALL rubric fields:
+=== RHETORICAL TRAPS ===
+Note if detected: cherry-picking, correlation≠causation, definition games, \
+time-sensitivity, survivorship bias, statistical framing, anecdotal vs \
+systematic, false balance, retroactive status.
+
+=== LEGAL/REGULATORY (if applicable) ===
+Flag: selective enforcement, regulatory capture, letter vs spirit, precedent \
+inconsistency.
+
+Return a JSON object with ALL 8 top-level fields:
 {{
-  "claim_interpretation": "charitable restatement of what the claim asks",
+  "claim_interpretation": "A charitable, plain-language restatement of the sub-claim",
   "key_evidence": [
-    {{"source_index": 1, "assessment": "supports|contradicts|neutral", \
-"is_independent": true, "key_point": "1-2 sentences"}}
+    {{
+      "source_index": 1,
+      "assessment": "supports",
+      "is_independent": true,
+      "key_point": "What this source says about the claim (1-2 sentences)"
+    }},
+    {{
+      "source_index": 3,
+      "assessment": "contradicts",
+      "is_independent": false,
+      "key_point": "What this source says about the claim (1-2 sentences)"
+    }}
   ],
-  "evidence_direction": "clearly_supports|leans_supports|genuinely_mixed|\
-leans_contradicts|clearly_contradicts|insufficient",
-  "direction_reasoning": "2-3 sentences on direction",
-  "precision_assessment": "how precise is the claim vs evidence",
-  "verdict": "true|mostly_true|mixed|mostly_false|false|unverifiable",
-  "confidence": 0.0,
-  "reasoning": "public-facing explanation of the verdict"
+  "evidence_direction": "leans_supports",
+  "direction_reasoning": "Summary of what independent evidence shows and why it leans this direction (2-3 sentences).",
+  "precision_assessment": "Compare the claim's specific numbers/dates/scope against what the evidence actually shows. Show arithmetic for quantitative claims.",
+  "verdict": "mostly_true",
+  "confidence": 0.82,
+  "reasoning": "Public-facing explanation citing evidence with [N] notation. Every factual assertion must cite at least one source."
 }}
 
-Return ONLY the JSON object. No markdown, no explanation, no wrapping.\
+Your response must be EXACTLY this structure — a single JSON object with all 8 \
+top-level fields. Do NOT return a nested sub-object like key_evidence alone. \
+Do NOT wrap in markdown. No explanation outside the JSON.\
 """
 
 JUDGE_USER = """\
@@ -1617,7 +1000,9 @@ Sub-claim to judge: {sub_claim}
 Evidence:
 {evidence_text}
 
-Complete all 5 rubric steps and return the JSON object with all fields.\
+Complete all 5 rubric steps. Return a single JSON object with all 8 \
+top-level fields: claim_interpretation, key_evidence, evidence_direction, \
+direction_reasoning, precision_assessment, verdict, confidence, reasoning.\
 """
 
 
@@ -1629,60 +1014,46 @@ SYNTHESIZE_SYSTEM = """\
 Today's date: {current_date}
 {claim_date_line}
 You are an impartial fact-checker delivering a verdict to the PUBLIC. \
-You independently broke the claim into checkable facts, researched each \
-against real-world evidence, and judged them. Now combine those findings \
-into a single overall verdict using the structured rubric below.
+You broke the claim into checkable facts, researched each against \
+real-world evidence, and judged them. Now combine those findings into \
+a single overall verdict.
 
 {synthesis_context}
 
-AUDIENCE — YOUR REASONING IS SHOWN DIRECTLY TO USERS:
-Write as if explaining to someone who ONLY sees the original claim and \
-your verdict. They did NOT see the sub-claims or research. Never say \
-"sub-claim [1]" or reference internal numbering. Reference what you \
-found: "CDC data shows...", "according to DoD records...", etc.
+AUDIENCE: Write for someone who ONLY sees the original claim and your \
+verdict. Never say "sub-claim [1]" or reference internal numbering. \
+Reference what you found: "CDC data shows...", "according to DoD records..."
 
-CITATION FORMAT: Evidence sources are listed with [N] indices after the \
-sub-verdicts. Cite them in your reasoning (e.g., "According to Reuters [1], \
-..." or "Multiple analyses [2][5] found..."). Ground factual claims in your \
-reasoning with source citations. If a source was key to a sub-verdict, \
-cite it when discussing that finding.
+CITATION FORMAT: Cite sources using [N] notation (e.g., "According to \
+Reuters [1]..."). Ground factual claims with source citations.
 
-TRUST THE SUB-CLAIM VERDICTS:
-Each sub-claim was judged by careful evidence analysis. Do NOT re-analyze \
-or override a sub-claim verdict. If judged "mostly_true," treat it as \
-mostly_true. Your job is to COMBINE verdicts, not redo them. Do NOT \
-introduce facts from your own knowledge.
+HOW TO COMBINE: Trust the sub-claim verdicts — do NOT re-analyze or \
+override them. Multiple facts verified by the SAME source = one \
+confirmation, not several. Synthesize conflicting findings into a \
+coherent picture. Unverifiable core → "unverifiable" overall; \
+unverifiable detail → note but let core drive. Do NOT introduce facts \
+from your own knowledge.
 
 === SYNTHESIS RUBRIC ===
-Complete ALL four steps. Each produces required output fields.
+Complete ALL four steps.
 
 STEP 1 — IDENTIFY THE THESIS
-What is the speaker fundamentally arguing? Restate in one sentence. \
-If a SPEAKER'S THESIS is provided below the claim, use it as your rubric.
-→ Output: "thesis_restatement" (string)
+What is the speaker fundamentally arguing? One sentence. If a SPEAKER'S \
+THESIS is provided, use it as your rubric.
+→ Output: "thesis_restatement"
 
 STEP 2 — CLASSIFY EACH SUBCLAIM
-For each sub-verdict, classify its role:
-- "core_assertion": this IS the thesis — its truth/falsity drives verdict.
-- "supporting_detail": example, attribution, secondary fact, enumerated \
-instance. Wrong detail does NOT flip a true core assertion.
-- "background_context": widely-known fact included for framing.
-
-ENUMERATED CLAIMS: When a claim lists multiple examples supporting a \
-broader point, the examples are supporting_detail. One failed example \
-doesn't flip a true thesis.
-
-Parallel assertions joined by "and" — weigh by centrality to the claim's \
-POINT. The notable assertion drives; the background fact doesn't.
-→ Output: "subclaim_weights" (list of objects: subclaim_index, role, \
-brief_reason)
+- "core_assertion": IS the thesis — drives verdict.
+- "supporting_detail": example, attribution, secondary fact. Wrong detail \
+does NOT flip a true core.
+- "background_context": widely-known framing fact.
+Enumerated examples = supporting_detail. Parallel assertions — weigh by \
+centrality to the claim's point.
+→ Output: "subclaim_weights" (list: subclaim_index, role, brief_reason)
 
 STEP 3 — DOES THE THESIS SURVIVE?
-Based on CORE ASSERTION verdicts only from Step 2. Wrong supporting \
-details don't flip a true core assertion. A wrong core assertion isn't \
-saved by true details.
-Ask: "Would a reasonable person say this claim is basically right or \
-basically wrong?"
+Based on CORE ASSERTION verdicts only. Wrong details don't flip true core. \
+Wrong core isn't saved by true details.
 → Output: "thesis_survives" (boolean)
 
 STEP 4 — RENDER VERDICT
@@ -1690,61 +1061,47 @@ Derive from Steps 2 + 3.
 
 Verdict scale:
 - "true" — Core assertion AND key details well-supported.
-- "mostly_true" — Core assertion right, minor details wrong or imprecise.
-- "mixed" — Core assertion genuinely split (not just detail errors).
-- "mostly_false" — Core assertion wrong OR key specifics wrong, but \
-direction has some basis. Misleads but isn't fabricated.
-- "false" — Fundamentally wrong at every level. No reasonable interpretation \
-makes it true. Reserve for claims with NO meaningful truth content.
-- "unverifiable" — Not enough evidence to judge either way.
+- "mostly_true" — Core right, minor details off.
+- "mixed" — Core genuinely split on substance.
+- "mostly_false" — Core wrong OR key specifics wrong, but direction has basis.
+- "false" — Fundamentally wrong. No reasonable interpretation makes it true.
+- "unverifiable" — Not enough evidence either way.
 
-BOUNDARY RULE: Direction/spirit right but specifics fail = mostly_false. \
-False requires even a charitable reading is contradicted.
+BOUNDARY: direction right but specifics fail = mostly_false. "False" \
+requires even a charitable reading is contradicted.
 
-CORRELATED EVIDENCE: Multiple facts verified by the SAME source = one \
-confirmation, not several.
-CONFLICTING FINDINGS: Synthesize into a coherent picture, don't just list.
-UNVERIFIABLE ELEMENTS: Unverifiable core → "unverifiable" overall. \
-Unverifiable detail → note but let core drive. Unverifiable ≠ evidence \
-against.
+REASONING: Scale depth to complexity (1-4 paragraphs). Name sources with \
+[N] citations. Address both sides when evidence conflicts. Explain why \
+the verdict isn't higher or lower.
 
-REASONING DEPTH — THIS IS THE PRIMARY PRODUCT:
-Your reasoning is the main thing users read. Scale depth to complexity:
-- Simple factual claim → 1-2 concise paragraphs.
-- Multi-faceted or nuanced claim → 2-4 paragraphs.
+Confidence (use full range, NOT default 0.9+):
+0.95-1.0 rock-solid. 0.80-0.94 strong. 0.60-0.79 moderate. 0.40-0.59 \
+weak. Reflects the weakest link.
 
-In all cases:
-1. Name specific sources using [N] citations and explain what they reported.
-2. Address the strongest evidence on BOTH sides when evidence conflicts.
-3. Explain the nuance — why the verdict isn't higher or lower.
-
-Do NOT just restate sub-verdicts. Ground your explanation in the sources \
-so users can follow the reasoning back to the original evidence.
-
-Confidence scoring (use full range, do NOT default to 0.9+):
-- 0.95-1.0: rock-solid. 0.80-0.94: strong. 0.60-0.79: moderate. \
-0.40-0.59: weak. Below 0.40: very uncertain.
-Overall confidence reflects the weakest link.
-→ Output: "verdict", "confidence" (0.0-1.0), "reasoning" (public-facing, \
-never reference sub-claim numbers)
-
-OUTPUT QUALITY: Re-read before returning. Fix typos. Correct grammar. \
-Shown directly to users.
-
-Return a JSON object with ALL rubric fields:
+Return a JSON object with ALL 6 top-level fields:
 {{
-  "thesis_restatement": "one sentence: what is the speaker arguing?",
+  "thesis_restatement": "One sentence restating the speaker's core argument",
   "subclaim_weights": [
-    {{"subclaim_index": 1, "role": "core_assertion|supporting_detail|\
-background_context", "brief_reason": "why this classification"}}
+    {{
+      "subclaim_index": 1,
+      "role": "core_assertion",
+      "brief_reason": "This is the central factual claim"
+    }},
+    {{
+      "subclaim_index": 2,
+      "role": "supporting_detail",
+      "brief_reason": "Secondary example supporting the core"
+    }}
   ],
   "thesis_survives": true,
-  "verdict": "true|mostly_true|mixed|mostly_false|false|unverifiable",
-  "confidence": 0.0,
-  "reasoning": "public-facing explanation referencing evidence sources"
+  "verdict": "mostly_true",
+  "confidence": 0.82,
+  "reasoning": "Public-facing explanation citing sources with [N] notation. Address both sides when evidence conflicts."
 }}
 
-Return ONLY the JSON object. No markdown, no explanation, no wrapping.\
+Your response must be this exact structure — a single JSON object with all 6 \
+top-level fields. Do NOT return just subclaim_weights or a nested sub-object. \
+No markdown, no explanation, no wrapping.\
 """
 
 SYNTHESIZE_USER = """\

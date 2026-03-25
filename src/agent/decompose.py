@@ -43,7 +43,6 @@ from src.prompts.verification import (
 from src.schemas.llm_outputs import (
     NormalizeOutput, DecomposeOutput, AtomicFact, SubclaimQualityCheck,
 )
-from src.prompts.linguistic_patterns import get_linguistic_patterns
 from src.tools.wikidata import get_ownership_chain, collect_all_connected_parties
 from src.schemas.interested_parties import InterestedPartiesDict
 from src.utils.logging import log, get_logger
@@ -509,12 +508,12 @@ async def decompose(claim_text: str, speaker: str | None = None,
                     "Normalization failed, using raw claim", claim=claim_text)
 
     # Step 2: Decompose the NORMALIZED claim
-    decompose_system_with_patterns = DECOMPOSE_SYSTEM.format(
-        current_date=today, claim_date_line=claim_date_line) + "\n\n" + get_linguistic_patterns()
+    decompose_system = DECOMPOSE_SYSTEM.format(
+        current_date=today, claim_date_line=claim_date_line)
 
     try:
         output = await invoke_llm(
-            system_prompt=decompose_system_with_patterns,
+            system_prompt=decompose_system,
             user_prompt=DECOMPOSE_USER.format(
                 claim_text=normalized, speaker_line=speaker_line),
             schema=DecomposeOutput,
@@ -557,7 +556,7 @@ async def decompose(claim_text: str, speaker: str | None = None,
                 )
                 try:
                     output = await invoke_llm(
-                        system_prompt=decompose_system_with_patterns,
+                        system_prompt=decompose_system,
                         user_prompt=retry_prompt,
                         schema=DecomposeOutput,
                         semantic_validator=validate_decompose,

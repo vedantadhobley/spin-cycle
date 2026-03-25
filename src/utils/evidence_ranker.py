@@ -247,6 +247,15 @@ def score_evidence(ev: dict) -> tuple[float, dict]:
     # Content richness (0-30)
     breakdown["content"] = _content_score(content)
 
+    # Tier bonus: TIER 1 sources (very-high factual) must rank above
+    # TIER 2 regardless of content richness. Without this, a TIER 2 source
+    # with rich fetched content outscores a TIER 1 with thin/blocked content.
+    tier = source_tier(url)
+    if tier == 1:
+        breakdown["tier_bonus"] = 40
+    elif tier == 2:
+        breakdown["tier_bonus"] = 15
+
     # Agent relevance: if the research agent listed this URL in its
     # RELEVANT SOURCES section, boost it. If the agent explicitly chose
     # NOT to list it (agent_relevant=False), penalize it so domain-quality

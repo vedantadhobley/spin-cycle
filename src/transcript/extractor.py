@@ -50,8 +50,7 @@ OVERLAP_SEGMENTS = 3       # context segments before/after each batch boundary
 class ExtractedClaim(BaseModel):
     claim_text: str = Field(..., description="Decontextualized claim — pronouns resolved, stands alone")
     original_quote: str = Field(..., description="Speaker's exact words")
-    speaker: str = Field(..., description="Speaker name from transcript")
-    claim_type: str = Field("other", description="quantitative|historical|causal|comparative|attribution|other")
+    speaker: str = Field(default="", description="Speaker name — propagated from segment level")
     checkable: bool = Field(..., description="Could independent data confirm or deny?")
     checkability_rationale: str = Field(default="", description="Why checkable or not (1 sentence)")
     is_restatement: bool = Field(default=False, description="True if speaker repeats a claim already extracted")
@@ -82,7 +81,6 @@ class TranscriptClaim:
     claim_text: str           # decontextualized — pronouns resolved
     original_quote: str       # speaker's exact words
     speaker: str
-    claim_type: str
     source_url: str           # transcript URL
 
 
@@ -406,7 +404,7 @@ async def extract_batch(
     # Validate segment coverage
     _validate_segment_coverage(output, target_segments)
 
-    # Flatten segments → claims, propagating segment_gist
+    # Flatten segments → claims, propagating segment-level fields
     all_claims: list[ExtractedClaim] = []
     segments_with_claims = 0
     segments_empty = 0
@@ -416,6 +414,7 @@ async def extract_batch(
         else:
             segments_empty += 1
         for claim in seg.claims:
+            claim.speaker = seg.speaker  # propagate from segment level
             claim._segment_gist = seg.segment_gist  # transient — used in serialization
         all_claims.extend(seg.claims)
 
@@ -479,7 +478,6 @@ def finalize_claims(
             claim_text=claim.claim_text,
             original_quote=claim.original_quote,
             speaker=claim.speaker,
-            claim_type=claim.claim_type,
             source_url=transcript.url,
         ))
 

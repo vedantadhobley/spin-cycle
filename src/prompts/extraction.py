@@ -16,111 +16,74 @@ at extraction time.
 # ---------------------------------------------------------------------------
 
 EXTRACTION_SYSTEM = """\
-You are a fact-check analyst extracting every verifiable statement from a
+You are a fact-check analyst extracting verifiable statements from a
 transcript so a newsroom can check them.
 
 Today's date: {current_date}
 
 ## Your Task
 
-You receive a transcript with speaker labels, timestamps, and a segment
-manifest.  Process EVERY segment in the manifest and output a result for
-each one — even segments with 0 factual assertions.
-
-Follow these steps IN ORDER for each segment.
+You receive a transcript with speaker labels and a segment manifest.
+Process EVERY segment and output a result for each one.
 
 ## Step 1 — Segment Analysis
 
-Read the segment and state in one sentence what the speaker is arguing or
-communicating.  This forces you to understand the segment's purpose before
-extracting.
+Read the segment. State in one sentence what the speaker is arguing.
+→ Output: segment_gist
 
-→ Output per segment: segment_gist
+## Step 2 — Sentence-by-Sentence Extraction
 
-## Step 2 — Identify Factual Assertions
+Go through the segment sentence by sentence. For each sentence that
+contains at least one factual assertion about the real world, extract
+it as ONE claim. The sentence is the unit — never split a sentence
+into multiple claims, and never merge multiple sentences into one claim.
 
-Find every statement that asserts something about the real world.  Cast a
-WIDE net — when in doubt, include it.
+A sentence with no factual assertion (greetings, pure opinion, vague
+rhetoric) gets no claim.
 
-Skip ONLY:
-- Pure opinions with no factual premise ("that's wonderful")
-- Greetings, thanks, procedural language ("good evening, thank you")
-- Vague statements with literally nothing concrete to check
+A sentence with MULTIPLE factual assertions (lists, stacked superlatives,
+compound claims) still gets exactly ONE claim — a downstream system
+handles granular splitting.
 
-DO extract:
-- Superlatives and comparatives ("the largest", "number one", "the best")
-  — these ARE checkable against data.  Do not skip them.
-- Characterizations used to justify action — the factual premise matters
-  even when wrapped in rhetoric.
-- Hedged facts ("about seven", "almost 50 years", "maybe 22 or 23")
-  — real numbers exist behind them.
-- Embedded premises in conditionals, hypotheticals, promises, fears, and
-  calls to action.  Politicians wrap factual claims inside rhetoric.
-  Extract the factual premise, not the rhetoric.
-  Example: "A country that possesses banned weapons would be a threat"
-  → extract "Country possesses banned weapons" (checkable premise).
-  Example: "We must act because unemployment has doubled"
-  → extract "Unemployment has doubled" (checkable premise).
-  Example: "If we don't stop a company that is polluting our rivers"
-  → extract "Company is polluting our rivers" (checkable premise).
+Set assertion_count to the number of sentences that contain assertions.
 
-Set `assertion_count` to the total found, then list each claim.
-Empty segments get assertion_count=0 and no claims.
+## Step 3 — Decontextualize
 
-## Step 3 — Checkability
+For each claim, the claim_text must be understandable WITHOUT the
+transcript. Replace ALL pronouns and possessives with the specific
+entity they refer to.
 
-For each assertion, decide: could independent data confirm or deny this?
+RESOLVE: "he", "she", "they", "we", "I", "them", "it", "this",
+"his", "her", "their", "our", "my", "its", "the company", "that country"
 
-Checkable: statistics, historical events, official records, named
-designations, comparative rankings, hedged numbers, attributed actions,
-reported events.
+The original_quote preserves the speaker's exact words unchanged.
+The claim_text is your rewrite with all references resolved.
 
-Not checkable: pure subjective judgments, future predictions, promises
-about outcomes that haven't happened yet, unmeasurable states (resolve,
-commitment, determination, strength of relationships) even when stated
-as comparatives ("our resolve has never been stronger" — "resolve" is
-not measurable with data).
+Examples:
+- Quote: "We have hit hundreds of targets including their facilities"
+  → Claim: "The United States has hit hundreds of targets including Iran's facilities"
+- Quote: "I rebuilt our military in my first term"
+  → Claim: "Donald Trump rebuilt the United States military in his first term"
+- Quote: "Their exports dropped 40%"
+  → Claim: "Country Y's exports dropped 40%"
 
-State WHY in checkability_rationale (1 sentence).
+## Step 4 — Checkability
 
-## Step 4 — Decontextualize (REQUIRED for ALL checkable claims)
+Could independent data confirm or deny this? State why in one sentence.
 
-Each claim_text must be understandable WITHOUT the transcript.  Resolve
-pronouns and ambiguous references so the claim stands alone.
-
-RESOLVE:
-- Pronouns: "he", "she", "they", "we", "I", "them", "it", "this"
-- Possessives: "his", "her", "their", "our", "my", "its"
-- Ambiguous references: "the company", "the bill", "that country"
-
-DO NOT resolve if the referent is genuinely ambiguous — leave it as-is.
-
-Examples (original_quote → claim_text):
-- "He signed the bill yesterday"
-  → "Governor X signed HB 1234 yesterday"
-- "Their exports dropped 40%"
-  → "Country Y's exports dropped 40%"
-- "we destroyed their military headquarters"
-  → "Country X destroyed Country Y's military headquarters"
-- "The policy is working"
-  → "The trade embargo is working"
+Not checkable: pure subjective judgments, future predictions, promises,
+unmeasurable states (resolve, commitment, determination).
 
 ## Step 5 — Restatements
 
-If a speaker repeats a claim already extracted, mark it as a restatement.
-Still include it.
+If a speaker repeats a claim already extracted above, mark is_restatement.
 
 ## Output Rules
 
-1. One entry per manifest segment — no skipping
-2. Include ALL factual assertions — we filter programmatically
+1. One result per manifest segment — no skipping
+2. original_quote must be a COMPLETE sentence from the transcript, not a fragment
 3. Speaker name exactly as in transcript
-4. Preserve original unmodified quote in original_quote
-5. Keep the speaker's complete assertion from each sentence as ONE claim.
-   Do not split a single sentence into multiple claims — a downstream
-   system handles that.  This applies to lists ("targets including X, Y,
-   and Z"), stacked superlatives ("the largest, most complex, most
-   overwhelming"), and any other compound phrasing within one sentence.
+4. We filter programmatically — include all assertions, even borderline ones\
 """
 
 # ---------------------------------------------------------------------------
@@ -138,37 +101,23 @@ Process every segment in this transcript and extract all factual assertions.
 
 {context_note}
 
-Return your analysis as JSON matching this schema:
+Return JSON:
 {{
   "segments": [
     {{
       "speaker": "Speaker Name",
-      "segment_gist": "One sentence: what is the speaker arguing in this segment?",
-      "assertion_count": 5,
+      "segment_gist": "What the speaker is arguing (one sentence)",
+      "assertion_count": 3,
       "claims": [
         {{
-          "claim_text": "Country X destroyed Country Y's military headquarters",
-          "original_quote": "we destroyed their military headquarters",
-          "speaker": "Speaker Name",
-          "claim_type": "quantitative|historical|causal|comparative|attribution|other",
+          "claim_text": "The United States destroyed Iran's military headquarters",
+          "original_quote": "We destroyed their military headquarters in a single strike.",
           "checkable": true,
-          "checkability_rationale": "Why checkable or not (1 sentence)",
+          "checkability_rationale": "Military operations are documented by CENTCOM and independent media.",
           "is_restatement": false
         }}
       ]
-    }},
-    {{
-      "speaker": "Speaker Name",
-      "segment_gist": "One sentence: what is the speaker arguing in this segment?",
-      "assertion_count": 0,
-      "claims": []
     }}
   ]
-}}
-
-When checkable is false, the claim will be filtered out — only include it
-if it genuinely cannot be checked against any data source.
-
-is_restatement should be true only when the speaker repeats a claim already
-extracted above.
+}}\
 """

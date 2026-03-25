@@ -288,6 +288,13 @@ class ExtractTranscriptWorkflow:
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
 
+            # Notify frontend that extraction is done and claims are ready
+            await workflow.execute_activity(
+                notify_frontend_refresh,
+                start_to_close_timeout=timedelta(seconds=10),
+                retry_policy=RetryPolicy(maximum_attempts=1),
+            )
+
             self._set_phase("verifying")
             transcript_date = transcript_data.get("date")
 

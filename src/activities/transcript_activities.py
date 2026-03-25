@@ -104,7 +104,7 @@ async def extract_transcript_batch(
             "claim_text": c.claim_text,
             "original_quote": c.original_quote,
             "speaker": c.speaker,
-            "claim_type": c.claim_type,
+            "claim_type": None,
             "worth_checking": c.worth_checking,
             "skip_reason": c.skip_reason,
             "checkable": c.checkable,
@@ -166,7 +166,6 @@ async def finalize_extraction(
                 claim_text=c["claim_text"],
                 original_quote=c["original_quote"],
                 speaker=c["speaker"],
-                claim_type=c["claim_type"],
                 worth_checking=c.get("worth_checking", True),
                 skip_reason=c.get("skip_reason"),
                 checkable=c.get("checkable", True),
@@ -198,7 +197,7 @@ async def finalize_extraction(
             "claim_text": c.claim_text,
             "original_quote": c.original_quote,
             "speaker": c.speaker,
-            "claim_type": c.claim_type,
+            "claim_type": None,
             "source_url": c.source_url,
         }
         for c in final_claims
