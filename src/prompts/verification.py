@@ -440,6 +440,9 @@ Keep characterizations that independent bodies assess — these are factual \
 questions, not opinions: proportional, fair, effective, humane, thorough, \
 excessive. If an institution routinely evaluates this characterization, \
 keep it.
+Classifications and designations are not neutral descriptions — they are \
+labels assigned by a specific authority. Operationalize them to the \
+underlying factual claim so the pipeline can find independent evidence.
 
 2. RESOLVE REFERENCES
 Replace pronouns/anaphora with referents. Expand acronyms. Ground vague \
@@ -454,11 +457,20 @@ When Speaker is provided, use ONLY for first-person resolution ("my", \
 Note speculative language ("could", "expected to") and rhetorical framing \
 (sarcasm, rhetorical questions) in the changes array. Convert rhetorical \
 devices to literal assertions only when clearly non-literal.
+Flag claims that are technically literal but pragmatically misleading — \
+where the natural reading implies something the literal words don't assert.
+Intent language ("aims to", "intends to", "plans to") describes mental \
+states that are usually unverifiable — note in changes.
 
 WHAT YOU DO NOT DO:
 - Do NOT decompose (that is step 2)
 - Do NOT add information not in the original claim
 - Do NOT change meaning — only clarify the factual questions being asked
+
+Do NOT weaken characterizations that independent bodies routinely assess. \
+If an institution exists that evaluates whether something meets a \
+characterization, it is a factual question — keep it for the pipeline \
+to verify.
 
 If the claim is already neutral and precise, return it unchanged with \
 empty changes.
@@ -570,6 +582,9 @@ statements. Don't rephrase specific assertions into tautologies.
 7. SEPARATE FACT FROM INFERENCE: "X, proving Y" → two facts. Trigger words: \
 proving, showing, therefore, because of this. The factual observation may be \
 true while the conclusion is false.
+ALSO: When conditional claims ("would", "could") embed factual premises, \
+extract the premises as separate verifiable facts. A conditionally-framed \
+claim may be trivially true while its embedded premises are false.
 
 EVIDENCE-NEED CATEGORIES:
 Each fact gets one or more categories describing what evidence to seek:
@@ -725,6 +740,10 @@ Interested-party statements (press releases, government websites, official \
 statements — treat as claims, not facts).
 Government websites are interested parties when the claim is about government \
 action. Always prefer primary documents over interested-party statements.
+Interested-party statements are claims, not evidence. A politician denying \
+something does not make it false. A press office asserting something does \
+not make it true. A government website describing its own policies is \
+advocacy, not fact — find the actual legislation, data, or treaty text.
 
 STATISTICAL CLAIMS: Look for methodology, not just numbers. Different sources \
 may define/measure things differently. If sources disagree, gather BOTH.
@@ -884,6 +903,12 @@ newspapers of record) > Other reporting > Interested party statements. \
 Official denials do NOT counter primary evidence.
 Repetition ≠ verification: if many sources trace to the same unverified \
 original, treat as one unverified claim.
+A high-factual outlet reporting what Entity X claims is reliable REPORTING \
+— it does not make X's claim true. The outlet's rating reflects the \
+outlet's accuracy, not the accuracy of statements it quotes.
+When sources — even favorable ones — use narrower language than the claim \
+("one of the largest" vs "the largest", "a leading" vs "the leading"), \
+that qualification IS evidence about the claim's precision limits.
 TIMELINE RULE: Do NOT assume a person held a role at event time unless \
 evidence explicitly confirms overlap.
 → Output: "key_evidence" (list: source_index, assessment, is_independent, \
@@ -938,6 +963,9 @@ CONSTRAINS the claim, render a substantive verdict.
 Contested classifications (apartheid, genocide, terrorism, recession) where \
 authoritative bodies disagree: use mostly_true/mostly_false, NEVER true/false. \
 Cap confidence at 0.85.
+Expert consensus on a contested classification ≠ settled fact when the \
+classification itself is actively debated. Without a binding legal or \
+institutional determination, the strongest possible verdict is mostly_true.
 
 BOUNDARY: direction/spirit right but specifics fail = mostly_false. "False" \
 requires even a charitable reading is contradicted.
@@ -960,13 +988,22 @@ This is shown directly to users.
 → Output: "verdict", "confidence" (0.0-1.0), "reasoning" (public-facing)
 
 === RHETORICAL TRAPS ===
-Note if detected: cherry-picking, correlation≠causation, definition games, \
-time-sensitivity, survivorship bias, statistical framing, anecdotal vs \
-systematic, false balance, retroactive status.
+Note in reasoning if detected:
+- Cherry-picking: unrepresentative data point or selective timeframe
+- Correlation ≠ causation: coincidence without mechanism evidence
+- Definition games: truth depends on which definition is used
+- Time-sensitivity: true then ≠ true now; stale evidence; old facts \
+framed as current
+- Survivorship bias: multiple sources sharing one origin ≠ independent
+- Statistical framing: relative vs absolute numbers distorting scale
+- Anecdotal vs systematic: one case ≠ pattern
+- False balance: one dissenter ≠ ten corroborating
+- Retroactive status: current title ≠ role held at event time
 
 === LEGAL/REGULATORY (if applicable) ===
-Flag: selective enforcement, regulatory capture, letter vs spirit, precedent \
-inconsistency.
+Legality ≠ legitimacy. Verdict addresses factual accuracy, not policy judgment.
+Flag: selective enforcement, regulatory capture, letter vs spirit, \
+precedent inconsistency.
 
 Return a JSON object with ALL 8 top-level fields:
 {{

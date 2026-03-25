@@ -110,21 +110,21 @@ Both views are backed by the same `transcript_claims` query joined through
 
 ### Extraction Workflow (Temporal: `ExtractTranscriptWorkflow`)
 
-```
-POST /transcripts {url, auto_verify}
-  │
-  ├─ fetch_transcript        — HTTP fetch + parse Rev.com HTML
-  │
-  ├─ store_transcript        ─┐ parallel: no LLM needed
-  │                            │
-  ├─ extract_batch (×N)      ─┘ parallel: semaphore=2 for LLM slots
-  │   └─ 30 segments per batch, 3 overlap segments at boundaries
-  │
-  ├─ finalize_extraction     — dedup + filter across batch boundaries
-  │
-  ├─ store_transcript_claims — persist to DB linked to transcript
-  │
-  └─ (if auto_verify) submit claims → verification queue
+```mermaid
+flowchart TD
+    POST["POST /transcripts\n{url, auto_verify}"] --> FETCH["fetch_transcript\nHTTP fetch + parse Rev.com HTML"]
+    FETCH --> PAR
+
+    subgraph PAR["Parallel (semaphore=2)"]
+        STORE_T["store_transcript\n(no LLM needed)"]
+        EXTRACT["extract_batch (×N)\n30 segments/batch, 3 overlap"]
+    end
+
+    PAR --> FINAL["finalize_extraction\ndedup + filter across batches"]
+    FINAL --> STORE_C["store_transcript_claims\npersist to DB"]
+    STORE_C --> VERIFY{"auto_verify?"}
+    VERIFY -->|Yes| QUEUE["Submit claims →\nverification queue"]
+    VERIFY -->|No| DONE["Done"]
 ```
 
 ### Concurrency Constraint

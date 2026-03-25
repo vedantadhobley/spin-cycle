@@ -6,8 +6,28 @@
 |-------|--------|--------|------|
 | Phase 1: Judge + Synthesize | Rubric prompts + schemas + validators | **COMPLETE** | 2026-03-10 |
 | Data persistence | Judge/synthesis rubric + decompose fields → DB | **COMPLETE** | 2026-03-24 |
+| Calibration restoration | Re-add judgment anchors removed in 68% reduction | **COMPLETE** | 2026-03-25 |
 | Phase 2: Decompose | Lighter-touch restructure | PLANNED | — |
 | Phase 3: Normalize + Research | Polish only | PLANNED | — |
+
+### Calibration Restoration (2026-03-25)
+
+The 68% prompt reduction (Phase 1) removed judgment calibration rules along
+with verbose scaffolding. Testing 7 Iran transcript claims exposed 4 issues
+traced to removed calibration rules. Restored ~1,760 chars of targeted
+behavioral anchors:
+
+- **RESEARCH**: Tier 3 anti-credulity anchor (interested-party statements
+  are claims, not evidence)
+- **JUDGE Step 2**: Outlet reliability ≠ claim reliability; qualified
+  language as precision evidence
+- **JUDGE Step 5**: Contested classifications binding-determination rule
+- **JUDGE Traps**: Expanded from names-only to 1-line detection patterns
+- **JUDGE Legal**: Legality ≠ legitimacy framing principle
+- **NORMALIZE**: Anti-weakening rule, pragmatic misleading flag, intent
+  unverifiability
+
+Total prompt size: ~29K → ~30.8K chars (within 32K target).
 
 ## Principle
 
@@ -110,6 +130,9 @@ RETURN FORMAT (new schema)                            ~400 chars
 **Estimated total: ~8,400 chars** (vs 26,400 current = 68% reduction)
 
 **Actual result: 8,533 chars** — within 2% of estimate.
+Post-calibration restoration (2026-03-25): **9,340 chars** (+807 chars
+from outlet reliability, qualified language, contested categories, expanded
+traps, legality ≠ legitimacy).
 
 ### What Gets Preserved (nothing lost)
 
@@ -303,6 +326,8 @@ RETURN FORMAT (new schema)                            ~300 chars
 **Estimated total: ~4,200 chars** (vs 8,300 = 49% reduction)
 
 **Actual result: 4,441 chars** — within 6% of estimate.
+Post-restructure (2026-03-25): **3,714 chars** — further compressed
+during the full prompt redesign (commit 4dbc53d).
 
 ### New Schema: SynthesizeOutput
 

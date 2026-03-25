@@ -61,9 +61,9 @@ The claim triggers `VerifyClaimWorkflow` — a flat pipeline of 7 activities:
 flowchart TD
     CREATE["create_claim\n(if needed)"] --> DEC
 
-    subgraph DEC["decompose_claim (2-4 LLM calls)"]
+    subgraph DEC["decompose_claim (2 LLM calls)"]
         N["Normalize\n(7 transformations)"] --> D["Decompose\n(flat facts + thesis)"]
-        D --> Q["Quality validate\n(semantic dupes, enumeration)"]
+        D --> Q["Programmatic dedup"]
         Q --> W["Wikidata expansion\n(ownership, media, family)"]
     end
 

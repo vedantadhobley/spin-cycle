@@ -2,7 +2,7 @@
 
 Every LLM invocation in the verification pipeline, with prompt locations,
 structured output schemas, forcing fields, validation, and scoring/ranking
-behavior. Updated 2026-03-25.
+behavior. Updated 2026-03-25 (calibration restoration + quality check removal).
 
 ---
 
@@ -13,7 +13,7 @@ flowchart TD
     T[Transcript] --> EXT["EXTRACT — 1 LLM call (extraction)"]
     EXT --> RAW[Raw Claim]
     RAW --> NORM["NORMALIZE — 1 LLM call"]
-    NORM --> DEC["DECOMPOSE — 1 LLM call + 1 conditional quality check\n+ Wikidata expansion (programmatic)"]
+    NORM --> DEC["DECOMPOSE — 1 LLM call\n+ programmatic dedup + Wikidata expansion"]
     DEC --> RES["RESEARCH — LangGraph ReAct agent (8-12 tool calls)\n+ programmatic seed pipeline\n+ relevance filter (programmatic)"]
     RES --> JDG["JUDGE — 1 LLM call per sub-claim\n+ evidence ranking (programmatic)"]
     JDG --> SYN["SYNTHESIZE — 1 LLM call (skipped if single fact)"]
@@ -101,7 +101,7 @@ Fields computed programmatically (not in LLM output):
 **When**: First step of verification for every claim.
 
 **Files**:
-- Prompts: `src/prompts/verification.py` — `NORMALIZE_SYSTEM` (L422), `NORMALIZE_USER` (L472)
+- Prompts: `src/prompts/verification.py` — `NORMALIZE_SYSTEM` (L422), `NORMALIZE_USER` (L484)
 - Invoker: `src/agent/decompose.py`
 - Schema: `src/schemas/llm_outputs.py` — `NormalizeOutput`
 - Validator: `src/llm/validators.py` — `validate_normalize()`
@@ -133,6 +133,12 @@ NormalizeOutput
 
 - Preserve original meaning — do NOT weaken characterizations that
   independent bodies assess (proportional, fair, effective)
+- Anti-weakening: if an institution evaluates a characterization,
+  keep it for the pipeline to verify
+- Classifications/designations are labels from an authority —
+  operationalize to the underlying factual claim
+- Flag pragmatically misleading claims (literal meaning ≠ natural reading)
+- Flag intent language ("aims to", "intends to") as usually unverifiable
 - Do NOT add information not in the original claim
 - `normalized_claim` ≤5000 chars (prevents elaboration)
 
@@ -143,12 +149,12 @@ NormalizeOutput
 **When**: After normalization, for every claim.
 
 **Files**:
-- Prompts: `src/prompts/verification.py` — `DECOMPOSE_SYSTEM` (L485), `DECOMPOSE_USER` (L679)
+- Prompts: `src/prompts/verification.py` — `DECOMPOSE_SYSTEM` (L497), `DECOMPOSE_USER` (L694)
 - Invoker: `src/agent/decompose.py:448`
 - Schema: `src/schemas/llm_outputs.py` — `DecomposeOutput`
 - Validator: `src/llm/validators.py` — `validate_decompose()`
 
-**Temperature**: 0.0 initial, 0.1 on retry (with quality-check feedback). **Retries**: 2 initial, 1 on retry.
+**Temperature**: 0.0. **Retries**: 2.
 
 **Placeholders**: `{current_date}`, `{claim_date_line}`, `{speaker_line}`, `{claim_text}`
 
@@ -206,11 +212,9 @@ DecomposeOutput
 ### Post-LLM pipeline (decompose.py)
 
 1. Programmatic dedup (trivial: punctuation, case, whitespace)
-2. Quality check (Call 4) — semantic dupes + group enumeration
-3. NER Pass 1: extract PERSON/ORG from claim text
-4. Add speaker as direct interested party
-5. Wikidata expansion: `get_ownership_chain()` → executives, family, media holdings, affiliated orgs
-6. If quality check finds issues → retry decompose with feedback (temp=0.1)
+2. NER Pass 1: extract PERSON/ORG from claim text
+3. Add speaker as direct interested party
+4. Wikidata expansion: `get_ownership_chain()` → executives, family, media holdings, affiliated orgs
 
 ### Speaker description pre-resolution
 
@@ -220,34 +224,20 @@ pre-resolved description fall back to looking up the speaker in Wikidata during 
 
 ---
 
-## Call 4: Sub-claim Quality Check (Conditional)
+## Post-Decompose Quality Check (Programmatic Only)
 
-**When**: After decompose, only if ≥2 facts. Triggers retry of Call 3 if issues found.
+**When**: After decompose, only if ≥2 facts.
 
 **Files**:
-- Prompts: `src/agent/decompose.py` — inline system/user prompts
-- Schema: `src/schemas/llm_outputs.py` — `SubclaimQualityCheck`
-
-**Temperature**: 0.3. **Retries**: 1.
-
-**Placeholders**: `{claim_text}`, `{numbered_list}`
+- Logic: `src/agent/decompose.py` — `_validate_subclaim_quality()` (L337)
 
 ### What it does
 
-Detects two structural issues LLM can't self-enforce:
-1. **Semantic duplicates**: logically equivalent facts
-2. **Group enumeration**: individual member checks instead of one group-level claim
-
-### Structured output
-
-```
-SubclaimQualityCheck
-  has_duplicates: bool
-  duplicate_pairs: list[list[int]]
-  has_enumeration: bool
-  enumerated_indices: list[int]
-  reasoning: str
-```
+Programmatic near-duplicate removal only (punctuation, case, whitespace
+differences). The LLM semantic duplicate check was removed due to a 100%
+false positive rate that collapsed valid decompositions (e.g., "greatest"
++ "most powerful" → just "most powerful"). Issues list is always empty —
+no LLM retry is triggered from this step.
 
 ---
 
@@ -256,7 +246,7 @@ SubclaimQualityCheck
 **When**: For each atomic fact from decompose.
 
 **Files**:
-- Prompts: `src/prompts/verification.py` — `RESEARCH_SYSTEM` (L695), `RESEARCH_USER` (L780)
+- Prompts: `src/prompts/verification.py` — `RESEARCH_SYSTEM` (L710), `RESEARCH_USER` (L799)
 - Agent builder: `src/agent/research.py` — `build_research_agent()` (L352)
 - Entry point: `src/agent/research.py` — `research_claim()` (L1395)
 
@@ -327,6 +317,10 @@ Stopping criteria:
 - For comparative claims, search each side independently
 - Source tiers: primary documents > independent reporting > government statements
 - **Government sources are interested parties** — not independent
+- **Interested-party statements are claims, not evidence**: a politician
+  denying something doesn't make it false; a press office asserting
+  something doesn't make it true; government websites describing own
+  policies are advocacy — find the actual legislation, data, or treaty text
 - Never cite: Reddit, forums, social media, YouTube, personal blogs, content farms, or third-party fact-check sites (Snopes, PolitiFact)
 - When reputable sources conflict, gather BOTH
 - Prefer recent sources for current claims
@@ -357,7 +351,7 @@ fails both checks when researching a 2026 Iran claim → dropped.
 **When**: For each sub-claim after research completes.
 
 **Files**:
-- Prompts: `src/prompts/verification.py` — `JUDGE_SYSTEM` (L829), `JUDGE_USER` (L1001)
+- Prompts: `src/prompts/verification.py` — `JUDGE_SYSTEM` (L848), `JUDGE_USER` (L1038)
 - Invoker: `src/agent/judge.py:159`
 - Schema: `src/schemas/llm_outputs.py` — `JudgeOutput`
 - Validator: `src/llm/validators.py` — `validate_judge()` (L133)
@@ -370,10 +364,15 @@ fails both checks when researching a 2026 Iran claim → dropped.
 
 5-step rubric evaluation:
 1. **Interpret claim** — charitable restatement, handle absolute language. If a key test is provided (from decompose), evaluation must address whether evidence satisfies or undermines that test.
-2. **Triage key evidence** — assess 3-5 sources for independence
+2. **Triage key evidence** — assess 3-5 sources for independence.
+   Outlet reliability ≠ claim reliability (PBS reporting "X says Y" is
+   reliable reporting, not verification of Y). Qualified language in
+   sources ("one of the largest" vs "the largest") is precision evidence.
 3. **Assess direction** — (independent evidence only) supports/contradicts/mixed
 4. **Assess precision** — claim specificity vs evidence completeness
-5. **Render verdict** — true|mostly_true|mixed|mostly_false|false|unverifiable
+5. **Render verdict** — true|mostly_true|mixed|mostly_false|false|unverifiable.
+   Contested classifications: expert consensus ≠ settled fact without
+   a binding legal/institutional determination (cap at mostly_true).
 
 ### Structured output
 
@@ -499,17 +498,26 @@ from their TLD (`GOV_TLD_SCORE=0`). They must earn tier placement via
 MBFC rating like any other source. An unrated `.gov` scores 6, the same
 as an unknown domain. Max 4 gov items per 20 evidence slots.
 
-### Rhetorical trap detection (9 patterns)
+### Rhetorical trap detection (9 patterns with detection heuristics)
 
-1. Cherry-picking — data point unrepresentative of trend
-2. Correlation ≠ causation — require mechanism evidence
-3. Definition games — truth depends on definition choice
-4. Time-sensitivity — true then but not now
-5. Survivorship bias — sources share common origin
-6. Statistical framing — relative vs absolute
+Each trap now includes a 1-line detection pattern in the prompt to trigger
+model recognition (not just the trap name):
+
+1. Cherry-picking — unrepresentative data point or selective timeframe
+2. Correlation ≠ causation — coincidence without mechanism evidence
+3. Definition games — truth depends on which definition is used
+4. Time-sensitivity — true then ≠ true now; stale evidence; old facts framed as current
+5. Survivorship bias — multiple sources sharing one origin ≠ independent
+6. Statistical framing — relative vs absolute numbers distorting scale
 7. Anecdotal vs systematic — one case ≠ pattern
-8. False balance — 1 dissenter ≠ 10 corroborating
-9. Retroactive status — current title ≠ role at event time
+8. False balance — one dissenter ≠ ten corroborating
+9. Retroactive status — current title ≠ role held at event time
+
+### Legal/regulatory section
+
+Framing principle added: legality ≠ legitimacy (verdict addresses factual
+accuracy, not policy judgment). Flags: selective enforcement, regulatory
+capture, letter vs spirit, precedent inconsistency.
 
 ### Semantic validation (validators.py)
 
@@ -536,7 +544,7 @@ as an unknown domain. Max 4 gov items per 20 evidence slots.
 **When**: Only if decompose produced >1 fact. Skipped for single-fact claims.
 
 **Files**:
-- Prompts: `src/prompts/verification.py` — `SYNTHESIZE_SYSTEM` (L1022), `SYNTHESIZE_USER` (L1118)
+- Prompts: `src/prompts/verification.py` — `SYNTHESIZE_SYSTEM` (L1059), `SYNTHESIZE_USER` (L1155)
 - Invoker: `src/agent/synthesize.py:20`
 - Schema: `src/schemas/llm_outputs.py` — `SynthesizeOutput`
 - Validator: `src/llm/validators.py` — `validate_synthesize()` (L182)
@@ -600,7 +608,7 @@ Typically 10-20 unique items after deduplication across sub-claims.
 | 1 | Extract | EXTRACTION_SYSTEM + _USER | 0→0.3 | ExtractionOutput | validate_extraction |
 | 2 | Normalize | NORMALIZE_SYSTEM + _USER | 0 | NormalizeOutput | validate_normalize |
 | 3 | Decompose | DECOMPOSE_SYSTEM + _USER | 0→0.1 | DecomposeOutput | validate_decompose |
-| 4 | Quality Check | inline system + user | 0.3 | SubclaimQualityCheck | — |
+| — | Quality Check | (programmatic only — no LLM call) | — | — | — |
 | — | Research | RESEARCH_SYSTEM + _USER | 0 | (none — agent) | — |
 | 5 | Judge | JUDGE_SYSTEM + _USER | 0 | JudgeOutput | validate_judge |
 | 6 | Synthesize | SYNTHESIZE_SYSTEM + _USER | 0 | SynthesizeOutput | validate_synthesize |
