@@ -286,26 +286,27 @@ def _validate_extraction_consistency(output: ExtractionOutput) -> None:
 # ---------------------------------------------------------------------------
 
 def _deduplicate_claims(claims: list[ExtractedClaim]) -> list[ExtractedClaim]:
-    """Remove duplicate claims.
+    """Remove duplicate claims across batch boundaries.
 
-    Two claims are duplicates if they share the same speaker and their
-    original quotes overlap significantly (>60% word overlap).
+    Duplicates arise from the 3-segment overlap between batches. Two claims
+    are duplicates if they share the same speaker and their decontextualized
+    claim text overlaps >85% by word set.
     """
     unique: list[ExtractedClaim] = []
 
     for claim in claims:
-        claim_words = set(claim.original_quote.lower().split())
+        claim_words = set(claim.claim_text.lower().split())
         is_dup = False
 
         for existing in unique:
             if claim.speaker != existing.speaker:
                 continue
-            existing_words = set(existing.original_quote.lower().split())
+            existing_words = set(existing.claim_text.lower().split())
             if not claim_words or not existing_words:
                 continue
             overlap = len(claim_words & existing_words)
             smaller = min(len(claim_words), len(existing_words))
-            if smaller > 0 and overlap / smaller > 0.6:
+            if smaller > 0 and overlap / smaller > 0.85:
                 is_dup = True
                 break
 
