@@ -287,7 +287,15 @@ class EvidenceAssessment(BaseModel):
                 "irrelevant": "neutral",
                 "n/a": "neutral",
             }
-            return mapping.get(v, v)
+            if v in mapping:
+                return mapping[v]
+            # Thinking mode invents compound values like
+            # "supports_attacks_but_not_chants" — any qualified assessment
+            # is inherently mixed (if it were clean, no qualifier needed)
+            valid = {"supports", "contradicts", "mixed", "neutral"}
+            if v not in valid:
+                return "mixed"
+            return v
         return v
 
 
