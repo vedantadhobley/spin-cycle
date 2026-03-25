@@ -168,11 +168,16 @@ async def invoke_llm(
             
             return validated
             
-        except Exception as e:
+        except BaseException as e:
             last_error = str(e)
             log.error(logger, MODULE, "invoke_error",
                      f"LLM invocation error for {activity_name}",
-                     attempt=attempt + 1, error=str(e))
+                     attempt=attempt + 1, error=str(e),
+                     error_type=type(e).__name__)
+            # CancelledError = Temporal killed the activity (timeout, workflow cancel)
+            # Re-raise BaseException subclasses that shouldn't be retried
+            if not isinstance(e, Exception):
+                raise
             if attempt < max_retries:
                 await asyncio.sleep(1)  # Brief pause before retry
     

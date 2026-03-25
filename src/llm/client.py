@@ -42,8 +42,8 @@ def get_llm(
             and can easily consume 10-15K before the actual output.
         thinking: Enable thinking/reasoning mode. The model gets an
             internal scratchpad before producing structured output.
-            Slower (~25-45s overhead) but significantly better at
-            cross-referencing evidence and catching contradictions.
+            Significantly slower (5-10 min per call vs 1-3 min) but
+            better at cross-referencing evidence and catching contradictions.
             Sets Qwen-recommended sampling: temp=0.6, top_p=0.95,
             presence_penalty=1.5, top_k=20.
     """

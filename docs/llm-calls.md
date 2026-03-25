@@ -2,7 +2,7 @@
 
 Every LLM invocation in the verification pipeline, with prompt locations,
 structured output schemas, forcing fields, validation, and scoring/ranking
-behavior. Updated 2026-03-25 (thinking mode, relay detection, Wikidata aliases, designation loophole, 6 judge checks).
+behavior. Updated 2026-03-25 (calibration rules restoration, relay detection, Wikidata aliases, designation loophole, 6 judge checks, thinking mode tested and reverted).
 
 ---
 
@@ -27,7 +27,7 @@ flowchart TD
 via llama.cpp ROCm on AMD Strix Halo (125GB unified memory).
 Server: `--parallel 2 --ctx-size 131072` (2 slots x 65K context each, ~3 GB KV cache thanks to hybrid architecture: 2 KV heads, 12 attention layers of 48 total — rest are recurrent/SSM). Embedding model (3103) disabled via Docker profiles.
 
-**Thinking mode**: Judge and synthesize use thinking mode (`enable_thinking=True`, temp=0.6, top_p=0.95, presence_penalty=1.5, top_k=20, max_tokens=32768). Adds ~25-45s per call but significantly improves evidence reading and cross-referencing. All other steps use instruct mode (`enable_thinking=False`, temp=0.0, max_tokens=8192).
+**All steps use instruct mode** (`enable_thinking=False`, temp=0.0, max_tokens=8192-16384). Thinking mode was tested for judge/synthesize and reverted due to 5-10x latency, schema validation failures, and silent activity crashes — the prompt's calibration rules achieve the same reasoning quality. See ARCHITECTURE.md § Thinking Mode Experiment.
 
 ---
 
@@ -361,7 +361,7 @@ fails both checks when researching a 2026 Iran claim → dropped.
 - Schema: `src/schemas/llm_outputs.py` — `JudgeOutput`
 - Validator: `src/llm/validators.py` — `validate_judge()` (L133)
 
-**Mode**: Thinking (`enable_thinking=True`, temp=0.6, top_p=0.95, presence_penalty=1.5, top_k=20, max_tokens=32768). **Retries**: 2. **Activity timeout**: 600s.
+**Mode**: Instruct (`enable_thinking=False`, temp=0, max_tokens=16384). **Retries**: 2. **Activity timeout**: 300s.
 
 **Placeholders**: `{current_date}`, `{claim_date_line}`, `{speaker_line}`, `{transcript_context}`, `{claim_text}`, `{sub_claim}`, `{verification_line}`, `{key_test_line}`, `{evidence_text}`
 
@@ -563,7 +563,7 @@ capture, letter vs spirit, precedent inconsistency.
 - Schema: `src/schemas/llm_outputs.py` — `SynthesizeOutput`
 - Validator: `src/llm/validators.py` — `validate_synthesize()` (L182)
 
-**Mode**: Thinking (`enable_thinking=True`, temp=0.6, top_p=0.95, presence_penalty=1.5, top_k=20, max_tokens=32768). **Retries**: 2. **Activity timeout**: 600s.
+**Mode**: Instruct (`enable_thinking=False`, temp=0, max_tokens=16384). **Retries**: 2. **Activity timeout**: 300s.
 
 **Placeholders**: `{current_date}`, `{claim_date_line}`, `{transcript_context}`, `{synthesis_framing}`, `{sub_verdicts_text}`, `{evidence_digest}`
 
@@ -627,7 +627,7 @@ Typically 10-20 unique items after deduplication across sub-claims.
 | 3 | Decompose | DECOMPOSE_SYSTEM + _USER | instruct (0→0.1) | DecomposeOutput | validate_decompose |
 | — | Quality Check | (programmatic only — no LLM call) | — | — | — |
 | — | Research | RESEARCH_SYSTEM + _USER | instruct (0) | (none — agent) | — |
-| 5 | Judge | JUDGE_SYSTEM + _USER | thinking (0.6) | JudgeOutput | validate_judge |
-| 6 | Synthesize | SYNTHESIZE_SYSTEM + _USER | thinking (0.6) | SynthesizeOutput | validate_synthesize |
+| 5 | Judge | JUDGE_SYSTEM + _USER | instruct (0) | JudgeOutput | validate_judge |
+| 6 | Synthesize | SYNTHESIZE_SYSTEM + _USER | instruct (0) | SynthesizeOutput | validate_synthesize |
 
 All prompts live in `src/prompts/verification.py` (verification pipeline) and `src/prompts/extraction.py` (transcript extraction).

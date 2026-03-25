@@ -75,7 +75,7 @@ Temporal is the **scheduler and reliability layer**. It handles:
 
 - **Durable execution**: if a container crashes mid-workflow, Temporal replays from the last completed activity
 - **Retries**: each activity has a `RetryPolicy` (max 3 attempts). If the LLM times out, Temporal retries just that activity
-- **Timeouts**: activities have `start_to_close_timeout` (30-600s). Judge/synthesize use 600s for thinking mode. Agent loops that run forever get killed
+- **Timeouts**: activities have `start_to_close_timeout` (15-420s). Research gets 420s (agent loops); judge/synthesize get 300s. Loops that run forever get killed
 - **Scheduling**: extraction workflows will run on a Temporal cron schedule (every 15 min)
 - **Visibility**: Temporal UI shows every workflow, its state, its history. Debug anything
 
@@ -127,18 +127,16 @@ A claim enters the system (via API or extraction) and is processed as a **flat p
 
 All steps use the same **Qwen3.5-122B-A10B** (MoE, 10B active) instance on the LLM server, running on **ROCm** for AMD GPU acceleration. Quantized to Q4_K_M (~76.5GB).
 
-Thinking mode is toggled per-request via `chat_template_kwargs`. Judge and synthesize use thinking mode for deeper evidence analysis; other steps stay in instruct mode:
+All steps use **instruct mode** (`enable_thinking=False`). Thinking mode was tested for judge and synthesize but reverted — see [Thinking Mode Experiment](#thinking-mode-experiment) below for details.
 
 | Step | Mode | Why |
 |------|------|-----|
-| decompose_claim | `enable_thinking=False` | Structured JSON output, no reasoning needed |
-| research_subclaim | `enable_thinking=False` | ReAct tool-routing — picking search queries. Thinking wastes ~25-45s/iteration |
-| judge_subclaim | `enable_thinking=True` | Thinking mode significantly improves evidence reading and cross-referencing. Adds ~25-45s per call but produces better verdicts |
-| synthesize_verdict | `enable_thinking=True` | Thinking mode improves thesis evaluation and subclaim weighting. Adds ~25-45s per call |
+| decompose_claim | instruct (temp=0) | Structured JSON output, no reasoning needed |
+| research_subclaim | instruct (temp=0) | ReAct tool-routing — picking search queries |
+| judge_subclaim | instruct (temp=0) | Structured rubric evaluation. Calibration rules in the prompt guide reasoning |
+| synthesize_verdict | instruct (temp=0) | Thesis evaluation and subclaim weighting |
 
-**Thinking mode parameters** (judge + synthesize): temp=0.6, top_p=0.95, presence_penalty=1.5, top_k=20, max_tokens=32768. The model produces `<think>...</think>` blocks that are stripped before parsing.
-
-**Why instruct mode for decompose/research:** Structured JSON extraction and ReAct tool-routing don't benefit from extended reasoning. Thinking mode wastes ~25-45s per iteration generating internal monologue just to produce short tool calls or JSON output.
+**Why instruct over thinking:** Thinking mode (Qwen3.5's `enable_thinking=True`) was tested but produced worse outcomes overall — 5-10 min per call (vs 1-2 min instruct), schema validation failures from creative enum values, and silent activity crashes. The prompt's calibration rules (outlet-vs-claim reliability, contested classifications, rhetorical trap detection patterns) achieve the same reasoning quality improvements at zero latency cost. See [Thinking Mode Experiment](#thinking-mode-experiment).
 
 ### Step 1: decompose_claim (normalize → flat facts + thesis)
 
@@ -277,7 +275,7 @@ This is where the LangGraph ReAct agent runs. For each **atomic fact**:
 
 **Streaming evidence collection:** The agent uses `astream()` with `stream_mode="updates"` instead of `ainvoke()`. Messages are collected incrementally as the agent works. If the agent hits its step limit (`GraphRecursionError`) or times out, we keep ALL evidence gathered up to that point instead of losing everything. This replaced a direct `ainvoke()` call that would return nothing on interruption.
 
-The research agent uses **thinking=off** (`enable_thinking=False`). The ReAct loop is pure tool-routing — picking search queries and deciding when to stop. Thinking mode wastes ~25-45s per iteration generating `<think>` blocks that nobody reads, just to produce an 8-token tool call. With thinking off, the same search queries are produced in ~3s per iteration.
+The research agent uses **thinking=off** (`enable_thinking=False`). The ReAct loop is pure tool-routing — picking search queries and deciding when to stop. Thinking mode wastes tokens per iteration generating `<think>` blocks that nobody reads, just to produce an 8-token tool call. With thinking off, the same search queries are produced in ~3s per iteration.
 
 **Tools available to the agent (dynamically loaded based on API keys):**
 - `serper_search` — Google search via Serper API (primary). Requires `SERPER_API_KEY`.
@@ -319,7 +317,7 @@ After the agent finishes, we extract evidence from the conversation:
 **Activity wrapper:** `src/activities/verify_activities.py`
 **Prompt:** `src/prompts/verification.py` → `JUDGE_SYSTEM` / `JUDGE_USER`
 
-The LLM evaluates evidence for a single sub-claim. This is NOT agentic — it's a single LLM call with structured output. Uses **thinking mode** (`enable_thinking=True`) — the extended reasoning significantly improves evidence reading and cross-referencing, adding ~25-45s per call.
+The LLM evaluates evidence for a single sub-claim. This is NOT agentic — it's a single LLM call with structured output. Uses **instruct mode** — the prompt's calibration rules (outlet-vs-claim reliability, qualified language detection, contested classification rules, rhetorical trap patterns) guide reasoning without the latency overhead of thinking mode. Calls typically take 1-2 minutes.
 
 The critical constraint: **"Do NOT use your own knowledge."** The LLM must reason only from the evidence provided. This is what makes verdicts trustworthy — they're grounded in real, citable sources.
 
@@ -482,7 +480,7 @@ flowchart TD
 
 Key properties:
 - **Flat, not recursive** — one decompose call produces flat facts + thesis. Follows SAFE/FActScore.
-- **Separate research + judge phases** — research all facts first, then judge all. Research uses thinking=off; judge uses thinking mode. Separated to prevent the longer judge calls (structured rubric evaluation + thinking) from starving faster research agents.
+- **Separate research + judge phases** — research all facts first, then judge all. Separated so the longer judge calls (structured rubric evaluation) don't starve faster research agents.
 - **Sliding window concurrency** — semaphore-based, not batch-based. As one task finishes, the next starts immediately.
 - **MAX_FACTS = 10** — caps decomposition output to prevent runaway processing.
 - **MAX_CONCURRENT = 2** — matched to LLM server `--parallel 2`. Each agent gets a dedicated inference slot.
@@ -957,15 +955,14 @@ All models use SQLAlchemy 2.0 declarative base (`src/db/models.py`):
 
 ### Models
 
-One unified model running via llama.cpp (`--parallel 2 --ctx-size 131072`), with thinking toggled per-request:
+One unified model running via llama.cpp (`--parallel 2 --ctx-size 131072`), all steps in instruct mode:
 
 | Port | Model | Mode | Used By |
 |------|-------|------|--------|
-| `:3101` | Qwen3.5-122B-A10B | `enable_thinking=True` | judge, synthesize (thinking mode) |
-| `:3101` | Qwen3.5-122B-A10B | `enable_thinking=False` | decompose, research, normalize, extraction (instruct mode) |
+| `:3101` | Qwen3.5-122B-A10B | `enable_thinking=False` | all pipeline steps (instruct mode) |
 | `:3103` | Qwen3-Embedding-8B | — | disabled via Docker profiles (not currently used) |
 
-122B MoE, 10B active params per token, Q4_K_M quantization (~76.5GB). 2 slots x 65K context each. The model's hybrid architecture (2 KV heads, 12 attention layers of 48 total — rest are recurrent/SSM) makes KV cache very cheap (~3 GB for both slots). Thinking mode is toggled via `chat_template_kwargs` in the request body. When thinking is enabled, the model produces `<think>...</think>` blocks that are stripped before parsing.
+122B MoE, 10B active params per token, Q4_K_M quantization (~76.5GB). 2 slots x 65K context each. The model's hybrid architecture (2 KV heads, 12 attention layers of 48 total — rest are recurrent/SSM) makes KV cache very cheap (~3 GB for both slots). Thinking mode can be toggled via `chat_template_kwargs` in the request body but is currently disabled for all steps — see [Thinking Mode Experiment](#thinking-mode-experiment).
 
 ### Connection Path
 
@@ -997,10 +994,6 @@ def get_llm(temperature=0):            # temperature=0 for deterministic fact-ch
         api_key="not-needed",
         extra_body={"chat_template_kwargs": {"enable_thinking": False}},
     )
-
-# Thinking mode override for judge + synthesize:
-# temperature=0.6, top_p=0.95, presence_penalty=1.5, top_k=20,
-# max_tokens=32768, enable_thinking=True
 ```
 
 Pipeline steps (decompose, judge, synthesize) call `invoke_llm()` with Pydantic schemas from `src/schemas/llm_outputs.py`. The research agent calls `get_llm()` directly (LangGraph manages the conversation loop).
@@ -1272,7 +1265,7 @@ Config: `~/workspace/monitor/promtail/promtail.yml`
 | `store_result` | **Done** | Writes full result tree to Postgres: decompose rubric on claim, categories/seeds on sub-claims, judge rubric, synthesis rubric on verdict, interested parties |
 | Source quality filtering | **Done** | Domain blocklist (~117 domains) filters all search results + page fetches |
 | Prompts | **Done** | 5 prompt pairs (NORMALIZE, DECOMPOSE, RESEARCH, JUDGE, SYNTHESIZE) in `src/prompts/verification.py` |
-| LLM connectivity | **Done** | Unified Qwen3.5 via `LLAMA_URL` — thinking mode enabled for judge/synthesize, instruct mode for decompose/research/normalize/extraction |
+| LLM connectivity | **Done** | Unified Qwen3.5 via `LLAMA_URL` — all steps use instruct mode. Thinking mode tested and reverted (see below) |
 | Logging | **Done** | Structured JSON logging via `src/utils/logging.py`, Promtail → Loki → Grafana |
 | Tests | **Done** | Health endpoint, schema validation |
 
@@ -1289,6 +1282,44 @@ See [ROADMAP.md](ROADMAP.md) for the full prioritised improvement plan. Key next
 | Alembic migrations | **Planned** | Unblocks future schema changes. Currently using `_migrate()` with column-existence checks |
 | Calibration test suite | **Planned** | 100+ known claims, measure accuracy and confidence calibration |
 | LangFuse integration | **Planned** | Self-hosted LLM observability |
+
+---
+
+## Thinking Mode Experiment
+
+Qwen3.5-122B-A10B supports a thinking/reasoning mode (`enable_thinking=True`) where the model generates internal `<think>...</think>` blocks before producing output. This was tested on judge and synthesize steps (2026-03-25) and reverted the same day.
+
+### What We Tried
+
+Enabled thinking mode for judge and synthesize with Qwen-recommended parameters: temp=0.6, top_p=0.95, presence_penalty=1.5, top_k=20, max_tokens=32768. Activity timeouts bumped from 300s to 900s.
+
+### What Went Well
+
+- **"State sponsor of terror" claim**: Thinking mode correctly identified the circularity in using a US designation to verify a claim about US policy. Verdict moved from `true @ 0.92` (instruct) to `mostly_true @ 0.85` (thinking) — the correct direction.
+- The model articulated deeper reasoning about evidence independence in its thinking blocks.
+
+### What Went Wrong
+
+1. **5-10x latency**: Judge calls took 400-600s with thinking vs 60-130s without. A single sub-claim could occupy an LLM slot for 10 minutes. With 2 parallel slots and claims having 3-5 sub-claims each, a single claim verification could take 30+ minutes.
+
+2. **Schema validation failures**: Thinking mode made the model too creative with structured output enum fields. Instead of `"supports"` it would output `"supports_attacks_but_not_chants"` — a compound value that failed Pydantic validation. Required adding a fallback validator to coerce unknown values to `"mixed"`.
+
+3. **Silent activity crashes**: Activities would die mid-LLM-call with no error logged. Root cause: `asyncio.CancelledError` (a `BaseException` in Python 3.9+) bypassed the `except Exception` handler in the LLM invoker. The cancellation came from Temporal activity timeouts — even 900s wasn't always enough.
+
+4. **Inconsistent improvement**: On the "attacking the US while chanting" claim, thinking mode produced `mostly_false @ 0.78` while instruct produced both `mostly_false @ 0.85` and `mostly_true @ 0.78` across different runs. No clear directional improvement.
+
+5. **Same verdict quality with calibration rules**: After restoring the judgment calibration rules (outlet-vs-claim reliability, contested classification binding rule, rhetorical trap detection patterns, anti-credulity anchors), instruct mode produced `mostly_true @ 0.85` on the same claims where thinking had produced `mostly_true @ 0.82`. The rules achieved the same reasoning quality at 1/5 the latency.
+
+### Resolution
+
+Thinking mode disabled for all steps. The calibration rules restored during the 68% prompt reduction fix (see [Calibration Restoration](#calibration-restoration)) provide the judgment quality improvements without the latency, schema compliance, and reliability costs. The `thinking` parameter remains in `get_llm()` for future experimentation.
+
+### Lessons Learned
+
+- **Prompt calibration rules > thinking mode** for structured output tasks. The model knows what cherry-picking is — it just needs to be told to check for it. A 1-line detection pattern in the rubric achieves what 10 minutes of thinking achieves.
+- **Thinking mode fights structured output.** The extended reasoning makes the model try to express nuance that enum fields can't capture. This is a fundamental tension — thinking wants free-form expression, structured output wants constrained values.
+- **`except Exception` doesn't catch `asyncio.CancelledError`** in Python 3.9+. Any code that wraps async calls needs `except BaseException` if it wants to log cancellations.
+- **A potential middle ground** (not yet tested): two sequential instruct calls — one for free-form reasoning, one for structured output using the reasoning as context. This could get the reasoning quality without the schema compliance issues, at ~2-3 min instead of 7-10 min.
 
 ---
 

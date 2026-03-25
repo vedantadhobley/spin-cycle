@@ -23,7 +23,7 @@ A working end-to-end claim verification pipeline with **flat fact extraction + t
 - **Source quality filtering** — domain blocklist (~70 domains) silently drops Reddit, Quora, social media, content farms from all search results
 - **"Gather Wide, Rank Tight" seed pipeline** — research gathers ~80-100 seed URLs → awaits MBFC ratings in parallel (20s timeout) → scores with `score_url()` → detects interested-party conflicts (affiliated media + publisher ownership) → applies CONFLICT_PENALTY (-15) → keeps top 30 ranked seeds → annotates with "Source tier:" and "Conflict:" labels. Agent sees curated, deterministic seed set.
 - **3-tier source hierarchy** in prompts — primary documents (charters, legislation, data) > independent reporting (Reuters, BBC) > interested-party statements (government websites, politician claims). Government sites explicitly classified as political actor communications, not neutral sources
-- **Thinking mode for judge + synthesize** — `enable_thinking=True` with temp=0.6, max_tokens=32768. Adds ~25-45s per call but significantly improves evidence reading and cross-referencing. Decompose/research/normalize/extraction stay in instruct mode
+- **Judgment calibration rules** — restored behavioral anchors removed in 68% prompt reduction: outlet-vs-claim reliability, contested classification binding rule, rhetorical trap detection patterns, anti-credulity anchors. These achieve the same reasoning quality as thinking mode at zero latency cost. Thinking mode was tested and reverted (see ARCHITECTURE.md § Thinking Mode Experiment)
 - **ROCm backend** for AMD GPU optimization (~38 tok/s sustained throughput)
 - **Importance-weighted synthesis** — verdicts weighed by significance, not count
 - **Date-aware prompts** — all prompts include `Today's date: {current_date}` so the LLM references current data
@@ -446,9 +446,9 @@ Two-phase sliding window concurrency with `asyncio.gather` + `asyncio.Semaphore`
 
 - Decompose produces atomic facts in one flat pass (with thesis extraction, categories, seed queries)
 - **Research phase**: All facts researched with sliding window (MAX_CONCURRENT=2). As one finishes, the next starts immediately — no batch waiting.
-- **Judge phase**: All facts judged with same sliding window (MAX_CONCURRENT=2). Runs AFTER all research completes to prevent slow judge calls (thinking=on) from starving faster research agents (thinking=off).
+- **Judge phase**: All facts judged with same sliding window (MAX_CONCURRENT=2). Runs AFTER all research completes to prevent judge calls (structured rubric evaluation) from starving faster research agents.
 - Single `synthesize_verdict` combines all judgments using the speaker's thesis as primary rubric
-- Temporal handles per-activity retries and timeouts (research: 420s, judge: 600s, synthesis: 600s — judge/synthesize bumped for thinking mode)
+- Temporal handles per-activity retries and timeouts (research: 420s, judge: 300s, synthesis: 300s)
 
 ### 4.3 — LangFuse Observability
 

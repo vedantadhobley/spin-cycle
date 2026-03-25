@@ -262,7 +262,7 @@ async def judge(
             max_retries=2,
             temperature=0,
             max_tokens=16384,
-            thinking=True,
+            thinking=False,
             activity_name="judge",
         )
 
