@@ -15,8 +15,8 @@ flowchart TD
     RAW --> NORM["NORMALIZE — 1 LLM call"]
     NORM --> DEC["DECOMPOSE — 1 LLM call\n+ programmatic dedup + Wikidata expansion + aliases"]
     DEC --> RES["RESEARCH — LangGraph ReAct agent (8-12 tool calls)\n+ programmatic seed pipeline\n+ relevance filter (programmatic)"]
-    RES --> JDG["JUDGE — 1 LLM call per sub-claim (thinking mode)\n+ evidence ranking + 6 annotations (programmatic)"]
-    JDG --> SYN["SYNTHESIZE — 1 LLM call (thinking mode, skipped if single fact)"]
+    RES --> JDG["JUDGE — 1 LLM call per sub-claim\n+ evidence ranking + 6 annotations (programmatic)"]
+    JDG --> SYN["SYNTHESIZE — 1 LLM call (skipped if single fact)"]
     SYN --> V[Final Verdict]
 
     style T fill:#e1f5fe

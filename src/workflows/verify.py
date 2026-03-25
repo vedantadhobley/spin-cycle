@@ -72,7 +72,7 @@ class VerifyClaimWorkflow:
     Flat pipeline with separate research and judge phases:
     1. Decompose claim into atomic facts (2 LLM calls + Wikidata expansion)
     2. Research all facts (Phase 1: seed search + rank, Phase 2: ReAct agent)
-    3. Judge all facts (thinking=on, evidence annotation + LLM verdict)
+    3. Judge all facts (evidence annotation + LLM verdict)
     4. Synthesize all sub-verdicts into final verdict
     5. Store result in database + start next queued claim
     """

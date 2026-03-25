@@ -94,7 +94,7 @@ async def main():
             notify_frontend_refresh,
         ],
         # Match MAX_CONCURRENT=2 in the workflow — 2 LLM inference slots
-        # with 65K context each for thinking mode on judge/synthesize.
+        # with 65K context each (2 slots x 65K = 131072 total ctx).
         max_concurrent_activities=2,
     )
 

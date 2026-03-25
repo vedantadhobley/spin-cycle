@@ -1002,7 +1002,7 @@ Pipeline steps (decompose, judge, synthesize) call `invoke_llm()` with Pydantic 
 
 All prompts live in `src/prompts/verification.py` with extensive inline documentation explaining:
 - What each prompt does and why it's designed that way
-- Why thinking mode is enabled for judge/synthesize and disabled for other steps
+- Calibration rules and judgment anchors for each pipeline step
 - Example inputs and outputs
 - Design constraints (e.g., "Do NOT use your own knowledge")
 

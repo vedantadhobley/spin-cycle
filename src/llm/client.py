@@ -4,8 +4,8 @@ This module provides configured LLM clients for the verification pipeline.
 All clients hit the same Qwen3.5-122B-A10B instance via llama.cpp's
 OpenAI-compatible API.
 
-  get_llm()                → Non-thinking mode (fast, structured output)
-  get_llm(thinking=True)   → Thinking mode (slower, deeper reasoning)
+  get_llm()                → Instruct mode (all production use)
+  get_llm(thinking=True)   → Thinking mode (tested and reverted, see ARCHITECTURE.md)
 """
 
 import os
