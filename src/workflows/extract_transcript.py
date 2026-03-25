@@ -173,30 +173,25 @@ class ExtractTranscriptWorkflow:
                         label,
                         self._title,
                     ],
-                    # Structured output for 30 segments can take 15+ min on local LLM
-                    start_to_close_timeout=timedelta(seconds=1200),
-                    retry_policy=RetryPolicy(maximum_attempts=2),
+                    # Structured output for 30-40 segments can take 15-25 min on local LLM
+                    start_to_close_timeout=timedelta(seconds=1800),
+                    retry_policy=RetryPolicy(maximum_attempts=3),
                 )
                 self._batches_done += 1
                 return result
 
-        # Store cleaned transcript in DB (runs in parallel with extraction)
-        store_task = asyncio.ensure_future(
-            workflow.execute_activity(
-                store_transcript,
-                args=[transcript_data],
-                start_to_close_timeout=timedelta(seconds=15),
-                retry_policy=RetryPolicy(maximum_attempts=3),
-            )
+        # Store transcript metadata + speaker enrichment BEFORE batches start
+        store_result = await workflow.execute_activity(
+            store_transcript,
+            args=[transcript_data],
+            start_to_close_timeout=timedelta(seconds=60),
+            retry_policy=RetryPolicy(maximum_attempts=3),
         )
 
         batch_results = await asyncio.gather(
             *[_run_batch(i, b) for i, b in enumerate(batches)],
             return_exceptions=True,
         )
-
-        # Await store (should be done long before batches finish)
-        store_result = await store_task
         self._transcript_id = store_result["transcript_id"]
 
         # Build speaker → description lookup from Wikidata-enriched speakers

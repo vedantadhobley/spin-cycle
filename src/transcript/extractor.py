@@ -38,8 +38,8 @@ logger = get_logger()
 # Configuration
 # ---------------------------------------------------------------------------
 
-BATCH_TARGET_WORDS = 3000  # target words per batch (output time scales with input words)
-BATCH_MAX_SEGMENTS = 40    # hard cap on segments per batch (structured output limit)
+BATCH_TARGET_WORDS = 1500  # target words per batch (output time scales with input words)
+BATCH_MAX_SEGMENTS = 20    # hard cap on segments per batch (structured output limit)
 OVERLAP_SEGMENTS = 3       # context segments before/after each batch boundary
 
 
@@ -348,7 +348,12 @@ async def _enrich_speakers(speakers: list[str]) -> list[dict]:
     from src.tools.wikidata import get_entity_description
 
     async def _lookup(name: str) -> dict:
-        if _ANONYMOUS_SPEAKER.match(name.strip()):
+        stripped = name.strip()
+        if _ANONYMOUS_SPEAKER.match(stripped):
+            return {"name": name, "description": None}
+        # Single-word names (Will, Phil, Andrew) are too ambiguous for
+        # Wikidata. Require at least a first + last name.
+        if len(stripped.split()) < 2:
             return {"name": name, "description": None}
         try:
             desc = await get_entity_description(name)

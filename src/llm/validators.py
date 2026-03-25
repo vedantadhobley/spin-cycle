@@ -230,12 +230,12 @@ def validate_extraction(output) -> tuple[bool, str]:
         for i, claim in enumerate(seg.claims):
             if not claim.claim_text or len(claim.claim_text.strip()) < 10:
                 return False, (
-                    f"Segment {seg.speaker} ({seg.timestamp}), "
+                    f"Segment {seg.speaker} ({seg.segment_gist}), "
                     f"claim {i+1}: claim_text is empty or too short (<10 chars)"
                 )
             if not claim.original_quote or len(claim.original_quote.strip()) < 5:
                 return False, (
-                    f"Segment {seg.speaker} ({seg.timestamp}), "
+                    f"Segment {seg.speaker} ({seg.segment_gist}), "
                     f"claim {i+1}: original_quote is empty or too short (<5 chars)"
                 )
 
