@@ -23,7 +23,7 @@ A working end-to-end claim verification pipeline with **flat fact extraction + t
 - **Source quality filtering** — domain blocklist (~70 domains) silently drops Reddit, Quora, social media, content farms from all search results
 - **"Gather Wide, Rank Tight" seed pipeline** — research gathers ~80-100 seed URLs → awaits MBFC ratings in parallel (20s timeout) → scores with `score_url()` → detects interested-party conflicts (affiliated media + publisher ownership) → applies CONFLICT_PENALTY (-15) → keeps top 30 ranked seeds → annotates with "Source tier:" and "Conflict:" labels. Agent sees curated, deterministic seed set.
 - **3-tier source hierarchy** in prompts — primary documents (charters, legislation, data) > independent reporting (Reuters, BBC) > interested-party statements (government websites, politician claims). Government sites explicitly classified as political actor communications, not neutral sources
-- **All pipeline steps use thinking=off** — llama.cpp lacks thinking token limits, so thinking mode generates excessive internal monologue (5000-9500 tokens) without improving output quality
+- **Thinking mode for judge + synthesize** — `enable_thinking=True` with temp=0.6, max_tokens=32768. Adds ~25-45s per call but significantly improves evidence reading and cross-referencing. Decompose/research/normalize/extraction stay in instruct mode
 - **ROCm backend** for AMD GPU optimization (~38 tok/s sustained throughput)
 - **Importance-weighted synthesis** — verdicts weighed by significance, not count
 - **Date-aware prompts** — all prompts include `Today's date: {current_date}` so the LLM references current data
@@ -242,7 +242,7 @@ The full `interested_parties` dict (all_parties, affiliated_media, wikidata_cont
 
 1. **Seed ranking** (research phase): `_rank_and_filter_seeds()` detects conflicts via `url_matches_media()` (affiliated media) and `check_publisher_ownership()` (MBFC ownership field). Conflicted sources get CONFLICT_PENALTY (-15) in quality ranking.
 2. **Agent prompt**: Seeds annotated with "Conflict: affiliated: X" or "Conflict: owned by: X". Agent is instructed to deprioritize conflicted sources.
-3. **Judge annotations**: 4 conflict-of-interest checks per evidence item (affiliated media, publisher ownership, claim subject quotes, bias distribution). Evidence from conflicted sources explicitly flagged as requiring independent corroboration.
+3. **Judge annotations**: 6 conflict-of-interest checks per evidence item (gov source, affiliated media, quoted interested party, publisher ownership, sub-source MBFC, authority relay). Evidence from conflicted sources explicitly flagged as requiring independent corroboration.
 4. **Judge prompt**: Publisher ownership treated as conflict of interest ("treat it like testimony from a business partner of the accused").
 
 ### 1.5.1 — Confidence-Weighted Synthesis
@@ -448,7 +448,7 @@ Two-phase sliding window concurrency with `asyncio.gather` + `asyncio.Semaphore`
 - **Research phase**: All facts researched with sliding window (MAX_CONCURRENT=2). As one finishes, the next starts immediately — no batch waiting.
 - **Judge phase**: All facts judged with same sliding window (MAX_CONCURRENT=2). Runs AFTER all research completes to prevent slow judge calls (thinking=on) from starving faster research agents (thinking=off).
 - Single `synthesize_verdict` combines all judgments using the speaker's thesis as primary rubric
-- Temporal handles per-activity retries and timeouts (research: 180s, judge: 300s, synthesis: 60s)
+- Temporal handles per-activity retries and timeouts (research: 420s, judge: 600s, synthesis: 600s — judge/synthesize bumped for thinking mode)
 
 ### 4.3 — LangFuse Observability
 

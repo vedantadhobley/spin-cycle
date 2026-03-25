@@ -63,8 +63,8 @@ flowchart TD
 
     subgraph DEC["decompose_claim (2 LLM calls)"]
         N["Normalize\n(7 transformations)"] --> D["Decompose\n(flat facts + thesis)"]
-        D --> Q["Programmatic dedup"]
-        Q --> W["Wikidata expansion\n(ownership, media, family)"]
+        D --> Q["Programmatic dedup\n(no LLM)"]
+        Q --> W["Wikidata expansion\n(ownership, media, family, aliases)"]
     end
 
     DEC --> R
@@ -321,7 +321,8 @@ spin-cycle/
 │   ├── utils/                      # Shared utilities
 │   │   ├── logging.py              # Structured logging (JSON for Loki, pretty for dev)
 │   │   ├── ner.py                  # SpaCy NER — 3-pass entity extraction (PERSON/ORG)
-│   │   ├── quote_detection.py      # Detect claim subject quotes in evidence text
+│   │   ├── quote_detection.py      # Proximity-window quote attribution detection
+│   │   ├── relay_detection.py      # Authority relay detection (SpaCy dep parsing)
 │   │   ├── text_cleanup.py         # Grammar/spell check for LLM output
 │   │   └── evidence_ranker.py      # Source + evidence quality scoring, seed ranking, judge capping
 │   │

@@ -7,6 +7,8 @@
 | Phase 1: Judge + Synthesize | Rubric prompts + schemas + validators | **COMPLETE** | 2026-03-10 |
 | Data persistence | Judge/synthesis rubric + decompose fields → DB | **COMPLETE** | 2026-03-24 |
 | Calibration restoration | Re-add judgment anchors removed in 68% reduction | **COMPLETE** | 2026-03-25 |
+| Thinking mode | Judge + synthesize use Qwen3.5 thinking mode (enable_thinking=True) | **COMPLETE** | 2026-03-25 |
+| Designation loophole | Judge Step 5 + Synthesize Step 4: interested-party designations ≠ independent confirmation | **COMPLETE** | 2026-03-25 |
 | Phase 2: Decompose | Lighter-touch restructure | PLANNED | — |
 | Phase 3: Normalize + Research | Polish only | PLANNED | — |
 

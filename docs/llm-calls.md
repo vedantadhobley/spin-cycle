@@ -2,7 +2,7 @@
 
 Every LLM invocation in the verification pipeline, with prompt locations,
 structured output schemas, forcing fields, validation, and scoring/ranking
-behavior. Updated 2026-03-25 (calibration restoration + quality check removal).
+behavior. Updated 2026-03-25 (thinking mode, relay detection, Wikidata aliases, designation loophole, 6 judge checks).
 
 ---
 
@@ -13,10 +13,10 @@ flowchart TD
     T[Transcript] --> EXT["EXTRACT — 1 LLM call (extraction)"]
     EXT --> RAW[Raw Claim]
     RAW --> NORM["NORMALIZE — 1 LLM call"]
-    NORM --> DEC["DECOMPOSE — 1 LLM call\n+ programmatic dedup + Wikidata expansion"]
+    NORM --> DEC["DECOMPOSE — 1 LLM call\n+ programmatic dedup + Wikidata expansion + aliases"]
     DEC --> RES["RESEARCH — LangGraph ReAct agent (8-12 tool calls)\n+ programmatic seed pipeline\n+ relevance filter (programmatic)"]
-    RES --> JDG["JUDGE — 1 LLM call per sub-claim\n+ evidence ranking (programmatic)"]
-    JDG --> SYN["SYNTHESIZE — 1 LLM call (skipped if single fact)"]
+    RES --> JDG["JUDGE — 1 LLM call per sub-claim (thinking mode)\n+ evidence ranking + 6 annotations (programmatic)"]
+    JDG --> SYN["SYNTHESIZE — 1 LLM call (thinking mode, skipped if single fact)"]
     SYN --> V[Final Verdict]
 
     style T fill:#e1f5fe
@@ -25,7 +25,9 @@ flowchart TD
 
 **Model**: Qwen3.5-122B-A10B (122B params, 10B active MoE, Q4_K_M)
 via llama.cpp ROCm on AMD Strix Halo (125GB unified memory).
-Thinking: disabled (`enable_thinking=False`). Max tokens: 8192 (default for all calls).
+Server: `--parallel 2 --ctx-size 131072` (2 slots x 65K context each, ~3 GB KV cache thanks to hybrid architecture: 2 KV heads, 12 attention layers of 48 total — rest are recurrent/SSM). Embedding model (3103) disabled via Docker profiles.
+
+**Thinking mode**: Judge and synthesize use thinking mode (`enable_thinking=True`, temp=0.6, top_p=0.95, presence_penalty=1.5, top_k=20, max_tokens=32768). Adds ~25-45s per call but significantly improves evidence reading and cross-referencing. All other steps use instruct mode (`enable_thinking=False`, temp=0.0, max_tokens=8192).
 
 ---
 
@@ -215,6 +217,7 @@ DecomposeOutput
 2. NER Pass 1: extract PERSON/ORG from claim text
 3. Add speaker as direct interested party
 4. Wikidata expansion: `get_ownership_chain()` → executives, family, media holdings, affiliated orgs
+5. Wikidata aliases: `get_entity_aliases()` fetches entity aliases (e.g., "Trump" for "Donald Trump"). Passed through pipeline as `party_aliases` in InterestedPartiesDict
 
 ### Speaker description pre-resolution
 
@@ -263,7 +266,8 @@ flowchart TD
         S2 --> S3["Enrich parties from MBFC\n(NER on ownership → Wikidata)"]
         S3 --> S4["Score + rank seeds\n(conflict penalties, top 30)"]
         S4 --> S5["Prefetch top seed pages\n(up to 10, TIER 1/2 first)"]
-        S5 --> S6["Build seed messages\n(tier + conflict annotations)"]
+        S5 --> S5b["Analyze relay in prefetch\n(SpaCy dep parsing)"]
+        S5b --> S6["Build seed messages\n(tier + conflict annotations)"]
     end
 
     subgraph Phase2["Phase 2 — LangGraph ReAct Agent"]
@@ -287,7 +291,8 @@ flowchart TD
 3. `_enrich_parties_from_mbfc()`: NER on MBFC ownership → Wikidata expansion
 4. `_rank_and_filter_seeds()`: `score_url()` each seed, detect interested-party conflicts (affiliated media + publisher ownership), apply CONFLICT_PENALTY (-15), sort, keep top 30. Each seed annotated with `_tier` (display label), `_source_tier` (int), and `_conflict_flags`.
 5. `_prefetch_seed_pages()`: Fetch full content from top seeds (up to 10, TIER 1/2 first via `_source_tier`)
-6. `_build_seed_messages()`: Package as synthetic AIMessage+ToolMessage pairs. Each seed annotated with `Source tier: {tier_label}` line and `Conflict: {flags}` line (if any) so the agent sees source quality inline.
+6. `_analyze_relay_in_prefetch()`: SpaCy dependency parsing on prefetched evidence to detect authority relays (evidence that derives from an interested party's own determination/designation/document). If >60% of prefetched evidence is relay-based, injects "SEARCH DIFFERENTLY" guidance into the agent prompt
+7. `_build_seed_messages()`: Package as synthetic AIMessage+ToolMessage pairs. Each seed annotated with `Source tier: {tier_label}` line and `Conflict: {flags}` line (if any) so the agent sees source quality inline.
 
 **Phase 2 — LangGraph ReAct agent** (~60-120s):
 Agent starts with seed results in history, spends budget on follow-up searches and fetches.
@@ -356,7 +361,7 @@ fails both checks when researching a 2026 Iran claim → dropped.
 - Schema: `src/schemas/llm_outputs.py` — `JudgeOutput`
 - Validator: `src/llm/validators.py` — `validate_judge()` (L133)
 
-**Temperature**: 0.0. **Retries**: 2.
+**Mode**: Thinking (`enable_thinking=True`, temp=0.6, top_p=0.95, presence_penalty=1.5, top_k=20, max_tokens=32768). **Retries**: 2. **Activity timeout**: 600s.
 
 **Placeholders**: `{current_date}`, `{claim_date_line}`, `{speaker_line}`, `{transcript_context}`, `{claim_text}`, `{sub_claim}`, `{verification_line}`, `{key_test_line}`, `{evidence_text}`
 
@@ -373,6 +378,9 @@ fails both checks when researching a 2026 Iran claim → dropped.
 5. **Render verdict** — true|mostly_true|mixed|mostly_false|false|unverifiable.
    Contested classifications: expert consensus ≠ settled fact without
    a binding legal/institutional determination (cap at mostly_true).
+   **Designation loophole**: when the "binding determination" comes from an
+   interested party, it IS the claim, not independent confirmation. Volume
+   of sources reporting a designation ≠ independent verification.
 
 ### Structured output
 
@@ -398,14 +406,20 @@ The `key_test` from decompose (what must be true for the overall claim to hold) 
 into the judge user prompt via `{key_test_line}`. This anchors subclaim evaluation to the
 overall claim's success criteria. Critical for single-fact claims that skip synthesis entirely.
 
-### Evidence annotation (judge.py, pre-LLM)
+### Evidence annotation (judge.py `_annotate_evidence()`, pre-LLM)
 
-Before the LLM call, each evidence item is annotated with:
-- **Check 0 — Government source warning**: All `.gov`/`.mil` domains get `⚠️ GOVERNMENT SOURCE: {domain} is a government website. Government sources CANNOT independently verify claims about government actions.`
+Before the LLM call, each evidence item is annotated with 6 checks:
+- **Check 0 — Government source warning**: All `.gov`/`.mil` domains get `⚠️ GOVERNMENT SOURCE`
+- **Check 1 — Affiliated media**: Source URL matches media owned by interested party → `⚠️ AFFILIATED MEDIA`
+- **Check 2 — Quoted interested party**: Proximity-window attribution matching detects when evidence quotes claim subjects → `⚠️ QUOTES INTERESTED PARTY`. Uses three-layer name matching: exact party name, programmatic last-name variants, Wikidata aliases (via `party_aliases` parameter)
+- **Check 3 — Publisher ownership**: Publisher owned by interested party (via MBFC ownership) → `⚠️ PUBLISHER OWNS/IS OWNED BY`
+- **Check 4 — Sub-source MBFC**: Evidence references another publication with poor factual rating → sub-source warning
+- **Check 5 — Authority relay**: SpaCy dependency parsing detects when evidence derives from an interested party's own determination/designation/document → `⚠️ AUTHORITY RELAY`. Three layers: authority-agent, document-attribution, reaffirmation
+
+Plus metadata:
 - **Source tag**: `[Center (-0.5) | Very High factual | UK Wire Service]` or
   `[USA Government | FBI]` (from MBFC data via `_format_source_tag()`)
 - **Tier label**: from `evidence_ranker.tier_label()` — e.g., "TIER 1 (very high factual)", "TIER 2 (high factual)", "government" (no tier for unrated gov)
-- **Conflict flags**: `⚠️ INTERESTED PARTY`, `⚠️ AFFILIATED MEDIA`, `⚠️ QUOTES INTERESTED PARTY`, `⚠️ PUBLISHER OWNS/IS OWNED BY`
 - **Quality summary**: tier distribution, bias spread, domain count
 
 ### Unrated source filtering
@@ -549,7 +563,7 @@ capture, letter vs spirit, precedent inconsistency.
 - Schema: `src/schemas/llm_outputs.py` — `SynthesizeOutput`
 - Validator: `src/llm/validators.py` — `validate_synthesize()` (L182)
 
-**Temperature**: 0.0. **Retries**: 2.
+**Mode**: Thinking (`enable_thinking=True`, temp=0.6, top_p=0.95, presence_penalty=1.5, top_k=20, max_tokens=32768). **Retries**: 2. **Activity timeout**: 600s.
 
 **Placeholders**: `{current_date}`, `{claim_date_line}`, `{transcript_context}`, `{synthesis_framing}`, `{sub_verdicts_text}`, `{evidence_digest}`
 
@@ -559,7 +573,10 @@ capture, letter vs spirit, precedent inconsistency.
 1. **Identify thesis** — what is speaker fundamentally arguing?
 2. **Classify each sub-claim** — core_assertion | supporting_detail | background_context
 3. **Does thesis survive?** — based on CORE assertion verdicts only
-4. **Render verdict** — weighted by importance, not count
+4. **Render verdict** — weighted by importance, not count.
+   **Designation loophole**: when the "binding determination" comes from an
+   interested party, it IS the claim, not independent confirmation. Volume
+   of sources reporting a designation ≠ independent verification.
 
 ### Structured output
 
@@ -603,14 +620,14 @@ Typically 10-20 unique items after deduplication across sub-claims.
 
 ## Summary Table
 
-| # | Stage | Prompt Constants | Temp | Schema | Validator |
+| # | Stage | Prompt Constants | Mode | Schema | Validator |
 |---|-------|-----------------|------|--------|-----------|
-| 1 | Extract | EXTRACTION_SYSTEM + _USER | 0→0.3 | ExtractionOutput | validate_extraction |
-| 2 | Normalize | NORMALIZE_SYSTEM + _USER | 0 | NormalizeOutput | validate_normalize |
-| 3 | Decompose | DECOMPOSE_SYSTEM + _USER | 0→0.1 | DecomposeOutput | validate_decompose |
+| 1 | Extract | EXTRACTION_SYSTEM + _USER | instruct (0→0.3) | ExtractionOutput | validate_extraction |
+| 2 | Normalize | NORMALIZE_SYSTEM + _USER | instruct (0) | NormalizeOutput | validate_normalize |
+| 3 | Decompose | DECOMPOSE_SYSTEM + _USER | instruct (0→0.1) | DecomposeOutput | validate_decompose |
 | — | Quality Check | (programmatic only — no LLM call) | — | — | — |
-| — | Research | RESEARCH_SYSTEM + _USER | 0 | (none — agent) | — |
-| 5 | Judge | JUDGE_SYSTEM + _USER | 0 | JudgeOutput | validate_judge |
-| 6 | Synthesize | SYNTHESIZE_SYSTEM + _USER | 0 | SynthesizeOutput | validate_synthesize |
+| — | Research | RESEARCH_SYSTEM + _USER | instruct (0) | (none — agent) | — |
+| 5 | Judge | JUDGE_SYSTEM + _USER | thinking (0.6) | JudgeOutput | validate_judge |
+| 6 | Synthesize | SYNTHESIZE_SYSTEM + _USER | thinking (0.6) | SynthesizeOutput | validate_synthesize |
 
 All prompts live in `src/prompts/verification.py` (verification pipeline) and `src/prompts/extraction.py` (transcript extraction).

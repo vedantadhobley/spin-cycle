@@ -75,7 +75,7 @@ Temporal is the **scheduler and reliability layer**. It handles:
 
 - **Durable execution**: if a container crashes mid-workflow, Temporal replays from the last completed activity
 - **Retries**: each activity has a `RetryPolicy` (max 3 attempts). If the LLM times out, Temporal retries just that activity
-- **Timeouts**: activities have `start_to_close_timeout` (30-360s). Agent loops that run forever get killed
+- **Timeouts**: activities have `start_to_close_timeout` (30-600s). Judge/synthesize use 600s for thinking mode. Agent loops that run forever get killed
 - **Scheduling**: extraction workflows will run on a Temporal cron schedule (every 15 min)
 - **Visibility**: Temporal UI shows every workflow, its state, its history. Debug anything
 
@@ -127,24 +127,25 @@ A claim enters the system (via API or extraction) and is processed as a **flat p
 
 All steps use the same **Qwen3.5-122B-A10B** (MoE, 10B active) instance on the LLM server, running on **ROCm** for AMD GPU acceleration. Quantized to Q4_K_M (~76.5GB).
 
-Thinking mode is toggled per-request via `chat_template_kwargs`, but currently **disabled for all steps**:
+Thinking mode is toggled per-request via `chat_template_kwargs`. Judge and synthesize use thinking mode for deeper evidence analysis; other steps stay in instruct mode:
 
 | Step | Mode | Why |
 |------|------|-----|
 | decompose_claim | `enable_thinking=False` | Structured JSON output, no reasoning needed |
 | research_subclaim | `enable_thinking=False` | ReAct tool-routing — picking search queries. Thinking wastes ~25-45s/iteration |
-| judge_subclaim | `enable_thinking=False` | Structured prompt guides reasoning. Thinking mode generates 5000-9500 tokens (3-4 min) without improving verdict quality — llama.cpp has no way to limit thinking tokens |
-| synthesize_verdict | `enable_thinking=False` | Structured aggregation of sub-verdicts |
+| judge_subclaim | `enable_thinking=True` | Thinking mode significantly improves evidence reading and cross-referencing. Adds ~25-45s per call but produces better verdicts |
+| synthesize_verdict | `enable_thinking=True` | Thinking mode improves thesis evaluation and subclaim weighting. Adds ~25-45s per call |
 
-**Why thinking is disabled everywhere:**
-llama.cpp's `--reasoning-budget` flag only supports `-1` (unlimited) or `0` (disabled) — no intermediate values for token limits. The model generates excessive internal monologue before responding. Until llama.cpp adds proper `max_thinking_tokens` support (or we migrate to vLLM which supports it), thinking mode is impractical.
+**Thinking mode parameters** (judge + synthesize): temp=0.6, top_p=0.95, presence_penalty=1.5, top_k=20, max_tokens=32768. The model produces `<think>...</think>` blocks that are stripped before parsing.
+
+**Why instruct mode for decompose/research:** Structured JSON extraction and ReAct tool-routing don't benefit from extended reasoning. Thinking mode wastes ~25-45s per iteration generating internal monologue just to produce short tool calls or JSON output.
 
 ### Step 1: decompose_claim (normalize → flat facts + thesis)
 
 **File:** `src/activities/verify_activities.py`
 **Prompts:** `src/prompts/verification.py` → `NORMALIZE_SYSTEM` / `NORMALIZE_USER` + `DECOMPOSE_SYSTEM` / `DECOMPOSE_USER`
 
-The decompose activity runs **up to four LLM calls** internally:
+The decompose activity runs **2 LLM calls** internally (normalize + decompose), plus a programmatic quality check:
 
 1. **Normalize** — rewrites the claim in neutral, researchable language (1 LLM call, max_retries=1). Performs 7 transformations grounded in the academic literature:
    - **Bias neutralization** (Pryzant et al. AAAI 2020) — loaded language → neutral equivalents
@@ -159,13 +160,7 @@ The decompose activity runs **up to four LLM calls** internally:
 
 2. **Decompose** — extracts flat atomic facts + thesis from the normalized claim.
 
-3. **Quality validate** — a post-decompose LLM call (~6-8s) reviews the sub-claim list for two structural issues the decomposer can't self-enforce during generation:
-   - **Semantic duplicates**: logically equivalent sub-claims phrased differently ("No X did Y" ≡ "Y happened for every X"). These cause contradictory verdicts when researched independently.
-   - **Group enumeration**: individual member checks instead of one group-level claim (e.g., 7 G7 country sub-claims instead of 1). Wastes research budget without improving accuracy.
-
-   Uses `SubclaimQualityCheck` schema (`src/schemas/llm_outputs.py`). Only runs when ≥2 sub-claims exist.
-
-4. **Decompose retry** (conditional) — if the validator finds issues, decompose is re-run once with the validator's feedback injected into the user prompt. If the retry also fails, the original output is used (graceful degradation).
+3. **Quality validate** — programmatic near-duplicate removal (punctuation, case, whitespace differences). Only runs when ≥2 sub-claims exist. The LLM semantic duplicate check was removed due to a 100% false positive rate that collapsed valid decompositions (e.g., "greatest" + "most powerful" merged into just "most powerful"). No LLM retry is triggered from this step.
 
 The normalized claim and list of changes are stored in `thesis_info` for auditability.
 
@@ -282,7 +277,7 @@ This is where the LangGraph ReAct agent runs. For each **atomic fact**:
 
 **Streaming evidence collection:** The agent uses `astream()` with `stream_mode="updates"` instead of `ainvoke()`. Messages are collected incrementally as the agent works. If the agent hits its step limit (`GraphRecursionError`) or times out, we keep ALL evidence gathered up to that point instead of losing everything. This replaced a direct `ainvoke()` call that would return nothing on interruption.
 
-The research agent uses **thinking=off**. The ReAct loop is pure tool-routing — picking search queries and deciding when to stop. Thinking mode wastes ~25-45s per iteration generating `<think>` blocks that nobody reads, just to produce an 8-token tool call. With thinking off, the same search queries are produced in ~3s per iteration.
+The research agent uses **thinking=off** (`enable_thinking=False`). The ReAct loop is pure tool-routing — picking search queries and deciding when to stop. Thinking mode wastes ~25-45s per iteration generating `<think>` blocks that nobody reads, just to produce an 8-token tool call. With thinking off, the same search queries are produced in ~3s per iteration.
 
 **Tools available to the agent (dynamically loaded based on API keys):**
 - `serper_search` — Google search via Serper API (primary). Requires `SERPER_API_KEY`.
@@ -324,7 +319,7 @@ After the agent finishes, we extract evidence from the conversation:
 **Activity wrapper:** `src/activities/verify_activities.py`
 **Prompt:** `src/prompts/verification.py` → `JUDGE_SYSTEM` / `JUDGE_USER`
 
-The LLM evaluates evidence for a single sub-claim. This is NOT agentic — it's a single LLM call with structured output. Uses **thinking=off** — the structured prompt guides reasoning explicitly, and thinking mode generates 5000-9500 tokens (3-4 min) without improving verdict quality.
+The LLM evaluates evidence for a single sub-claim. This is NOT agentic — it's a single LLM call with structured output. Uses **thinking mode** (`enable_thinking=True`) — the extended reasoning significantly improves evidence reading and cross-referencing, adding ~25-45s per call.
 
 The critical constraint: **"Do NOT use your own knowledge."** The LLM must reason only from the evidence provided. This is what makes verdicts trustworthy — they're grounded in real, citable sources.
 
@@ -358,14 +353,16 @@ The judge still runs one pass: **Entity enrichment (SpaCy NER → Wikidata, para
 
 Publisher ownership discovery (previously "Pass 2b" — domain → name heuristic → Wikidata) has been removed from the judge. Research now handles this via `_enrich_parties_from_mbfc()`, which uses real MBFC ownership data + SpaCy NER instead of domain-to-name guessing (~20-30% hit rate).
 
-**4 conflict-of-interest checks** run per evidence item during formatting:
+**6 conflict-of-interest checks** run per evidence item during `_annotate_evidence()`:
 
-| Check | What it detects | Example |
-|-------|----------------|---------|
-| **Affiliated media** | Source URL matches media owned by interested party | Outlet X when its owner is in `all_parties` |
-| **Quoted interested party** | Evidence content quotes statements from claim subjects | "FBI stated that..." when claim is about FBI conduct |
-| **Publisher ownership** | Source publisher owned by interested party (via MBFC ownership field) | Outlet X when its owner is in `all_parties` |
-| **Sub-source MBFC** | Evidence references another publication with poor factual rating or extreme bias | "according to [outlet]" → outlet has Mixed factual rating |
+| # | Check | What it detects | Example |
+|---|-------|----------------|---------|
+| 0 | **Government source** | `.gov`/`.mil` domain | `⚠️ GOVERNMENT SOURCE: {domain} is a government website` |
+| 1 | **Affiliated media** | Source URL matches media owned by interested party | Outlet X when its owner is in `all_parties` |
+| 2 | **Quoted interested party** | Evidence content quotes statements from claim subjects (proximity-window attribution) | "FBI stated that..." when claim is about FBI conduct |
+| 3 | **Publisher ownership** | Source publisher owned by interested party (via MBFC ownership field) | Outlet X when its owner is in `all_parties` |
+| 4 | **Sub-source MBFC** | Evidence references another publication with poor factual rating or extreme bias | "according to [outlet]" → outlet has Mixed factual rating |
+| 5 | **Authority relay** | Evidence derives from an interested party's own determination/designation/document (SpaCy dependency parsing) | `⚠️ AUTHORITY RELAY: evidence traces back to {party}'s own determination` |
 
 Each check adds a `⚠️` warning to the evidence header that the LLM sees. The judge prompt has extensive instructions on how to handle self-serving statements, circular evidence, and interested party quotes — including specific patterns to reject and when to verdict "unverifiable."
 
@@ -455,10 +452,8 @@ flowchart TD
 
     subgraph DECOMPOSE["decompose_claim (180s timeout)"]
         NORM["normalize\n(LLM, graceful fallback)"] --> EXTRACT["decompose\n(LLM → facts + thesis_info)"]
-        EXTRACT --> QV["quality validate\n(LLM, ~6-8s)"]
-        QV --> |"issues found"| RETRY["decompose retry\n(LLM, temp=0.1)"]
-        QV --> |"ok"| WIKI["Wikidata expansion\n→ interested_parties"]
-        RETRY --> WIKI
+        EXTRACT --> QV["quality validate\n(programmatic dedup)"]
+        QV --> WIKI["Wikidata expansion\n→ interested_parties + aliases"]
     end
 
     DECOMPOSE --> RESEARCH
@@ -478,7 +473,7 @@ flowchart TD
 
     JUDGE --> DECISION{{"1 fact?"}}
     DECISION -->|"Yes"| SKIP["Use judge verdict directly"]
-    DECISION -->|"No (2+)"| SYNTH["synthesize_verdict\n(300s, thesis_info passed)"]
+    DECISION -->|"No (2+)"| SYNTH["synthesize_verdict\n(600s, thesis_info passed)"]
 
     SKIP --> STORE["store_result (30s)"]
     SYNTH --> STORE
@@ -487,10 +482,10 @@ flowchart TD
 
 Key properties:
 - **Flat, not recursive** — one decompose call produces flat facts + thesis. Follows SAFE/FActScore.
-- **Separate research + judge phases** — research all facts first, then judge all. Both use thinking=off. Separated to prevent the longer judge calls (structured rubric evaluation) from starving faster research agents.
+- **Separate research + judge phases** — research all facts first, then judge all. Research uses thinking=off; judge uses thinking mode. Separated to prevent the longer judge calls (structured rubric evaluation + thinking) from starving faster research agents.
 - **Sliding window concurrency** — semaphore-based, not batch-based. As one task finishes, the next starts immediately.
 - **MAX_FACTS = 10** — caps decomposition output to prevent runaway processing.
-- **MAX_CONCURRENT = 2** — matched to GPU `--parallel 2`. Each agent gets a dedicated inference slot.
+- **MAX_CONCURRENT = 2** — matched to LLM server `--parallel 2`. Each agent gets a dedicated inference slot.
 - **Thesis-aware** — decompose extracts speaker's intent (thesis, structure, key_test). key_test is passed to BOTH judge (per-subclaim) AND synthesis (overall claim). Single-fact claims that skip synthesis still get the key_test anchor.
 - **Speaker enrichment** — Wikidata descriptions (role/title) are resolved once during transcript extraction and stored on the claim record. Standalone claims fall back to a Wikidata lookup in decompose. No redundant lookups.
 - **Citation enforcement** — judge validator requires minimum 3 unique [N] citations per subclaim, synthesize validator requires minimum 5. Failures trigger LLM retries.
@@ -505,12 +500,14 @@ Key properties:
 
 The LLM runs via llama.cpp with **ROCm backend** (AMD GPU optimization). `--parallel N` slots multiplex concurrent requests onto a single GPU — it does NOT parallelize them. N concurrent requests = each takes ~Nx longer, total throughput is constant (~38 tok/s sustained).
 
-| Service | Port | `--parallel` | Backend | Notes |
-|---------|------|-------------|---------|-------|
-| Qwen3.5 | `:3101` | 4 | ROCm | Unified model, thinking toggled per-request |
-| Embedding | `:3103` | 4 | Vulkan | Fast, low-latency |
+| Service | Port | `--parallel` | `--ctx-size` | Backend | Notes |
+|---------|------|-------------|-------------|---------|-------|
+| Qwen3.5 | `:3101` | 2 | 131072 | ROCm | 2 slots x 65K context each. Thinking toggled per-request |
+| Embedding | `:3103` | — | — | Vulkan | Disabled via Docker profiles (not currently used) |
 
-`MAX_CONCURRENT=2` limits parallel research+judge pipelines. Higher concurrency doesn't improve wall-clock time — it just increases per-request latency.
+The model's hybrid architecture (2 KV heads, 12 attention layers of 48 total — rest are recurrent/SSM) makes KV cache very cheap (~3 GB for both slots at full context).
+
+`MAX_CONCURRENT=2` limits parallel research+judge pipelines, matched to the 2 LLM slots. Higher concurrency doesn't improve wall-clock time — it just increases per-request latency.
 
 ---
 
@@ -960,14 +957,15 @@ All models use SQLAlchemy 2.0 declarative base (`src/db/models.py`):
 
 ### Models
 
-One unified model running via llama.cpp, with thinking toggled per-request:
+One unified model running via llama.cpp (`--parallel 2 --ctx-size 131072`), with thinking toggled per-request:
 
 | Port | Model | Mode | Used By |
 |------|-------|------|--------|
-| `:3101` | Qwen3.5-122B-A10B | `enable_thinking=False` | decompose, research, judge, synthesize |
-| `:3103` | Qwen3-Embedding-8B | — | planned: evidence caching |
+| `:3101` | Qwen3.5-122B-A10B | `enable_thinking=True` | judge, synthesize (thinking mode) |
+| `:3101` | Qwen3.5-122B-A10B | `enable_thinking=False` | decompose, research, normalize, extraction (instruct mode) |
+| `:3103` | Qwen3-Embedding-8B | — | disabled via Docker profiles (not currently used) |
 
-122B MoE, 10B active params per token, Q4_K_M quantization. Thinking mode is toggled via `chat_template_kwargs` in the request body. When thinking is enabled, the model produces `<think>...</think>` blocks that are stripped before parsing.
+122B MoE, 10B active params per token, Q4_K_M quantization (~76.5GB). 2 slots x 65K context each. The model's hybrid architecture (2 KV heads, 12 attention layers of 48 total — rest are recurrent/SSM) makes KV cache very cheap (~3 GB for both slots). Thinking mode is toggled via `chat_template_kwargs` in the request body. When thinking is enabled, the model produces `<think>...</think>` blocks that are stripped before parsing.
 
 ### Connection Path
 
@@ -999,6 +997,10 @@ def get_llm(temperature=0):            # temperature=0 for deterministic fact-ch
         api_key="not-needed",
         extra_body={"chat_template_kwargs": {"enable_thinking": False}},
     )
+
+# Thinking mode override for judge + synthesize:
+# temperature=0.6, top_p=0.95, presence_penalty=1.5, top_k=20,
+# max_tokens=32768, enable_thinking=True
 ```
 
 Pipeline steps (decompose, judge, synthesize) call `invoke_llm()` with Pydantic schemas from `src/schemas/llm_outputs.py`. The research agent calls `get_llm()` directly (LangGraph manages the conversation loop).
@@ -1007,7 +1009,7 @@ Pipeline steps (decompose, judge, synthesize) call `invoke_llm()` with Pydantic 
 
 All prompts live in `src/prompts/verification.py` with extensive inline documentation explaining:
 - What each prompt does and why it's designed that way
-- Why thinking mode is disabled for all steps (llama.cpp limitation)
+- Why thinking mode is enabled for judge/synthesize and disabled for other steps
 - Example inputs and outputs
 - Design constraints (e.g., "Do NOT use your own knowledge")
 
@@ -1015,7 +1017,7 @@ Five prompt pairs (system + user):
 1. `NORMALIZE_SYSTEM` / `NORMALIZE_USER` — 7 bias-neutralization transformations
 2. `DECOMPOSE_SYSTEM` / `DECOMPOSE_USER` — flat fact extraction with categories + seed queries, 15 extraction rules
 3. `RESEARCH_SYSTEM` / `RESEARCH_USER` — guide the research agent (tier awareness, conflict flags, fetch budget)
-4. `JUDGE_SYSTEM` / `JUDGE_USER` — 5-step rubric evaluation with key_test anchoring, citation enforcement
+4. `JUDGE_SYSTEM` / `JUDGE_USER` — 5-step rubric evaluation with key_test anchoring, citation enforcement, designation loophole rule
 5. `SYNTHESIZE_SYSTEM` / `SYNTHESIZE_USER` — 4-step thesis-aware synthesis with citation enforcement
 
 ---
@@ -1270,7 +1272,7 @@ Config: `~/workspace/monitor/promtail/promtail.yml`
 | `store_result` | **Done** | Writes full result tree to Postgres: decompose rubric on claim, categories/seeds on sub-claims, judge rubric, synthesis rubric on verdict, interested parties |
 | Source quality filtering | **Done** | Domain blocklist (~117 domains) filters all search results + page fetches |
 | Prompts | **Done** | 5 prompt pairs (NORMALIZE, DECOMPOSE, RESEARCH, JUDGE, SYNTHESIZE) in `src/prompts/verification.py` |
-| LLM connectivity | **Done** | Unified Qwen3.5 via `LLAMA_URL` — `enable_thinking=False` for all steps (thinking mode unused, generates excessive tokens) |
+| LLM connectivity | **Done** | Unified Qwen3.5 via `LLAMA_URL` — thinking mode enabled for judge/synthesize, instruct mode for decompose/research/normalize/extraction |
 | Logging | **Done** | Structured JSON logging via `src/utils/logging.py`, Promtail → Loki → Grafana |
 | Tests | **Done** | Health endpoint, schema validation |
 
@@ -1417,7 +1419,8 @@ spin-cycle/
 │   ├── utils/                      # Shared utilities
 │   │   ├── logging.py              # Structured logging (JSON for Loki, pretty for dev)
 │   │   ├── ner.py                  # SpaCy NER — entity extraction (PERSON/ORG)
-│   │   ├── quote_detection.py      # Detect claim subject quotes in evidence text
+│   │   ├── quote_detection.py      # Proximity-window quote attribution detection
+│   │   ├── relay_detection.py      # Authority relay detection (SpaCy dep parsing)
 │   │   ├── text_cleanup.py         # Grammar/spell check for LLM output (LanguageTool)
 │   │   └── evidence_ranker.py      # Source + evidence scoring, seed ranking, judge capping
 │   │
