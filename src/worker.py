@@ -93,9 +93,9 @@ async def main():
             # Frontend notification
             notify_frontend_refresh,
         ],
-        # Match MAX_CONCURRENT=1 in the workflow — single LLM inference slot
-        # with 65K context for thinking mode on judge/synthesize.
-        max_concurrent_activities=1,
+        # Match MAX_CONCURRENT=2 in the workflow — 2 LLM inference slots
+        # with 65K context each for thinking mode on judge/synthesize.
+        max_concurrent_activities=2,
     )
 
     log.info(logger, MODULE, "ready", "Worker listening",
