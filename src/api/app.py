@@ -259,12 +259,8 @@ async def lifespan(app: FastAPI):
                 tc_migrations = {
                     "worth_checking": "BOOLEAN NOT NULL DEFAULT TRUE",
                     "skip_reason": "VARCHAR(64)",
-                    "argument_summary": "TEXT",
-                    "supports_argument": "BOOLEAN",
                     "checkable": "BOOLEAN",
                     "checkability_rationale": "TEXT",
-                    "consequence_if_wrong": "VARCHAR(16)",
-                    "consequence_rationale": "TEXT",
                     "segment_gist": "TEXT",
                 }
                 for col, dtype in tc_migrations.items():

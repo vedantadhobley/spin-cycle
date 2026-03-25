@@ -104,7 +104,6 @@ async def extract_transcript_batch(
             "claim_text": c.claim_text,
             "original_quote": c.original_quote,
             "speaker": c.speaker,
-            "timestamp": c.timestamp,
             "claim_type": c.claim_type,
             "worth_checking": c.worth_checking,
             "skip_reason": c.skip_reason,
@@ -155,11 +154,6 @@ async def finalize_extraction(
         segments=[TranscriptSegment(**s) for s in transcript_data["segments"]],
     )
 
-    # Build timestamp → seconds lookup
-    ts_lookup: dict[str, float] = {}
-    for seg in transcript.segments:
-        ts_lookup[seg.timestamp] = seg.timestamp_secs
-
     # Reconstruct ExtractedClaim objects from all batches.
     # Tag each with its raw index so we can trace which raw claims survive
     # finalization (filtering + dedup) for correct FK linkage later.
@@ -172,7 +166,6 @@ async def finalize_extraction(
                 claim_text=c["claim_text"],
                 original_quote=c["original_quote"],
                 speaker=c["speaker"],
-                timestamp=c["timestamp"],
                 claim_type=c["claim_type"],
                 worth_checking=c.get("worth_checking", True),
                 skip_reason=c.get("skip_reason"),
@@ -205,8 +198,6 @@ async def finalize_extraction(
             "claim_text": c.claim_text,
             "original_quote": c.original_quote,
             "speaker": c.speaker,
-            "timestamp": c.timestamp,
-            "timestamp_secs": c.timestamp_secs,
             "claim_type": c.claim_type,
             "source_url": c.source_url,
         }
@@ -219,8 +210,6 @@ async def finalize_extraction(
             "claim_text": c["claim_text"],
             "original_quote": c["original_quote"],
             "speaker": c["speaker"],
-            "timestamp": c["timestamp"],
-            "timestamp_secs": ts_lookup.get(c["timestamp"], 0.0),
             "claim_type": c.get("claim_type"),
             "worth_checking": c.get("worth_checking", True),
             "skip_reason": c.get("skip_reason"),
@@ -327,8 +316,6 @@ async def store_transcript_claims(
                 claim_text=c["claim_text"],
                 original_quote=c["original_quote"],
                 speaker=c["speaker"],
-                timestamp=c["timestamp"],
-                timestamp_secs=c["timestamp_secs"],
                 claim_type=c.get("claim_type"),
                 worth_checking=c.get("worth_checking", True),
                 skip_reason=c.get("skip_reason"),

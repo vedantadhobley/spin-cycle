@@ -6,7 +6,6 @@ result with an assertion_count forcing field.
 
 Key forcing fields:
 - `assertion_count`: Forces the model to scan each segment before listing claims.
-- `context_insertions`: Forces the model to explicitly list every bracket it inserted.
 
 Filtering is programmatic: checkable=true → verified. No editorial judgment
 at extraction time.
@@ -50,7 +49,7 @@ Skip ONLY:
 
 DO extract:
 - Superlatives and comparatives ("the largest", "number one", "the best")
-  — these ARE checkable against data.
+  — these ARE checkable against data.  Do not skip them.
 - Characterizations used to justify action — the factual premise matters
   even when wrapped in rhetoric.
 - Hedged facts ("about seven", "almost 50 years", "maybe 22 or 23")
@@ -84,44 +83,27 @@ not measurable with data).
 
 State WHY in checkability_rationale (1 sentence).
 
-## Step 4 — Contextual Bracketing (REQUIRED for ALL checkable claims)
+## Step 4 — Decontextualize (REQUIRED for ALL checkable claims)
 
-This is CRITICAL.  Each claim must be understandable WITHOUT the transcript.
-Resolve pronouns and ambiguous references using square brackets.
+Each claim_text must be understandable WITHOUT the transcript.  Resolve
+pronouns and ambiguous references so the claim stands alone.
 
-WHEN to bracket:
-- Pronouns: "he", "she", "they", "their", "it", "this", "these", "we",
-  "our", "I", "them"
-- Possessive pronouns: "his", "her", "its", "their", "our", "my"
-- Ambiguous noun phrases: "the company", "the bill", "that country",
-  "the operation"
+RESOLVE:
+- Pronouns: "he", "she", "they", "we", "I", "them", "it", "this"
+- Possessives: "his", "her", "their", "our", "my", "its"
+- Ambiguous references: "the company", "the bill", "that country"
 
-WHEN NOT to bracket:
-- Terms already named in the original quote
-- Temporal references ("yesterday", "36 hours ago")
-- If the referent is genuinely ambiguous, leave it — do NOT guess
-
-AFTER writing each claim_text, SCAN it for any remaining unresolved
-pronouns or ambiguous references.  If you find "their", "they", "we",
-"our", "his", "her", "it", "the attack", "the operation" still in the
-text without brackets, you have NOT finished — resolve them.
+DO NOT resolve if the referent is genuinely ambiguous — leave it as-is.
 
 Examples (original_quote → claim_text):
 - "He signed the bill yesterday"
-  → "[Governor X] signed [HB 1234] yesterday"
+  → "Governor X signed HB 1234 yesterday"
 - "Their exports dropped 40%"
-  → "[Country Y's] exports dropped 40%"
-- "I ordered the operation"
-  → "[Speaker Name] ordered the operation"
+  → "Country Y's exports dropped 40%"
 - "we destroyed their military headquarters"
-  → "[Country X] destroyed [Country Y's] military headquarters"
-- "We launched the strike on their positions"
-  → "[Country X] launched the strike on [Country Y's] positions"
+  → "Country X destroyed Country Y's military headquarters"
 - "The policy is working"
-  → "The policy is working" (no bracket — "the policy" is clear from context)
-
-→ Output per claim: context_insertions (list of strings — each bracket
-  you inserted).  Empty list if no insertions needed.
+  → "The trade embargo is working"
 
 ## Step 5 — Restatements
 
@@ -134,7 +116,11 @@ Still include it.
 2. Include ALL factual assertions — we filter programmatically
 3. Speaker name exactly as in transcript
 4. Preserve original unmodified quote in original_quote
-5. Split distinct assertions into separate claims
+5. Keep the speaker's complete assertion from each sentence as ONE claim.
+   Do not split a single sentence into multiple claims — a downstream
+   system handles that.  This applies to lists ("targets including X, Y,
+   and Z"), stacked superlatives ("the largest, most complex, most
+   overwhelming"), and any other compound phrasing within one sentence.
 """
 
 # ---------------------------------------------------------------------------
@@ -156,26 +142,22 @@ Return your analysis as JSON matching this schema:
 {{
   "segments": [
     {{
-      "timestamp": "MM:SS",
       "speaker": "Speaker Name",
       "segment_gist": "One sentence: what is the speaker arguing in this segment?",
       "assertion_count": 5,
       "claims": [
         {{
-          "claim_text": "[Country X] destroyed [Country Y's] military headquarters",
+          "claim_text": "Country X destroyed Country Y's military headquarters",
           "original_quote": "we destroyed their military headquarters",
           "speaker": "Speaker Name",
-          "timestamp": "MM:SS",
           "claim_type": "quantitative|historical|causal|comparative|attribution|other",
           "checkable": true,
           "checkability_rationale": "Why checkable or not (1 sentence)",
-          "context_insertions": ["[Country X]", "[Country Y's]"],
           "is_restatement": false
         }}
       ]
     }},
     {{
-      "timestamp": "MM:SS",
       "speaker": "Speaker Name",
       "segment_gist": "One sentence: what is the speaker arguing in this segment?",
       "assertion_count": 0,

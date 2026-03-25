@@ -1,7 +1,7 @@
 """Extract verifiable claims from parsed transcripts.
 
 Takes a Transcript (from fetcher.py) and uses the LLM to identify factual
-assertions with contextual bracketing.  The LLM processes the transcript
+assertions with decontextualized claim text.  The LLM processes the transcript
 segment-by-segment using a structured per-segment output schema — the
 `assertion_count` field forces the model to scan each segment before listing
 claims, preventing it from skipping sections.
@@ -10,7 +10,7 @@ Processing strategy:
 - Single call for small transcripts (≤30 segments)
 - Segment batching with overlap context for larger transcripts:
   each batch gets its target segments + a few overlap segments before/after
-  for bracket resolution and restatement detection
+  for context and restatement detection
 - Each batch is a separate Temporal activity for full UI visibility
 - Programmatic worth_checking: checkable AND not restatement
 - Validate assertion_count matches actual claims per segment
@@ -48,14 +48,12 @@ OVERLAP_SEGMENTS = 3       # context segments before/after each batch boundary
 # ---------------------------------------------------------------------------
 
 class ExtractedClaim(BaseModel):
-    claim_text: str = Field(..., description="Contextualized claim with [brackets]")
+    claim_text: str = Field(..., description="Decontextualized claim — pronouns resolved, stands alone")
     original_quote: str = Field(..., description="Speaker's exact words")
     speaker: str = Field(..., description="Speaker name from transcript")
-    timestamp: str = Field(..., description="MM:SS timestamp")
     claim_type: str = Field("other", description="quantitative|historical|causal|comparative|attribution|other")
     checkable: bool = Field(..., description="Could independent data confirm or deny?")
     checkability_rationale: str = Field(default="", description="Why checkable or not (1 sentence)")
-    context_insertions: list[str] = Field(default_factory=list, description="Brackets inserted in claim_text")
     is_restatement: bool = Field(default=False, description="True if speaker repeats a claim already extracted")
 
     # Computed programmatically — not in LLM output but needed downstream
@@ -64,7 +62,6 @@ class ExtractedClaim(BaseModel):
 
 
 class SegmentExtraction(BaseModel):
-    timestamp: str = Field(..., description="MM:SS timestamp of this segment")
     speaker: str = Field(..., description="Speaker name")
     segment_gist: str = Field(default="", description="One sentence: what is the speaker arguing in this segment?")
     assertion_count: int = Field(..., description="Total factual assertions found in this segment")
@@ -82,11 +79,9 @@ class ExtractionOutput(BaseModel):
 @dataclass
 class TranscriptClaim:
     """A claim extracted from a transcript, ready for the verification pipeline."""
-    claim_text: str           # contextualized with [brackets]
+    claim_text: str           # decontextualized — pronouns resolved
     original_quote: str       # speaker's exact words
     speaker: str
-    timestamp: str
-    timestamp_secs: float
     claim_type: str
     source_url: str           # transcript URL
 
@@ -100,7 +95,7 @@ def _build_segment_manifest(segments: list[TranscriptSegment]) -> str:
     lines = []
     for i, seg in enumerate(segments, 1):
         word_count = len(seg.text.split())
-        lines.append(f"{i}. {seg.speaker} ({seg.timestamp}) — {word_count} words")
+        lines.append(f"{i}. {seg.speaker} — {word_count} words")
     return "\n".join(lines)
 
 
@@ -108,7 +103,7 @@ def _format_transcript(segments: list[TranscriptSegment]) -> str:
     """Format transcript segments into text for the LLM."""
     parts = []
     for seg in segments:
-        parts.append(f"{seg.speaker} ({seg.timestamp}):\n{seg.text}")
+        parts.append(f"{seg.speaker}:\n{seg.text}")
     return "\n\n".join(parts)
 
 
@@ -243,20 +238,20 @@ def _validate_segment_coverage(
     expected_segments: list[TranscriptSegment],
 ) -> None:
     """Log warnings if the model skipped segments or assertion counts mismatch."""
-    output_timestamps = {seg.timestamp for seg in output.segments}
-    expected_timestamps = {seg.timestamp for seg in expected_segments}
+    output_speakers = {seg.speaker for seg in output.segments}
+    expected_speakers = {seg.speaker for seg in expected_segments}
 
-    missing = expected_timestamps - output_timestamps
+    missing = expected_speakers - output_speakers
     if missing:
         log.warning(logger, MODULE, "segments_missing",
                     f"Model skipped {len(missing)} segments",
-                    missing_timestamps=sorted(missing))
+                    missing_speakers=sorted(missing))
 
     for seg in output.segments:
         actual = len(seg.claims)
         if seg.assertion_count != actual:
             log.warning(logger, MODULE, "assertion_count_mismatch",
-                        f"Segment {seg.speaker} ({seg.timestamp}): "
+                        f"Segment {seg.speaker}: "
                         f"assertion_count={seg.assertion_count} but {actual} claims listed")
 
 
@@ -268,16 +263,16 @@ def _validate_extraction_consistency(output: ExtractionOutput) -> None:
         # assertion_count doesn't match len(claims)
         if seg.assertion_count != actual:
             log.warning(logger, MODULE, "assertion_count_mismatch",
-                        f"Segment {seg.speaker} ({seg.timestamp}): "
+                        f"Segment {seg.speaker}: "
                         f"assertion_count={seg.assertion_count} but {actual} claims",
-                        speaker=seg.speaker, timestamp=seg.timestamp)
+                        speaker=seg.speaker)
 
         # Segment has claims but empty segment_gist
         if seg.claims and not seg.segment_gist.strip():
             log.warning(logger, MODULE, "missing_segment_gist",
-                        f"Segment {seg.speaker} ({seg.timestamp}) has "
+                        f"Segment {seg.speaker} has "
                         f"{actual} claims but empty segment_gist",
-                        speaker=seg.speaker, timestamp=seg.timestamp)
+                        speaker=seg.speaker)
 
         for claim in seg.claims:
             # checkable=True but empty checkability_rationale
@@ -285,6 +280,7 @@ def _validate_extraction_consistency(output: ExtractionOutput) -> None:
                 log.warning(logger, MODULE, "missing_checkability_rationale",
                             f"Claim marked checkable but no rationale: "
                             f"'{claim.claim_text[:60]}...'")
+
 
 
 # ---------------------------------------------------------------------------
@@ -342,16 +338,14 @@ async def extract_batch(
     transcript_text = _format_transcript(text_segments)
     segment_manifest = _build_segment_manifest(target_segments)
     speakers = ", ".join(dict.fromkeys(s.speaker for s in target_segments))
-    target_range = f"{target_segments[0].timestamp}–{target_segments[-1].timestamp}"
-    text_range = f"{text_segments[0].timestamp}–{text_segments[-1].timestamp}"
     word_count = sum(len(s.text.split()) for s in text_segments)
 
     has_overlap = len(text_segments) != len(target_segments)
     context_note = (
-        f"Transcript text covers {text_range} ({word_count} words, "
-        f"{len(text_segments)} segments). "
-        f"Manifest lists {len(target_segments)} segments to process "
-        f"({target_range}). Speakers: {speakers}."
+        f"Transcript text covers {word_count} words across "
+        f"{len(text_segments)} segments. "
+        f"Manifest lists {len(target_segments)} segments to process. "
+        f"Speakers: {speakers}."
     )
     if has_overlap:
         context_note += (
@@ -363,7 +357,7 @@ async def extract_batch(
 
     log.info(logger, MODULE, "extracting",
              f"Extracting from {len(target_segments)} segments "
-             f"({target_range}, {word_count} words text"
+             f"({word_count} words text"
              f"{', +' + str(len(text_segments) - len(target_segments)) + ' overlap' if has_overlap else ''})"
              f"{' ' + batch_label if batch_label else ''}")
 
@@ -478,11 +472,6 @@ def finalize_claims(
         log.info(logger, MODULE, "dedup",
                  f"Deduplicated {before} → {len(unique_claims)} claims")
 
-    # Build timestamp lookup for seconds
-    ts_lookup: dict[str, float] = {}
-    for seg in transcript.segments:
-        ts_lookup[seg.timestamp] = seg.timestamp_secs
-
     # Convert to TranscriptClaim
     results = []
     for claim in unique_claims:
@@ -490,8 +479,6 @@ def finalize_claims(
             claim_text=claim.claim_text,
             original_quote=claim.original_quote,
             speaker=claim.speaker,
-            timestamp=claim.timestamp,
-            timestamp_secs=ts_lookup.get(claim.timestamp, 0.0),
             claim_type=claim.claim_type,
             source_url=transcript.url,
         ))

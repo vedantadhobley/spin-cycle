@@ -142,21 +142,15 @@ class TranscriptClaim(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     transcript_id = Column(UUID(as_uuid=True), ForeignKey("transcripts.id"), nullable=False)
     claim_id = Column(UUID(as_uuid=True), ForeignKey("claims.id"), nullable=True)  # set when sent to verification
-    claim_text = Column(Text, nullable=False)  # contextualized with [brackets]
+    claim_text = Column(Text, nullable=False)  # decontextualized — pronouns resolved
     original_quote = Column(Text, nullable=False)  # speaker's exact words — used for inline highlighting
     speaker = Column(String(256), nullable=False)
-    timestamp = Column(String(32), nullable=False)  # "MM:SS"
-    timestamp_secs = Column(Float, nullable=False)
     claim_type = Column(String(64), nullable=True)
     # Extraction rubric fields
     worth_checking = Column(Boolean, nullable=False, default=True)
     skip_reason = Column(String(64), nullable=True)
-    argument_summary = Column(Text, nullable=True)
-    supports_argument = Column(Boolean, nullable=True)
     checkable = Column(Boolean, nullable=True)
     checkability_rationale = Column(Text, nullable=True)
-    consequence_if_wrong = Column(String(16), nullable=True)
-    consequence_rationale = Column(Text, nullable=True)
     segment_gist = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 

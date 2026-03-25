@@ -242,7 +242,7 @@ async def judge(
         output = await invoke_llm(
             system_prompt=JUDGE_SYSTEM.format(
                 current_date=date.today().isoformat(),
-                claim_date_line=build_claim_date_line(claim_date),
+                claim_date_line=build_claim_date_line(claim_date, sub_claim),
             ),
             user_prompt=JUDGE_USER.format(
                 claim_text=claim_text,

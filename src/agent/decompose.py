@@ -481,7 +481,7 @@ async def decompose(claim_text: str, speaker: str | None = None,
     # Step 1: Normalize claim
     norm_output = None
     today = date.today().isoformat()
-    claim_date_line = build_claim_date_line(claim_date)
+    claim_date_line = build_claim_date_line(claim_date, claim_text)
     try:
         norm_output = await invoke_llm(
             system_prompt=NORMALIZE_SYSTEM.format(

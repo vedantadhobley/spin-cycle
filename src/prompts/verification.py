@@ -336,21 +336,83 @@ counter-evidence to look for.
 """
 
 
-def build_claim_date_line(claim_date: str | None) -> str:
+def _resolve_temporal_anchors(claim_text: str, claim_date: str) -> str:
+    """Compute absolute dates for relative time expressions in claim text.
+
+    LLMs can't do date arithmetic reliably. This function finds patterns like
+    "in the past 36 hours", "X days ago", "within the last Y weeks" and
+    computes the actual date/datetime so the LLM doesn't have to.
+
+    Returns a string with computed anchors, or empty string if none found.
+    """
+    import re
+    from datetime import datetime, timedelta
+
+    try:
+        base = datetime.strptime(claim_date, "%Y-%m-%d")
+    except (ValueError, TypeError):
+        return ""
+
+    # Patterns: "in the past/last N unit(s)", "N unit(s) ago", "within the past/last N unit(s)"
+    pattern = re.compile(
+        r"(?:in the (?:past|last)|within the (?:past|last)|about|approximately|roughly)?\s*"
+        r"(\d+(?:\.\d+)?)\s+"
+        r"(hours?|days?|weeks?|months?|years?)"
+        r"(?:\s+ago)?",
+        re.IGNORECASE,
+    )
+
+    anchors = []
+    for m in pattern.finditer(claim_text):
+        value = float(m.group(1))
+        unit = m.group(2).lower().rstrip("s")
+        if unit == "hour":
+            delta = timedelta(hours=value)
+        elif unit == "day":
+            delta = timedelta(days=value)
+        elif unit == "week":
+            delta = timedelta(weeks=value)
+        elif unit == "month":
+            delta = timedelta(days=value * 30.44)
+        elif unit == "year":
+            delta = timedelta(days=value * 365.25)
+        else:
+            continue
+
+        resolved = base - delta
+        original = m.group(0).strip()
+        if delta < timedelta(days=2):
+            anchors.append(f'"{original}" before {claim_date} = approximately {resolved.strftime("%Y-%m-%d %H:%M")} UTC')
+        else:
+            anchors.append(f'"{original}" before {claim_date} = approximately {resolved.strftime("%Y-%m-%d")}')
+
+    if not anchors:
+        return ""
+    return "Pre-computed temporal anchors: " + "; ".join(anchors) + "."
+
+
+def build_claim_date_line(claim_date: str | None, claim_text: str = "") -> str:
     """Build the temporal context line for prompts.
 
     When a claim has a known date (e.g. from a transcript), this line tells
     the LLM to interpret temporal references relative to that date rather
-    than today. Returns empty string when no date is available.
+    than today. If relative time expressions are found in the claim text,
+    pre-computed date anchors are included so the LLM doesn't need to do
+    arithmetic.
     """
     if not claim_date:
         return ""
-    return (
+    base = (
         f"This claim was made on {claim_date}. Interpret ALL temporal "
         f"references in the claim (\"yesterday\", \"last week\", \"36 hours "
         f"ago\", \"recently\", \"just\", \"within the past X\") relative to "
         f"{claim_date}, NOT today's date."
     )
+    if claim_text:
+        anchors = _resolve_temporal_anchors(claim_text, claim_date)
+        if anchors:
+            base += f" {anchors}"
+    return base
 
 
 # =============================================================================
@@ -1188,6 +1250,7 @@ are insufficient — government websites are Tier 3 (interested party statements
 3. Do NOT re-search what seeds already found — use a DIFFERENT query angle
 4. Stop once you have primary-source evidence from both directions
 
+
 A [RESEARCH PROGRESS] note may appear in your conversation showing what \
 you have gathered so far — unique sources, domains, search engines used. \
 Use this to avoid repeating searches and to identify gaps in your coverage.
@@ -1358,6 +1421,12 @@ STEP 3 — ASSESS DIRECTION
 Based on INDEPENDENT evidence only (is_independent=true from Step 2), what \
 direction does the evidence point? Ignore non-independent sources for \
 direction assessment.
+Pay attention to QUALIFIERS in the evidence. When sources — even the most \
+favorable ones — describe something with narrower scope than the claim asserts \
+(e.g., "largest in the region" vs claim of "largest ever", "one of the top" \
+vs claim of "the top"), the evidence CONTRADICTS the specific claim even if \
+it supports the general direction. This is leans_contradicts or \
+clearly_contradicts, NOT insufficient.
 → Output: "evidence_direction" (one of: clearly_supports, leans_supports, \
 genuinely_mixed, leans_contradicts, clearly_contradicts, insufficient)
 → Output: "direction_reasoning" (2-3 sentences)
@@ -1415,7 +1484,12 @@ but isn't fabricated. Direction right but specific overshoots = mostly_false.
 - "false" — fundamentally wrong at every level. No reasonable interpretation \
 makes it true. Not imprecise or exaggerated — describes something that didn't \
 happen. Reserve for claims with NO meaningful truth content.
-- "unverifiable" — not enough evidence to judge either way.
+- "unverifiable" — not enough evidence to judge either way. Reserve this for \
+claims where evidence genuinely does not address the question at all. If \
+evidence exists that CONSTRAINS the claim — even partially, even from \
+interested parties — you have enough to render a substantive verdict. When \
+sources (including favorable ones) use more qualified language than the claim \
+itself, that qualification IS evidence about the claim's accuracy.
 
 BOUNDARY RULE — mostly_false vs false:
 Direction/spirit supported but specifics fail = mostly_false. "False" requires \
