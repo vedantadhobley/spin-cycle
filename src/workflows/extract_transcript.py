@@ -155,8 +155,8 @@ class ExtractTranscriptWorkflow:
                  batch_count=self._batch_count,
                  segment_count=self._segment_count)
 
-        # Sliding window: 2 concurrent batches to match LLM server parallelism
-        MAX_CONCURRENT_BATCHES = 2
+        # Sequential batches — single LLM inference slot
+        MAX_CONCURRENT_BATCHES = 1
         batch_semaphore = asyncio.Semaphore(MAX_CONCURRENT_BATCHES)
 
         async def _run_batch(i: int, batch: dict) -> list[dict]:

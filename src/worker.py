@@ -93,10 +93,9 @@ async def main():
             # Frontend notification
             notify_frontend_refresh,
         ],
-        # Allow 2 concurrent activities to match MAX_CONCURRENT=2 in the workflow.
-        # The workflow uses a semaphore to run 2 research/judge tasks in parallel,
-        # matched to --parallel 2 on the LLM server.
-        max_concurrent_activities=2,
+        # Match MAX_CONCURRENT=1 in the workflow — single LLM inference slot
+        # with 65K context for thinking mode on judge/synthesize.
+        max_concurrent_activities=1,
     )
 
     log.info(logger, MODULE, "ready", "Worker listening",

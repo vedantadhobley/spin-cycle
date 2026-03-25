@@ -21,8 +21,9 @@ Research and judge are SEPARATE PHASES to prevent longer judge calls
 Follows Google's SAFE (NeurIPS 2024) and FActScore:
 extract all facts in one pass, verify each independently, aggregate.
 
-Concurrency is tuned for the local LLM server. MAX_CONCURRENT=2 gives
-each research agent a dedicated inference slot.
+Concurrency is tuned for the local LLM server. MAX_CONCURRENT=1 because
+the server runs --parallel 1 to maximize context window (65K tokens)
+for thinking mode on judge/synthesize calls.
 """
 
 import asyncio
@@ -49,12 +50,12 @@ with workflow.unsafe.imports_passed_through():
 MODULE = "workflow"
 
 # Maximum atomic facts to process. If decomposition returns more, we cap it.
-# 10 facts × ~4 min each ÷ 2 concurrent = ~20 min total.
+# 10 facts × ~4 min each = ~40 min total (sequential).
 MAX_FACTS = 10
 
 # Maximum concurrent research+judge pipelines. Matched to --parallel on
-# the LLM server's Qwen3.5 instance — each agent gets a dedicated inference slot.
-MAX_CONCURRENT = 2
+# the LLM server — 1 slot with 65K context for thinking mode.
+MAX_CONCURRENT = 1
 
 # Search attribute keys for Temporal UI visibility
 SA_PHASE = SearchAttributeKey.for_keyword("Phase")
