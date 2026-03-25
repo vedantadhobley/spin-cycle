@@ -316,19 +316,44 @@ def _deduplicate_claims(claims: list[ExtractedClaim]) -> list[ExtractedClaim]:
     return unique
 
 
+_ANONYMOUS_SPEAKER = re.compile(
+    r"^(?:speaker\s*\w{0,3}|unknown|unidentified|moderator|host|interviewer"
+    r"|caller|audience\s*member|voice(?:\s*over)?)$",
+    re.IGNORECASE,
+)
+
+_JUNK_DESCRIPTION = re.compile(
+    r"(?:^(?:male|female)\s+given\s+name$"
+    r"|^given\s+name$"
+    r"|^(?:family|sur)\s*name"
+    r"|scientific\s+article"
+    r"|^Wikimedia\s+disambiguation"
+    r"|^human\s+name$"
+    r")",
+    re.IGNORECASE,
+)
+
+
 async def _enrich_speakers(speakers: list[str]) -> list[dict]:
     """Look up Wikidata descriptions for speakers.
 
+    Skips anonymous/generic names (Speaker 1, Unknown, etc.) and filters
+    out junk Wikidata hits (male given name, scientific article, etc.).
+
     Returns list of dicts like:
         [{"name": "Donald Trump", "description": "45th and 47th president of the United States"},
-         {"name": "John Smith", "description": null}]
+         {"name": "Speaker 1", "description": null}]
     """
     import asyncio
     from src.tools.wikidata import get_entity_description
 
     async def _lookup(name: str) -> dict:
+        if _ANONYMOUS_SPEAKER.match(name.strip()):
+            return {"name": name, "description": None}
         try:
             desc = await get_entity_description(name)
+            if desc and _JUNK_DESCRIPTION.search(desc):
+                desc = None
             return {"name": name, "description": desc}
         except Exception:
             return {"name": name, "description": None}
