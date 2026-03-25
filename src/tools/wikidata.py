@@ -244,6 +244,50 @@ async def get_entity_description(name: str) -> str | None:
         return None
 
 
+async def get_entity_aliases(qid: str) -> list[str]:
+    """Fetch alternative names/aliases for an entity from Wikidata.
+
+    Uses wbgetentities API to get aliases (e.g., QID for "Donald Trump" →
+    ["Trump", "Donald J. Trump", "DJT", "Donald John Trump"]).
+
+    Args:
+        qid: Wikidata QID (e.g., "Q22686")
+
+    Returns:
+        List of alias strings (English only), empty if not found
+    """
+    params = {
+        "action": "wbgetentities",
+        "ids": qid,
+        "props": "aliases",
+        "languages": "en",
+        "format": "json",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                WIKIDATA_SEARCH,
+                params=params,
+                headers={"User-Agent": USER_AGENT},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+            entity_data = data.get("entities", {}).get(qid, {})
+            alias_entries = entity_data.get("aliases", {}).get("en", [])
+            aliases = [a["value"] for a in alias_entries if a.get("value")]
+
+            log.debug(logger, MODULE, "aliases_found",
+                      "Wikidata aliases resolved",
+                      entity=qid, alias_count=len(aliases))
+            return aliases
+    except Exception as e:
+        log.warning(logger, MODULE, "aliases_failed",
+                    "Wikidata alias lookup failed",
+                    entity=qid, error=str(e))
+        return []
+
+
 async def get_entity_relationships(qid: str) -> dict:
     """Query Wikidata SPARQL for entity relationships.
 

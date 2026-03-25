@@ -1392,6 +1392,59 @@ def _filter_irrelevant_evidence(
     return kept
 
 
+def _analyze_relay_in_prefetch(
+    prefetch_messages: list,
+    all_parties: list[str],
+    party_aliases: dict[str, list[str]] | None = None,
+) -> str:
+    """Analyze prefetched page content for authority relay patterns.
+
+    Runs SpaCy dependency parsing on each prefetched page to detect when
+    evidence derives its factual basis from an interested party's
+    determination, designation, or document.
+
+    Returns a relay guidance string to inject into the agent's system
+    prompt (empty string if relay percentage is below threshold).
+    """
+    from langchain_core.messages import ToolMessage
+    from src.utils.relay_detection import analyze_relay_in_evidence
+
+    # Extract content from ToolMessage objects in prefetch_messages
+    evidence_items = []
+    for msg in prefetch_messages:
+        if isinstance(msg, ToolMessage) and msg.content:
+            evidence_items.append({"content": msg.content})
+
+    if not evidence_items:
+        return ""
+
+    summary = analyze_relay_in_evidence(
+        evidence_items, all_parties, party_aliases,
+    )
+
+    if summary["relay_pct"] < 60:
+        return ""
+
+    relay_parties_str = ", ".join(summary["relay_parties"][:3])
+    log.info(logger, MODULE, "relay_warning",
+             "High relay percentage in prefetched evidence",
+             relay_pct=summary["relay_pct"],
+             relay_parties=summary["relay_parties"],
+             relay_count=summary["relay_count"],
+             total=summary["total"])
+
+    return (
+        f"\n\n⚠️ RELAY DETECTION: {summary['relay_pct']}% of pre-fetched "
+        f"evidence relays positions from {relay_parties_str}. These sources "
+        f"cite the party's own designations/determinations as fact rather "
+        f"than providing independent verification.\n"
+        f"SEARCH DIFFERENTLY: Look for independent data, statistics, "
+        f"third-party investigations, or academic analysis that evaluates "
+        f"the underlying facts without relying on {relay_parties_str}'s "
+        f"authority."
+    )
+
+
 async def research_claim(
     sub_claim: str,
     interested_parties: InterestedPartiesDict | None = None,
@@ -1500,6 +1553,17 @@ async def research_claim(
     # full articles from the best sources without spending tool calls.
     prefetch_messages, prefetched_urls = await _prefetch_seed_pages(seed_results)
 
+    # Phase 1d: Analyze prefetched content for authority relay patterns.
+    # If evidence heavily relays interested party positions (e.g., all
+    # sources just cite "State Department designated X"), inject guidance
+    # for the agent to search for independent data instead.
+    relay_context = ""
+    if all_parties and prefetch_messages:
+        relay_context = _analyze_relay_in_prefetch(
+            prefetch_messages, all_parties,
+            interested_parties.get("party_aliases"),
+        )
+
     # Cap conflicted seeds shown to the agent — independent sources should
     # dominate what the agent sees so it doesn't spend tool calls on pages
     # that just quote interested parties.
@@ -1525,7 +1589,9 @@ async def research_claim(
     collected_messages: list = list(seed_messages) + list(prefetch_messages)
 
     try:
-        agent = build_research_agent(wikidata_context, claim_date=claim_date)
+        agent = build_research_agent(
+            wikidata_context + relay_context, claim_date=claim_date,
+        )
         transcript_context = (
             f"\nSource transcript: {transcript_title}" if transcript_title else ""
         )

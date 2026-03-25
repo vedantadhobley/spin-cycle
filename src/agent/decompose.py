@@ -41,9 +41,9 @@ from src.prompts.verification import (
     build_claim_date_line,
 )
 from src.schemas.llm_outputs import (
-    NormalizeOutput, DecomposeOutput, AtomicFact, SubclaimQualityCheck,
+    NormalizeOutput, DecomposeOutput, AtomicFact,
 )
-from src.tools.wikidata import get_ownership_chain, collect_all_connected_parties
+from src.tools.wikidata import get_ownership_chain, collect_all_connected_parties, get_entity_aliases
 from src.schemas.interested_parties import InterestedPartiesDict
 from src.utils.logging import log, get_logger
 
@@ -131,6 +131,7 @@ async def expand_interested_parties(interested_parties: dict) -> InterestedParti
     expanded_people = set(direct + institutional)
     expanded_media = set(affiliated_media)
     context_lines = []
+    party_aliases: dict[str, list[str]] = {}
 
     for party in parties_to_expand[:8]:  # Cap to avoid too many queries
         try:
@@ -139,6 +140,16 @@ async def expand_interested_parties(interested_parties: dict) -> InterestedParti
                 log.debug(logger, MODULE, "not_found",
                           "Entity not found in Wikidata", entity=party)
                 continue
+
+            # Fetch aliases for this entity (e.g., "Trump" for "Donald Trump")
+            qid = result.get("qid")
+            if qid:
+                aliases = await get_entity_aliases(qid)
+                if aliases:
+                    party_aliases[party] = aliases
+                    log.debug(logger, MODULE, "aliases_collected",
+                              "Collected aliases for party",
+                              party=party, aliases=aliases[:5])
 
             connected = collect_all_connected_parties(result)
 
@@ -201,6 +212,7 @@ async def expand_interested_parties(interested_parties: dict) -> InterestedParti
         "reasoning": interested_parties.get("reasoning"),
         "all_parties": all_parties,
         "wikidata_context": wikidata_context,
+        "party_aliases": party_aliases,
     }
 
 
@@ -326,78 +338,27 @@ async def _validate_subclaim_quality(
     facts: list[AtomicFact],
     claim_text: str,
 ) -> tuple[list[AtomicFact], list[str]]:
-    """Check decomposed sub-claims for semantic duplicates and group enumeration.
+    """Check decomposed sub-claims for near-duplicate facts.
 
-    Two-pass approach:
-    1. Programmatic: catch trivial near-duplicates (punctuation, case, whitespace)
-    2. LLM: catch semantic duplicates and group enumeration the code can't detect
+    Programmatic check only — catches trivial near-duplicates
+    (punctuation, case, whitespace differences). The LLM semantic
+    duplicate check was removed due to a 100% false positive rate
+    that caused valid decompositions to be collapsed.
 
     Returns:
         (clean_facts, issues) — clean_facts has trivial dupes removed.
-        If issues is non-empty, caller should retry decompose with LLM-detected issues.
+        issues is always empty (no LLM retry triggered).
     """
     if len(facts) < 2:
         return facts, []
 
-    # Pass 1: programmatic dedup (handles punctuation/whitespace/case dupes)
     deduped, dedup_issues = _dedup_facts(facts)
     if dedup_issues:
         log.info(logger, MODULE, "programmatic_dedup",
                  "Removed near-duplicate subclaims",
                  removed=len(facts) - len(deduped), issues=dedup_issues)
 
-    # If only 1 fact left after dedup, no need for LLM check
-    if len(deduped) < 2:
-        return deduped, []
-
-    # Pass 2: LLM check for semantic duplicates and group enumeration
-    numbered = "\n".join(f"{i}. {f.text}" for i, f in enumerate(deduped))
-
-    try:
-        result = await invoke_llm(
-            system_prompt=_SUBCLAIM_QUALITY_SYSTEM,
-            user_prompt=_SUBCLAIM_QUALITY_USER.format(
-                claim_text=claim_text, numbered_list=numbered,
-            ),
-            schema=SubclaimQualityCheck,
-            max_retries=1,
-            temperature=0,
-            max_tokens=16384,
-            activity_name="subclaim_quality",
-        )
-    except LLMInvocationError as e:
-        log.warning(logger, MODULE, "quality_check_failed",
-                    "Subclaim quality check failed, skipping", error=str(e))
-        return deduped, []
-
-    llm_issues: list[str] = []
-
-    if result.has_duplicates and result.duplicate_pairs:
-        for pair in result.duplicate_pairs:
-            if len(pair) == 2 and all(0 <= idx < len(deduped) for idx in pair):
-                llm_issues.append(
-                    f"Sub-claims {pair[0]} and {pair[1]} are semantically equivalent "
-                    f"(\"{deduped[pair[0]].text}\" ≡ \"{deduped[pair[1]].text}\"). "
-                    "Keep only one."
-                )
-
-    if result.has_enumeration and result.enumerated_indices:
-        valid_indices = [i for i in result.enumerated_indices if 0 <= i < len(deduped)]
-        if len(valid_indices) >= 2:
-            texts = [f"\"{deduped[i].text}\"" for i in valid_indices[:4]]
-            llm_issues.append(
-                f"Sub-claims {valid_indices} enumerate individual group members "
-                f"({', '.join(texts)}, ...). Consolidate into a single group-level claim."
-            )
-
-    if llm_issues:
-        log.info(logger, MODULE, "quality_issues",
-                 "Subclaim quality issues detected",
-                 issue_count=len(llm_issues), reasoning=result.reasoning)
-    else:
-        log.debug(logger, MODULE, "quality_ok", "Subclaim quality check passed")
-
-    return deduped, llm_issues
+    return deduped, []
 
 
 def _validate_decompose_consistency(output: DecomposeOutput) -> None:

@@ -1,7 +1,12 @@
 """Detect when interested parties are quoted or cited in evidence text.
 
-Pure text analysis — word boundary matching and attribution pattern detection.
-No external dependencies beyond stdlib.
+Three-layer name matching:
+1. Exact party name (word-boundary matched)
+2. Programmatic variants (last names from person names)
+3. Wikidata aliases (e.g., "U.S." for "United States", "Trump" for "Donald Trump")
+
+Each match must appear in an attribution context (said, according to, etc.)
+to avoid flagging mere mentions.
 
 Used by the judge to flag self-serving statements: when a claim is ABOUT
 entity X and the evidence quotes X's statements, those statements cannot
@@ -9,19 +14,127 @@ independently verify claims about X.
 """
 
 
-def detect_claim_subject_quotes(content: str, interested_parties: list[str]) -> list[str]:
+# Words that indicate quoted/cited speech
+_ATTRIBUTION_WORDS = frozenset({
+    "said", "says", "stated", "states", "reported", "reports",
+    "announced", "announces", "confirmed", "confirms", "denied", "denies",
+    "claimed", "claims", "concluded", "concludes", "found", "finds",
+    "determined", "issued", "released", "testified", "told",
+    "declared", "asserted", "maintained", "contended", "argued",
+})
+
+# Possessive patterns indicating source attribution
+_POSSESSIVE_INDICATORS = (
+    "'s statement", "'s investigation", "'s conclusion",
+    "'s report", "'s official", "'s finding", "'s analysis",
+    "'s determination", "'s position", "'s claim", "'s assessment",
+    "'s spokesperson", "'s press",
+)
+
+# Name stopwords — never useful as standalone match variants
+_NAME_STOPWORDS = frozenset({
+    "the", "of", "and", "for", "in", "on", "at", "to", "a", "an",
+    "by", "with", "from",
+})
+
+# Word boundary characters for precise matching
+_BOUNDARY_CHARS = frozenset(' .,;:!?\'"()[]{}\n\t-/')
+
+
+def _has_word_boundary(text: str, start: int, end: int) -> bool:
+    """Check if a match has word boundaries on both sides."""
+    start_ok = (start == 0) or (text[start - 1] in _BOUNDARY_CHARS)
+    end_ok = (end >= len(text)) or (text[end] in _BOUNDARY_CHARS)
+    return start_ok and end_ok
+
+
+def _find_with_boundary(text: str, pattern: str) -> int:
+    """Find pattern in text with word boundaries. Returns index or -1."""
+    start = 0
+    while True:
+        idx = text.find(pattern, start)
+        if idx == -1:
+            return -1
+        if _has_word_boundary(text, idx, idx + len(pattern)):
+            return idx
+        start = idx + 1
+
+
+def _generate_name_variants(party: str) -> list[str]:
+    """Extract identifying words from a multi-word party name.
+
+    Person names → last name ("Donald Trump" → ["Trump"])
+    For organizations, Wikidata aliases are the primary mechanism;
+    this provides a programmatic fallback.
+    """
+    words = party.split()
+    if len(words) < 2:
+        return []
+
+    significant = [w for w in words if w.lower() not in _NAME_STOPWORDS and len(w) > 2]
+    if len(significant) < 2:
+        return []
+
+    last = significant[-1]
+    if last[0:1].isupper():
+        return [last]
+
+    return []
+
+
+def _check_attribution_near(content_lower: str, name_idx: int, name_len: int) -> bool:
+    """Check for attribution patterns near a name mention.
+
+    Uses proximity windows rather than exact adjacency to catch patterns like
+    "Trump administration said" and "according to the Iranian government".
+    """
+    name_end = name_idx + name_len
+    content_len = len(content_lower)
+
+    # Pattern 1: "according to [the] [name]" — check 25 chars before name
+    before_start = max(0, name_idx - 25)
+    before = content_lower[before_start:name_idx]
+    if "according to " in before:
+        return True
+
+    # Pattern 2: [name] ... [attribution word] within 50 chars
+    after = content_lower[name_end:min(content_len, name_end + 50)]
+    for attr in _ATTRIBUTION_WORDS:
+        attr_idx = after.find(attr)
+        if attr_idx >= 0 and _has_word_boundary(after, attr_idx, attr_idx + len(attr)):
+            return True
+
+    # Pattern 3: [name]'s [possessive indicator] within 40 chars
+    poss_window = content_lower[name_end:min(content_len, name_end + 40)]
+    for poss in _POSSESSIVE_INDICATORS:
+        if poss in poss_window:
+            return True
+
+    return False
+
+
+def detect_claim_subject_quotes(
+    content: str,
+    interested_parties: list[str],
+    party_aliases: dict[str, list[str]] | None = None,
+) -> list[str]:
     """Detect when interested parties are quoted/cited in evidence.
 
     When a claim is ABOUT entity X, and the evidence quotes X's statements,
     those are self-serving statements — not independent verification.
 
-    This function detects attribution patterns for the interested parties.
-    The interested_parties list should already be expanded by decomposition
-    (e.g., ["FBI", "DOJ", "Executive Branch"]) — no hardcoded expansion needed.
+    Matching uses three layers:
+    1. Exact party name (word-boundary matched)
+    2. Programmatic variants (last names from person names)
+    3. Wikidata aliases (if provided — e.g., "U.S." for "United States")
+
+    Each match must appear in an attribution context (said, according to, etc.)
+    to avoid flagging mere mentions.
 
     Args:
         content: The evidence text to analyze
         interested_parties: List of interested parties from decomposition's all_parties
+        party_aliases: Optional dict mapping party names to Wikidata aliases
 
     Returns:
         List of interested parties that appear to be quoted/cited in the content
@@ -30,94 +143,39 @@ def detect_claim_subject_quotes(content: str, interested_parties: list[str]) -> 
         return []
 
     content_lower = content.lower()
-    quoted_parties = []
+    quoted_parties: set[str] = set()
 
-    # Word boundary characters for more precise matching
-    # This prevents "FBI" matching in "FIBRIN" or "DOJ" in "DOJO"
-    boundary_chars = set(' .,;:!?\'"()[]{}\n\t-/')
-
-    # Attribution patterns — words that indicate something is being quoted/cited
-    attribution_words = [
-        "said", "says", "stated", "states", "reported", "reports",
-        "announced", "announces", "confirmed", "confirms", "denied", "denies",
-        "claimed", "claims", "concluded", "concludes", "found", "finds",
-        "determined", "issued", "released", "testified", "told",
-    ]
-
-    def has_word_boundary(text: str, start: int, end: int) -> bool:
-        """Check if a match has word boundaries on both sides."""
-        # Start boundary: either at beginning or preceded by boundary char
-        start_ok = (start == 0) or (text[start - 1] in boundary_chars)
-        # End boundary: either at end or followed by boundary char
-        end_ok = (end >= len(text)) or (text[end] in boundary_chars)
-        return start_ok and end_ok
-
-    def find_with_boundary(text: str, pattern: str) -> int:
-        """Find pattern in text with word boundaries. Returns index or -1."""
-        start = 0
-        while True:
-            idx = text.find(pattern, start)
-            if idx == -1:
-                return -1
-            if has_word_boundary(text, idx, idx + len(pattern)):
-                return idx
-            start = idx + 1
-        return -1
+    # Build name → original party mapping with all variants
+    match_terms: dict[str, str] = {}
 
     for party in interested_parties:
         party_lower = party.lower()
+        if len(party_lower) >= 3:
+            match_terms[party_lower] = party
 
-        # Skip very short names to avoid false matches
-        if len(party_lower) < 3:
+        # Programmatic variants (last name extraction)
+        for variant in _generate_name_variants(party):
+            v_lower = variant.lower()
+            if len(v_lower) >= 3 and v_lower not in match_terms:
+                match_terms[v_lower] = party
+
+        # Wikidata aliases
+        if party_aliases and party in party_aliases:
+            for alias in party_aliases[party]:
+                a_lower = alias.lower()
+                if len(a_lower) >= 2 and a_lower not in match_terms:
+                    match_terms[a_lower] = party
+
+    # Check each match term against content
+    for name_lower, original_party in match_terms.items():
+        if original_party in quoted_parties:
             continue
 
-        # Check if party appears in content with word boundaries
-        # This prevents "FBI" matching "FIBRIN" or "DOJ" matching "DOJO"
-        party_idx = find_with_boundary(content_lower, party_lower)
-        if party_idx == -1:
+        name_idx = _find_with_boundary(content_lower, name_lower)
+        if name_idx == -1:
             continue
 
-        # Check for attribution patterns around this party name
-        is_quoted = False
+        if _check_attribution_near(content_lower, name_idx, len(name_lower)):
+            quoted_parties.add(original_party)
 
-        # Pattern 1: "according to [the] X"
-        if find_with_boundary(content_lower, f"according to {party_lower}") >= 0 or \
-           find_with_boundary(content_lower, f"according to the {party_lower}") >= 0:
-            is_quoted = True
-
-        # Pattern 2: "[the] X [attribution_word]" (e.g., "FBI said", "the FBI confirmed")
-        if not is_quoted:
-            for attr in attribution_words:
-                if find_with_boundary(content_lower, f"{party_lower} {attr}") >= 0 or \
-                   find_with_boundary(content_lower, f"the {party_lower} {attr}") >= 0:
-                    is_quoted = True
-                    break
-
-        # Pattern 3: "X's [statement/investigation/conclusion/report/official]"
-        if not is_quoted:
-            possessives = ["'s statement", "'s investigation", "'s conclusion", "'s report", "'s official", "'s finding", "'s analysis", "'s determination"]
-            for poss in possessives:
-                if find_with_boundary(content_lower, f"{party_lower}{poss}") >= 0:
-                    is_quoted = True
-                    break
-
-        # Pattern 4: "X spokesperson/official/director said" (title + attribution)
-        if not is_quoted:
-            titles = ["spokesperson", "official", "director", "chief", "head", "representative"]
-            for title in titles:
-                title_pattern = f"{party_lower} {title}"
-                idx = find_with_boundary(content_lower, title_pattern)
-                if idx >= 0:
-                    # Check if followed by attribution word within ~60 chars
-                    after = content_lower[idx:idx+60]
-                    for attr in attribution_words:
-                        if attr in after:
-                            is_quoted = True
-                            break
-                if is_quoted:
-                    break
-
-        if is_quoted:
-            quoted_parties.append(party)
-
-    return quoted_parties
+    return list(quoted_parties)

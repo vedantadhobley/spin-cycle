@@ -543,11 +543,13 @@ def _annotate_evidence(
 ) -> tuple[str, str, list[dict]]:
     """Format evidence with MBFC ratings, interest checks, and bias tracking.
 
-    Four interest checks per evidence item:
+    Six interest checks per evidence item:
+    0. Government/military domain
     1. Affiliated media URL match
     2. Interested party quoted in content
     3. Publisher owned by interested party
     4. Sub-source references with poor ratings
+    5. Authority relay (SpaCy dep parse — evidence derives from party's determination)
 
     Returns (evidence_text, quality_summary, evidence_metadata) for injection
     into the judge prompt. evidence_metadata is a list of dicts with structured
@@ -561,6 +563,7 @@ def _annotate_evidence(
     party_quotes_count = 0
     publisher_ownership_count = 0
     sub_source_count = 0
+    relay_count = 0
 
     # Quality summary accumulators
     tier_counts: dict[str, int] = {}  # e.g. "TIER 1 (very high factual)": 3
@@ -638,7 +641,8 @@ def _annotate_evidence(
 
         # Check 2: Does the content quote statements from interested parties?
         if all_parties:
-            quoted_entities = detect_claim_subject_quotes(content, all_parties)
+            party_aliases = interested_parties.get("party_aliases")
+            quoted_entities = detect_claim_subject_quotes(content, all_parties, party_aliases)
             if quoted_entities:
                 interested_party_count += 1
                 party_quotes_count += 1
@@ -713,6 +717,37 @@ def _annotate_evidence(
                 log.debug(logger, MODULE, "sub_source_ner_error",
                           "NER failed during sub-source detection", error=str(e))
 
+        # Check 5: Does the evidence relay an interested party's authority
+        # position? SpaCy dependency parsing detects when evidence derives
+        # its factual basis from a determination/designation by a party.
+        if all_parties and content:
+            try:
+                from src.utils.relay_detection import detect_authority_relay
+                party_aliases = interested_parties.get("party_aliases")
+                relays = detect_authority_relay(
+                    content, all_parties, party_aliases,
+                )
+                if relays:
+                    interested_party_count += 1
+                    relay_count += 1
+                    for relay in relays:
+                        interest_warnings.append(
+                            f"⚠\ufe0f AUTHORITY RELAY: Evidence relays "
+                            f"{relay['party']}'s position "
+                            f"({relay['relay_type']}: \"{relay['verb']}\"). "
+                            f"This is the party's own determination, NOT "
+                            f"independent verification."
+                        )
+                    ev_meta["relay_detections"] = relays
+                    log.debug(logger, MODULE, "relay_detected",
+                              "Evidence relays interested party position",
+                              parties=[r["party"] for r in relays],
+                              types=[r["relay_type"] for r in relays],
+                              url=url)
+            except Exception as e:
+                log.debug(logger, MODULE, "relay_detection_error",
+                          "Relay detection failed", error=str(e))
+
         # Track bias distribution for judge context
         if rating and rating.get("bias"):
             bias = rating["bias"]
@@ -762,6 +797,7 @@ def _annotate_evidence(
              party_quote_warnings=party_quotes_count,
              publisher_ownership_warnings=publisher_ownership_count,
              sub_source_warnings=sub_source_count,
+             relay_warnings=relay_count,
              bias_distribution=bias_distribution,
              bias_skew=bias_skew)
 

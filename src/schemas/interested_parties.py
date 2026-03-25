@@ -23,3 +23,4 @@ class InterestedPartiesDict(TypedDict, total=False):
     reasoning: str | None
     all_parties: list[str]
     wikidata_context: str
+    party_aliases: dict[str, list[str]]
