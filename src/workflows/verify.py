@@ -343,7 +343,7 @@ class VerifyClaimWorkflow:
                 judge_subclaim,
                 args=[claim_text, fact_text, evidence, merged_p, speaker_context,
                       claim_date, vt, transcript_title, key_test],
-                start_to_close_timeout=timedelta(seconds=300),
+                start_to_close_timeout=timedelta(seconds=600),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
             # Update progress
@@ -411,7 +411,7 @@ class VerifyClaimWorkflow:
                 synthesize_verdict,
                 args=[claim_text, sub_results, thesis_info, claim_date,
                       transcript_title],
-                start_to_close_timeout=timedelta(seconds=300),
+                start_to_close_timeout=timedelta(seconds=600),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
 
