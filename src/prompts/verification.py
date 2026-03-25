@@ -471,7 +471,7 @@ Return ONLY the JSON object. No markdown, no explanation, no wrapping.\
 
 NORMALIZE_USER = """\
 Normalize this claim into neutral, researchable language.
-{speaker_line}
+{speaker_line}{transcript_context}
 Claim: {claim_text}
 
 Return ONLY the JSON object.\
@@ -678,7 +678,7 @@ No markdown, no explanation, no wrapping.\
 
 DECOMPOSE_USER = """\
 Decompose this claim into verifiable atomic facts.
-{speaker_line}
+{speaker_line}{transcript_context}
 Claim: {claim_text}
 
 When a Speaker is provided, the claim is a DIRECT QUOTE — do NOT create \
@@ -779,7 +779,7 @@ SUMMARY: Brief description of what the evidence shows.\
 
 RESEARCH_USER = """\
 Find evidence about this claim:
-{speaker_line}
+{speaker_line}{transcript_context}
 "{sub_claim}"
 
 Seed searches have already been run — you can see their results in the \
@@ -864,6 +864,9 @@ language is colloquial, state what a reasonable person would understand.
 the deadline was met.
 Absolute terms ("never", "any", "all"): evaluate the EXACT scope. Do NOT \
 narrow "any X measures" to just "full-scale X".
+KEY TEST: If a "Key test for overall claim" is provided, your evaluation \
+of this sub-claim must address whether the evidence satisfies or undermines \
+that test. The key test is what must be true for the ORIGINAL claim to hold.
 → Output: "claim_interpretation"
 
 STEP 2 — TRIAGE KEY EVIDENCE
@@ -910,11 +913,15 @@ mostly_true. Reserve true for exact match.
 - Boundary technicalities: 200-year record broken by minor boundary case → \
 mostly_true, not false. Weigh materiality.
 - Explicit numbers: state both figures and compare directly.
+- Scope mismatch: evidence about a DIFFERENT scope, audience, or category than \
+the claim does NOT confirm it. Match the claim's EXACT terms.
 - Conflicting findings on DIFFERENT questions don't contradict each other.
 → Output: "precision_assessment" (show work for quantitative claims)
 
 STEP 5 — RENDER VERDICT
-Derive from Steps 3 + 4.
+Derive from Steps 3 + 4. Your verdict MUST be consistent with your analysis. \
+If Steps 3-4 identified gaps between the evidence and the specific claim, the \
+verdict MUST reflect those gaps — do NOT round up.
 
 Verdict scale:
 - "true" — evidence clearly supports the claim as stated.
@@ -944,7 +951,9 @@ CONFIDENCE CALIBRATION:
 
 CITATION FORMAT: In your reasoning, cite evidence using [N] notation matching \
 the evidence numbers above (e.g., "Multiple sources [1][3] confirm..."). \
-Every factual assertion in your reasoning must cite at least one source.
+Every factual assertion in your reasoning must cite at least one source. \
+You MUST cite at least 3 different sources in your reasoning. Draw on the full \
+range of evidence — do not rely on just 1-2 sources when more are available.
 
 OUTPUT QUALITY: Re-read before returning. Fix typos. Correct grammar. \
 This is shown directly to users.
@@ -992,11 +1001,11 @@ Do NOT wrap in markdown. No explanation outside the JSON.\
 JUDGE_USER = """\
 Judge this sub-claim using the 5-step rubric. Base your evaluation ONLY on \
 the evidence below. Do not use your own knowledge.
-{speaker_line}
+{speaker_line}{transcript_context}
 Original claim (for context): {claim_text}
 
 Sub-claim to judge: {sub_claim}
-{verification_line}
+{verification_line}{key_test_line}
 Evidence:
 {evidence_text}
 
@@ -1025,7 +1034,9 @@ verdict. Never say "sub-claim [1]" or reference internal numbering. \
 Reference what you found: "CDC data shows...", "according to DoD records..."
 
 CITATION FORMAT: Cite sources using [N] notation (e.g., "According to \
-Reuters [1]..."). Ground factual claims with source citations.
+Reuters [1]..."). Ground factual claims with source citations. You MUST cite \
+at least 5 different sources from the evidence digest. Draw broadly — the \
+reader needs to see the full evidence picture, not just 1-2 cherry-picked sources.
 
 HOW TO COMBINE: Trust the sub-claim verdicts — do NOT re-analyze or \
 override them. Multiple facts verified by the SAME source = one \
@@ -1106,7 +1117,7 @@ No markdown, no explanation, no wrapping.\
 
 SYNTHESIZE_USER = """\
 Combine these sub-claim verdicts into a single verdict using the 4-step rubric.
-
+{transcript_context}
 {synthesis_framing}
 
 Sub-claim verdicts:

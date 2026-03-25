@@ -11,7 +11,9 @@ class ClaimSubmit(BaseModel):
     source: Optional[str] = Field(None, description="URL where the claim was found")
     source_name: Optional[str] = Field(None, description="Name of the source (e.g., 'BBC News')")
     speaker: Optional[str] = Field(None, description="Person or entity making the claim")
+    speaker_description: Optional[str] = Field(None, description="Speaker's title/role (e.g., '45th president of the United States'). Looked up via Wikidata if not provided.")
     claim_date: Optional[str] = Field(None, description="When the claim was made (ISO date or free text)")
+    transcript_title: Optional[str] = Field(None, description="Title of the source transcript for topic context")
 
     @field_validator("text")
     @classmethod

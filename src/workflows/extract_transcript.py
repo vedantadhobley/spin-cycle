@@ -171,6 +171,7 @@ class ExtractTranscriptWorkflow:
                         batch["text_start"],
                         batch["text_end"],
                         label,
+                        self._title,
                     ],
                     # Structured output for 30 segments can take 15+ min on local LLM
                     start_to_close_timeout=timedelta(seconds=1200),
@@ -195,7 +196,14 @@ class ExtractTranscriptWorkflow:
         )
 
         # Await store (should be done long before batches finish)
-        self._transcript_id = await store_task
+        store_result = await store_task
+        self._transcript_id = store_result["transcript_id"]
+
+        # Build speaker → description lookup from Wikidata-enriched speakers
+        speaker_descriptions = {}
+        for s in store_result.get("speakers", []):
+            if isinstance(s, dict) and s.get("description"):
+                speaker_descriptions[s["name"]] = s["description"]
 
         # Collect results, log failures
         all_batch_claims: list[list[dict]] = []
@@ -274,7 +282,8 @@ class ExtractTranscriptWorkflow:
             claim_ids = await workflow.execute_activity(
                 create_claims_for_transcript,
                 args=[self._transcript_id, worth_checking_tc_ids, claims,
-                      transcript_data.get("date")],
+                      transcript_data.get("date"), self._title,
+                      speaker_descriptions],
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
@@ -306,11 +315,15 @@ class ExtractTranscriptWorkflow:
             failed = 0
             for claim_id_str, claim_data in zip(claim_ids, claims):
                 try:
+                    speaker_name = claim_data.get("speaker")
+                    speaker_desc = speaker_descriptions.get(speaker_name, "") if speaker_name else ""
                     await workflow.execute_child_workflow(
                         VerifyClaimWorkflow.run,
                         args=[claim_id_str, claim_data["claim_text"],
-                              claim_data.get("speaker"), transcript_date,
-                              True],  # is_child=True
+                              speaker_name, transcript_date,
+                              True,  # is_child
+                              self._title,  # transcript_title
+                              speaker_desc],  # speaker_description
                         id=f"verify-{claim_id_str}",
                         task_queue="spin-cycle-verify",
                     )

@@ -10,47 +10,21 @@ Because we're putting the spin through the wringer.
 
 ## Architecture
 
-```
-                    ┌─────────────────────────────────────────────┐
-                    │              vedanta-systems                │
-                    │            (frontend @ 3100)                │
-                    └──────────────────┬──────────────────────────┘
-                                       │ HTTP
-                    ┌──────────────────▼──────────────────────────┐
-                    │         FastAPI Backend (3500/4500)          │
-                    │  - Submit claims for verification            │
-                    │  - Query verdicts + evidence chains          │
-                    └──────┬──────────────────┬───────────────────┘
-                           │                  │
-              ┌────────────▼────┐    ┌────────▼─────────────┐
-              │   Temporal       │    │   PostgreSQL          │
-              │   (3501/4501)    │    │   claims, verdicts,   │
-              │   Workflow        │    │   evidence, sources   │
-              │   orchestration  │    └───────────────────────┘
-              └────────┬─────────┘
-                       │ activities
-              ┌────────▼─────────────────────────────────────────┐
-              │           Verification Pipeline                   │
-              │                                                   │
-              │  ┌─────────┐  ┌──────────┐  ┌────────────────┐  │
-              │  │Decompose│→│ Research  │→│  Judge &        │  │
-              │  │ (LLM)   │  │ (agent)  │  │  Synthesize    │  │
-              │  └─────────┘  └──────────┘  └────────────────┘  │
-              │                      │                            │
-              │               ┌──────▼──────┐                    │
-              │               │ Serper      │                    │
-              │               │ DuckDuckGo  │                    │
-              │               │ Wikipedia   │                    │
-              │               │ Page Fetch  │                    │
-              │               └─────────────┘                    │
-              │                      │                            │
-              │               ┌──────▼──────┐                    │
-              │               │ Programmatic│                    │
-              │               │ LegiScan    │                    │
-              │               │ Wikidata    │                    │
-              │               │ MBFC        │                    │
-              │               └─────────────┘                    │
-              └─────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    FE["vedanta-systems\n(frontend @ 3100)"] <-->|HTTP| API["FastAPI Backend\n(3500/4500)"]
+    API <--> DB[(PostgreSQL\nclaims, verdicts,\nevidence, sources)]
+    API --> TEMP["Temporal\n(3501/4501)\nWorkflow orchestration"]
+
+    TEMP --> PIPE
+
+    subgraph PIPE["Verification Pipeline"]
+        DEC["Decompose\n(LLM)"] --> RES["Research\n(ReAct agent)"]
+        RES --> JDG["Judge &\nSynthesize\n(LLM)"]
+
+        RES --> AGENT["Agent Tools:\nSerper, DuckDuckGo,\nWikipedia, Page Fetch"]
+        RES --> PROG["Programmatic:\nLegiScan, Wikidata,\nMBFC"]
+    end
 ```
 
 ## Stack
@@ -83,51 +57,41 @@ curl -X POST http://localhost:4500/claims \
 
 The claim triggers `VerifyClaimWorkflow` — a flat pipeline of 7 activities:
 
-```
-create_claim          Creates DB record (skipped if called via API)
-    ↓
-decompose_claim       Normalize → Decompose → Quality Validate (2-4 LLM calls, 1 activity)
-                      Normalize: 7 transformations (bias neutralization,
-                        operationalization, opinion separation, coreference,
-                        reference grounding, speculation, rhetorical framing)
-                      Decompose: flat atomic facts + thesis extraction
-                      Quality validate: checks for semantic duplicates
-                        ("No X did Y" ≡ "Y happened for every X") and
-                        group enumeration (7 G7 facts → 1 group fact)
-                        If issues found, retries decompose once with feedback
-                      Each fact gets categories + LLM-written seed queries
-                      Guided by 15-category linguistic pattern taxonomy
-                        + 15 extraction rules (decontextualize, entity disambig.,
-                          operationalize comparisons, polarity/qualifier
-                          preservation, embedded conclusion splitting)
-                      SpaCy NER augments entity extraction
-                      Wikidata expands parties → ownership, media, family
-    ↓
-RESEARCH PHASE (all facts, 2 concurrent):
-    research_subclaim   Phase 1a: Programmatic seed search (Serper + DuckDuckGo fallback, ~30-50 URLs)
-       ↓                Phase 1b: MBFC await → MBFC ownership→Wikidata enrichment
-       ↓                  → score → conflict detect → rank → top 30 (tier + conflicts)
-       ↓                Phase 2: LangGraph ReAct agent (fetches, follow-up)
-       ↓                Phase 3: LegiScan + evidence NER→Wikidata enrichment
-       ↓                Returns: evidence + enriched interested parties
-    ↓                   (enriched parties merged across sub-claims)
-JUDGE PHASE (all facts, 2 concurrent, receives merged parties):
-    judge_subclaim      Pre-judge: lightweight NER cleanup (parallel Wikidata)
-       ↓                Evidence ranking + MBFC annotation
-       ↓                4 conflict-of-interest checks per evidence item
-       ↓                LLM evaluates evidence (6-level verdict scale)
-    ↓
-synthesize_verdict    LLM combines sub-verdicts using the speaker's thesis
-                      as primary rubric (not naive fact counting)
-    ↓
-store_result              Writes results to Postgres
-    ↓
-start_next_queued_claim   Picks up next queued claim (if any) and starts its workflow
+```mermaid
+flowchart TD
+    CREATE["create_claim\n(if needed)"] --> DEC
+
+    subgraph DEC["decompose_claim (2-4 LLM calls)"]
+        N["Normalize\n(7 transformations)"] --> D["Decompose\n(flat facts + thesis)"]
+        D --> Q["Quality validate\n(semantic dupes, enumeration)"]
+        Q --> W["Wikidata expansion\n(ownership, media, family)"]
+    end
+
+    DEC --> R
+
+    subgraph R["RESEARCH PHASE (2 concurrent)"]
+        RS["research_subclaim × N"]
+        RS --> |"each"| SEED["Seed search → MBFC → rank"]
+        SEED --> AGENT["ReAct agent (8-12 tools)"]
+        AGENT --> ENRICH["LegiScan + evidence NER"]
+    end
+
+    R --> J
+
+    subgraph J["JUDGE PHASE (2 concurrent)"]
+        JS["judge_subclaim × N"]
+        JS --> RANK["Rank + annotate evidence"]
+        RANK --> EVAL["LLM verdict (6-level scale)"]
+    end
+
+    J --> SYN["synthesize_verdict\n(thesis as primary rubric)"]
+    SYN --> STORE["store_result"]
+    STORE --> NEXT["start_next_queued_claim"]
 ```
 
 Only one claim verifies at a time (to avoid LLM contention). When a claim finishes, the workflow starts the next queued one. Submitting while a claim is running queues it as a DB row.
 
-The **flat facts** approach (matching Google SAFE and FActScore) means the LLM outputs facts directly as strings, guided by a comprehensive **linguistic patterns taxonomy** that catches presuppositions, quantifier scope, temporal boundaries, causation types, and more.
+The **flat facts** approach (matching Google SAFE and FActScore) means the LLM outputs facts directly as strings, guided by 15 extraction rules that catch presuppositions, quantifier scope, temporal boundaries, causation types, and more.
 
 The thesis extraction ensures the synthesizer understands the **intent** of the claim, not just the individual facts. For example, a claim comparing two countries' policies is rated `mostly_false` even though 5/6 sub-facts are true — because one country's data contradicts the speaker's parallel comparison.
 
@@ -238,12 +202,16 @@ curl -s -X POST http://localhost:4500/claims/batch \
   }' | python3 -m json.tool
 ```
 
-You can also submit a claim with source attribution:
+You can also submit a claim with full context (all fields optional except `text`):
 ```bash
 curl -s -X POST http://localhost:4500/claims \
   -H "Content-Type: application/json" \
   -d '{
     "text": "Country A spent $50 billion on Project X before cancelling the second phase",
+    "speaker": "Minister of Defense",
+    "speaker_description": "Minister of Defense of Country B",
+    "claim_date": "2026-03-15",
+    "transcript_title": "Defense Committee Hearing",
     "source": "https://example.com/article",
     "source_name": "The Example Times"
   }' | python3 -m json.tool
@@ -259,9 +227,9 @@ Open http://localhost:4501 and you can:
    - Workflow Type: `VerifyClaimWorkflow`
    - Workflow ID: anything unique, e.g. `test-1`
    - Task Queue: `spin-cycle-verify`
-   - Input: `[null, "The claim text you want to verify"]`
+   - Input: `[null, "The claim text", "Speaker Name", "2026-03-15", false, "Transcript Title", "Speaker's job title"]`
 
-   The first argument is `null` — the workflow will create the claim record in the database automatically. (If you already have a claim ID from the API, you can pass it instead of `null`.)
+   Args: `[claim_id, text, speaker, claim_date, is_child, transcript_title, speaker_description]`. The first argument is `null` — the workflow will create the claim record automatically. Only `text` is required; others can be `null`.
 
 3. **Replay and debug** — if a workflow fails, you can see exactly which activity failed, what it received, and what error it threw.
 
@@ -317,13 +285,13 @@ Nine tables in PostgreSQL, all with UUID primary keys (except cache tables which
 
 | Table | Purpose | Key Columns |
 |-------|---------|-------------|
-| `claims` | Top-level claims | text, source_url, status, decompose rubric (normalized_claim, thesis, claim_structure, claim_analysis) |
+| `claims` | Top-level claims | text, speaker, speaker_description, claim_date, transcript_title, status, decompose rubric (normalized_claim, thesis, key_test, claim_structure, claim_analysis) |
 | `sub_claims` | Decomposed sub-claim tree | text, parent_id (self-ref FK), is_leaf, verdict, confidence, categories, seed_queries, judge_rubric (JSONB) |
 | `evidence` | Research results per sub-claim | source_type, content, URL, bias, factual, tier, assessment, is_independent |
 | `verdicts` | Overall claim verdict | verdict, confidence, reasoning, reasoning_chain (JSONB), synthesis_rubric (JSONB) |
 | `interested_parties` | Entities with conflicts of interest | entity_name, role (direct/institutional/affiliated_media), source (llm/ner/wikidata) |
 | `transcripts` | Stored transcript records | url, title, date, speakers, word_count, display_text, status |
-| `transcript_claims` | Claims extracted from transcripts | claim_text, original_quote, speaker, timestamp, worth_checking, skip_reason, checkable, is_restatement |
+| `transcript_claims` | Claims extracted from transcripts | claim_text, original_quote, speaker, worth_checking, skip_reason, checkable, is_restatement, segment_gist |
 | `source_ratings` | Cached MBFC ratings | domain (PK), bias, factual_reporting, ownership, country |
 | `wikidata_cache` | Cached Wikidata entity data | entity_name (PK), qid, relationships (JSONB), 7-day TTL |
 
@@ -386,8 +354,7 @@ spin-cycle/
 │   │
 │   ├── prompts/                    # LLM prompts (heavily documented)
 │   │   ├── verification.py         # Normalize, Decompose, Research, Judge, Synthesize
-│   │   ├── extraction.py           # Transcript claim extraction
-│   │   └── linguistic_patterns.py  # 15-category linguistic pattern taxonomy
+│   │   └── extraction.py           # Transcript claim extraction
 │   │
 │   ├── schemas/                    # Data schemas
 │   │   ├── api.py                  # Pydantic API request/response models

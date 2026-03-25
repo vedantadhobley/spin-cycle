@@ -206,6 +206,44 @@ async def search_entity(name: str) -> Optional[str]:
 
 
 
+async def get_entity_description(name: str) -> str | None:
+    """Get a one-line Wikidata description for an entity (e.g. a speaker).
+
+    Uses the wbsearchentities API which returns descriptions like
+    "45th and 47th president of the United States" for "Donald Trump".
+
+    Returns the description string, or None if not found.
+    """
+    clean_name = _strip_leading_article(name)
+    params = {
+        "action": "wbsearchentities",
+        "search": clean_name,
+        "language": "en",
+        "format": "json",
+        "limit": 1,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                WIKIDATA_SEARCH, params=params,
+                headers={"User-Agent": USER_AGENT},
+            )
+            resp.raise_for_status()
+            results = resp.json().get("search", [])
+            if results and results[0].get("description"):
+                desc = results[0]["description"]
+                log.debug(logger, MODULE, "description_found",
+                          "Wikidata description resolved",
+                          entity=clean_name, description=desc)
+                return desc
+            return None
+    except Exception as e:
+        log.warning(logger, MODULE, "description_failed",
+                    "Wikidata description lookup failed",
+                    entity=name, error=str(e))
+        return None
+
+
 async def get_entity_relationships(qid: str) -> dict:
     """Query Wikidata SPARQL for entity relationships.
 

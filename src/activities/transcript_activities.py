@@ -70,6 +70,7 @@ async def extract_transcript_batch(
     text_start: int,
     text_end: int,
     batch_label: str,
+    transcript_title: str | None = None,
 ) -> list[dict]:
     """Extract claims from one batch of transcript segments.
 
@@ -97,6 +98,7 @@ async def extract_transcript_batch(
         text_segments=text_segments,
         target_segments=target_segments,
         batch_label=batch_label,
+        transcript_title=transcript_title,
     )
 
     result = [
@@ -235,19 +237,26 @@ async def finalize_extraction(
 
 
 @activity.defn
-async def store_transcript(transcript_data: dict) -> str:
+async def store_transcript(transcript_data: dict) -> dict:
     """Persist cleaned transcript to the database.
 
     Upserts by URL — if the transcript already exists, updates it.
-    Returns the transcript record ID.
+    Enriches speaker names with Wikidata descriptions before storing.
+    Returns dict with transcript_id and enriched speakers.
     """
     from sqlalchemy import select
     from src.db.session import async_session
     from src.db.models import TranscriptRecord
+    from src.transcript.extractor import _enrich_speakers
 
     url = transcript_data["url"]
     log.info(activity.logger, "transcript", "store_start", "Storing transcript",
              url=url, title=transcript_data.get("title"))
+
+    # Enrich speakers with Wikidata descriptions before storing
+    raw_speakers = transcript_data.get("speakers", [])
+    enriched_speakers = await _enrich_speakers(raw_speakers)
+    transcript_data["speakers"] = enriched_speakers
 
     async with async_session() as session:
         result = await session.execute(
@@ -281,9 +290,10 @@ async def store_transcript(transcript_data: dict) -> str:
 
     log.info(activity.logger, "transcript", "stored",
              "Transcript stored in database",
-             url=url, transcript_id=record_id)
+             url=url, transcript_id=record_id,
+             enriched_speakers=len(enriched_speakers))
 
-    return record_id
+    return {"transcript_id": record_id, "speakers": enriched_speakers}
 
 
 @activity.defn
@@ -320,6 +330,7 @@ async def store_transcript_claims(
                 skip_reason=c.get("skip_reason"),
                 checkable=c.get("checkable"),
                 checkability_rationale=c.get("checkability_rationale"),
+                is_restatement=c.get("is_restatement", False),
                 segment_gist=c.get("segment_gist"),
             )
             session.add(tc)
@@ -341,17 +352,21 @@ async def create_claims_for_transcript(
     transcript_claim_ids: list[str],
     claims: list[dict],
     transcript_date: str | None = None,
+    transcript_title: str | None = None,
+    speaker_descriptions: dict | None = None,
 ) -> list[str]:
     """Batch-create Claim records and link them to TranscriptClaims via FK.
 
     Single transaction: creates all Claim records with status="queued",
-    sets speaker/source_url/claim_date, and writes claim_id back to each
-    TranscriptClaim. Returns list of claim_id strings (insertion order).
+    sets speaker/source_url/claim_date/speaker_description/transcript_title,
+    and writes claim_id back to each TranscriptClaim.
+    Returns list of claim_id strings (insertion order).
     """
     from sqlalchemy import select
     from src.db.session import async_session
     from src.db.models import Claim, TranscriptClaim
 
+    speaker_descriptions = speaker_descriptions or {}
     claim_ids: list[str] = []
     log.info(activity.logger, "transcript", "create_claims_start",
              "Creating Claim records for verification",
@@ -360,12 +375,15 @@ async def create_claims_for_transcript(
     async with async_session() as session:
         async with session.begin():
             for tc_id_str, claim_data in zip(transcript_claim_ids, claims):
+                speaker_name = claim_data.get("speaker")
                 # Create the Claim record
                 claim = Claim(
                     text=claim_data["claim_text"],
-                    speaker=claim_data.get("speaker"),
+                    speaker=speaker_name,
+                    speaker_description=speaker_descriptions.get(speaker_name, "") if speaker_name else None,
                     source_url=claim_data.get("source_url"),
                     claim_date=transcript_date,
+                    transcript_title=transcript_title,
                     status="queued",
                 )
                 session.add(claim)

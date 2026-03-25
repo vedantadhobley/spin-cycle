@@ -8,7 +8,7 @@ Where spin-cycle is, where it needs to go, and what each improvement actually do
 
 A working end-to-end claim verification pipeline with **flat fact extraction + thesis-aware synthesis**:
 - Manual claim submission via API
-- LLM extracts **flat atomic facts** (matching Google SAFE/FActScore approach) + thesis — guided by 15-category linguistic patterns taxonomy
+- LLM extracts **flat atomic facts** (matching Google SAFE/FActScore approach) + thesis — guided by 15 extraction rules in the decompose prompt
 - **Thesis extraction** captures the speaker's intent (thesis, structure, key_test) for synthesis
 - Atomic sub-claims researched + judged **in parallel batches** (MAX_CONCURRENT=2) via `asyncio.gather`
 - **Thesis-aware synthesis** — evaluates whether the speaker's argument survives the evidence, not just whether a majority of facts are true
@@ -34,7 +34,7 @@ A working end-to-end claim verification pipeline with **flat fact extraction + t
 - **Transcript → verification bridge** — extracted claims auto-submit to verification queue with FK linking `transcript_claims → claims → sub_claims → evidence → verdicts`
 - **Grafana dashboard** — provisioned Loki dashboard (28 panels) for pipeline status, verdict distribution, LLM latency, evidence quality, transcript progress, error monitoring
 - Production-grade structured JSON logging (for Grafana Loki, pretty format for dev) — INFO for pipeline milestones, DEBUG for per-query tool noise
-- LLM max_tokens configured to prevent truncated output (2048 for all steps)
+- LLM max_tokens configured to prevent truncated output (8192 default for all steps)
 
 **Search tools (env-var gated — set the key to enable):**
 - **Serper** (Google index via API, primary search backend) — `SERPER_API_KEY`
@@ -155,38 +155,13 @@ Improvements to the core fact-checking methodology. These refine how claims are 
 
 ### 1.5.0 — Complete Linguistic Pattern Taxonomy (DONE)
 
-**Status:** ✅ Implemented in `src/prompts/linguistic_patterns.py`
+**Status:** ✅ Implemented — integrated into `DECOMPOSE_SYSTEM` in `src/prompts/verification.py`
 
-**Why:** Our decomposition now uses a comprehensive linguistic pattern taxonomy from formal semantics, replacing the previous ad-hoc rules.
+**Why:** Decomposition uses comprehensive linguistic awareness from formal semantics, covering 15 canonical categories: presupposition triggers, quantifier scope, modality, evidentiality markers, temporal/aspectual, causation types, comparison/degree, negation scope, speech acts, vagueness/hedging, attribution, conditionals, definition/category, generics, and implicature.
 
 **What was implemented:**
 
-The complete taxonomy covering 15 canonical categories:
-
-| Category | Sub-patterns | What it catches |
-|----------|--------------|-----------------|
-| **1. Presupposition Triggers** | "stopped", "again", "still", "only", "even", "started", "before", "regret", "know" | Hidden assumptions baked into word choice. "He stopped beating his wife" presupposes he was beating her. |
-| **2. Quantifier Scope** | all/every/each, most/majority, some/several, few/minority, none/no | "All scientists agree" vs "most agree" vs "some agree" have vastly different truth conditions. |
-| **3. Modality** | Epistemic: may/might/could/possibly; Deontic: must/should/ought; Evidential: allegedly/reportedly | "He may have stolen" vs "he stole" — different claim types entirely. |
-| **4. Evidentiality Markers** | "according to", "sources say", "reportedly", "critics claim", "experts believe" | Hedging that distances speaker from claim. Often weasel words hiding lack of evidence. |
-| **5. Temporal/Aspectual** | Past/present/future; complete/ongoing; "since", "until", "while", "after", "before" | Time boundaries often hide context. "Crime up since 2020" cherry-picks baseline. |
-| **6. Causation Types** | Direct cause, contributing factor, correlation, necessary condition, sufficient condition | "X caused Y" is stronger than "X contributed to Y" — must preserve the exact causal claim. |
-| **7. Comparison/Degree** | Comparative: more/less/better/worse; Superlative: most/least/best/only/first; Equality: same/equal | "First" and "only" require exhaustive verification. |
-| **8. Negation Scope** | Sentence negation, constituent negation, "never", "nobody", "nothing", negative polarity | "Nobody saw it" is harder to verify than "somebody saw it" — proving absence. |
-| **9. Speech Acts** | Assertion, prediction, opinion, question, command, commitment | We can only verify assertions about past/present. Predictions and opinions are uncheckable. |
-| **10. Vagueness/Hedging** | "significant", "many", "substantial", "some", "around", "roughly", "experts" | Undefined terms resist verification. "Many people died" — how many is "many"? |
-| **11. Attribution/Reported Speech** | Direct quote, indirect quote, "X said/claimed/stated/argued" | Must verify BOTH that X said it AND that the substance is true. |
-| **12. Conditional/Hypothetical** | "If X then Y", counterfactual "would have", hypothetical "could" | Conditionals may be unverifiable (condition hasn't occurred) or tautological. |
-| **13. Definition/Category** | "X is a Y", "counts as", "qualifies as", "meets the definition of" | Often contested — "Is X a genocide?" depends on definition used. |
-| **14. Generics** | "Dogs bark", "Politicians lie", "Tech companies surveil" | Generalizations without quantifiers — technically false if ANY counterexample exists, but pragmatically used loosely. |
-| **15. Implicature** | Conversational inference, scalar implicature, relevance | "Some students passed" implies (but doesn't state) "not all passed". Hidden meaning beyond literal text. |
-
-**For each pattern, the decomposition prompt now:**
-1. DETECTS which patterns are present in the claim
-2. EXTRACTS explicit sub-claims testing each pattern
-3. Uses pattern awareness to ensure comprehensive decomposition
-
-The patterns are dynamically appended to `DECOMPOSE_SYSTEM` at runtime via `get_linguistic_patterns()`.
+The 15 extraction rules in the decompose prompt guide the LLM to detect and handle these patterns during fact extraction. Originally implemented as a separate `linguistic_patterns.py` file appended at runtime, the guidance has been consolidated into the main decompose prompt for simplicity.
 
 **Completed in:** Commit `ac614f8` (flat facts) and subsequent integration.
 

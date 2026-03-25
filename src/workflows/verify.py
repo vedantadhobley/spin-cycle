@@ -129,7 +129,9 @@ class VerifyClaimWorkflow:
     async def run(self, claim_id: str | None, claim_text: str,
                   speaker: str | None = None,
                   claim_date: str | None = None,
-                  is_child: bool = False) -> dict:
+                  is_child: bool = False,
+                  transcript_title: str | None = None,
+                  speaker_description: str = "") -> dict:
         """Run the verification pipeline.
 
         Args:
@@ -142,6 +144,13 @@ class VerifyClaimWorkflow:
                        Used to anchor temporal references like "36 hours ago".
             is_child: True when started as a child of ExtractTranscriptWorkflow.
                       Skips queue chaining (parent orchestrates sequentially).
+            transcript_title: Title of the source transcript (e.g. "Iran
+                            conflict update"). Provides topic context for
+                            research and judgment.
+            speaker_description: Wikidata description of the speaker (e.g.
+                               "45th and 47th president of the United States").
+                               Passed from transcript extraction to avoid
+                               redundant Wikidata lookups.
         """
         self._claim_text = claim_text
 
@@ -165,13 +174,23 @@ class VerifyClaimWorkflow:
 
         decomposition = await workflow.execute_activity(
             decompose_claim,
-            args=[claim_text, speaker, claim_date],
+            args=[claim_text, speaker, claim_date, transcript_title,
+                  speaker_description],
             start_to_close_timeout=timedelta(seconds=180),
             retry_policy=RetryPolicy(maximum_attempts=3),
         )
 
         atomic_facts = decomposition["facts"]
         thesis_info = decomposition.get("thesis_info", {})
+
+        # Build enriched speaker line for downstream prompts.
+        # Prefer description from transcript extraction (already resolved),
+        # fall back to decompose's Wikidata lookup.
+        speaker_desc = speaker_description or decomposition.get("speaker_description", "")
+        if speaker and speaker_desc:
+            speaker_context = f"{speaker} ({speaker_desc})"
+        else:
+            speaker_context = speaker
 
         interested_parties = thesis_info.get("interested_parties", {})
         if isinstance(interested_parties, list):
@@ -215,6 +234,12 @@ class VerifyClaimWorkflow:
             for fact in atomic_facts
         }
 
+        # Key test: the overarching "what must be true" for the claim.
+        # Passed to every judge call so each sub-judgment is anchored
+        # to the core question (especially critical for single-fact claims
+        # that skip synthesis entirely).
+        key_test = thesis_info.get("key_test", "")
+
         # Step 2: Research all facts (thinking=off, fast)
         self._set_phase("researching")
 
@@ -231,8 +256,8 @@ class VerifyClaimWorkflow:
             result = await workflow.execute_activity(
                 research_subclaim,
                 args=[fact_text, interested_parties,
-                      fact_categories, fact_seed_queries, speaker,
-                      claim_date, claim_text],
+                      fact_categories, fact_seed_queries, speaker_context,
+                      claim_date, claim_text, transcript_title],
                 start_to_close_timeout=timedelta(seconds=540),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
@@ -315,8 +340,8 @@ class VerifyClaimWorkflow:
             vt = verification_targets.get(fact_text, "")
             result = await workflow.execute_activity(
                 judge_subclaim,
-                args=[claim_text, fact_text, evidence, merged_p, speaker,
-                      claim_date, vt],
+                args=[claim_text, fact_text, evidence, merged_p, speaker_context,
+                      claim_date, vt, transcript_title, key_test],
                 start_to_close_timeout=timedelta(seconds=300),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
@@ -383,7 +408,8 @@ class VerifyClaimWorkflow:
         else:
             result = await workflow.execute_activity(
                 synthesize_verdict,
-                args=[claim_text, sub_results, thesis_info, claim_date],
+                args=[claim_text, sub_results, thesis_info, claim_date,
+                      transcript_title],
                 start_to_close_timeout=timedelta(seconds=300),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )

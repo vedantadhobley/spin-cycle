@@ -116,13 +116,17 @@ async def _kickstart_queue(temporal: TemporalClient):
             claim_id = str(claim.id)
             claim_text = claim.text
             claim_speaker = claim.speaker
+            claim_date = claim.claim_date
+            claim_transcript_title = claim.transcript_title
+            claim_speaker_desc = claim.speaker_description or ""
 
             claim.status = "pending"
             await session.commit()
 
             await temporal.start_workflow(
                 VerifyClaimWorkflow.run,
-                args=[claim_id, claim_text, claim_speaker],
+                args=[claim_id, claim_text, claim_speaker, claim_date,
+                      False, claim_transcript_title, claim_speaker_desc],
                 id=f"verify-{claim_id}",
                 task_queue=TASK_QUEUE,
             )

@@ -274,6 +274,7 @@ def rank_and_select(
     evidence: list[dict],
     max_items: int = 20,
     max_per_domain: int = 3,
+    max_per_domain_tier1: int = 5,
     max_gov: int = 4,
 ) -> tuple[list[dict], list[dict]]:
     """Rank evidence by quality and select top items with diversity.
@@ -287,7 +288,7 @@ def rank_and_select(
 
     Returns (selected, dropped) where dropped includes reason annotations.
     """
-    # Pre-filter: drop evidence with near-zero content (hub pages, landing
+    # Pre-filter 1: drop evidence with near-zero content (hub pages, landing
     # pages, failed fetches). These waste judge context window.
     filtered = []
     content_dropped = []
@@ -300,6 +301,21 @@ def rank_and_select(
         else:
             filtered.append(ev)
     evidence = filtered
+
+    # Pre-filter 2: drop unrated sources (tier 0). The research agent can
+    # read anything for context, but the judge should only see MBFC-rated
+    # sources. Unrated sources range from niche-but-legitimate to outright
+    # junk blogs, and we can't distinguish without MBFC data.
+    rated = []
+    for ev in evidence:
+        url = ev.get("source_url", "") or ""
+        if source_tier(url) == 0:
+            content_dropped.append({
+                "evidence": ev, "score": 0, "reason": "unrated",
+            })
+        else:
+            rated.append(ev)
+    evidence = rated
 
     if len(evidence) <= max_items:
         return evidence, content_dropped
@@ -325,7 +341,10 @@ def rank_and_select(
             dropped.append({"evidence": ev, "score": total, "reason": "cap"})
             continue
 
-        if domain_counts[domain] >= max_per_domain:
+        # TIER 1 sources (Reuters, AP, academic) get a higher per-domain cap
+        # because 5 Reuters articles > filling those slots with weaker sources.
+        cap = max_per_domain_tier1 if source_tier(url) == 1 else max_per_domain
+        if domain_counts[domain] >= cap:
             dropped.append({"evidence": ev, "score": total, "reason": "domain_cap"})
             continue
 

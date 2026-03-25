@@ -446,7 +446,9 @@ def _validate_decompose_consistency(output: DecomposeOutput) -> None:
 
 
 async def decompose(claim_text: str, speaker: str | None = None,
-                    claim_date: str | None = None) -> dict:
+                    claim_date: str | None = None,
+                    transcript_title: str | None = None,
+                    speaker_description: str = "") -> dict:
     """Full decompose pipeline: normalize → extract → quality validate → NER → Wikidata.
 
     Pipeline:
@@ -474,8 +476,31 @@ async def decompose(claim_text: str, speaker: str | None = None,
     log.info(logger, MODULE, "start", "Decomposing claim",
              claim=claim_text, speaker=speaker)
 
-    # Build speaker context line for prompts
-    speaker_line = f"\nSpeaker: {speaker}" if speaker else ""
+    # Use pre-resolved description from transcript extraction if available,
+    # otherwise fall back to Wikidata lookup.
+    if not speaker_description and speaker:
+        from src.tools.wikidata import get_entity_description
+        desc = await get_entity_description(speaker)
+        if desc:
+            speaker_description = desc
+            log.info(logger, MODULE, "speaker_enriched",
+                     "Speaker description from Wikidata",
+                     speaker=speaker, description=desc)
+    elif speaker_description:
+        log.info(logger, MODULE, "speaker_pre_enriched",
+                 "Using pre-resolved speaker description",
+                 speaker=speaker, description=speaker_description)
+
+    # Build context lines for prompts
+    if speaker and speaker_description:
+        speaker_line = f"\nSpeaker: {speaker} ({speaker_description})"
+    elif speaker:
+        speaker_line = f"\nSpeaker: {speaker}"
+    else:
+        speaker_line = ""
+    transcript_context = (
+        f"\nSource transcript: {transcript_title}" if transcript_title else ""
+    )
 
     # Step 1: Normalize claim
     norm_output = None
@@ -486,7 +511,8 @@ async def decompose(claim_text: str, speaker: str | None = None,
             system_prompt=NORMALIZE_SYSTEM.format(
                 current_date=today, claim_date_line=claim_date_line),
             user_prompt=NORMALIZE_USER.format(
-                claim_text=claim_text, speaker_line=speaker_line),
+                claim_text=claim_text, speaker_line=speaker_line,
+                transcript_context=transcript_context),
             schema=NormalizeOutput,
             semantic_validator=validate_normalize,
             max_retries=1,
@@ -515,7 +541,8 @@ async def decompose(claim_text: str, speaker: str | None = None,
         output = await invoke_llm(
             system_prompt=decompose_system,
             user_prompt=DECOMPOSE_USER.format(
-                claim_text=normalized, speaker_line=speaker_line),
+                claim_text=normalized, speaker_line=speaker_line,
+                transcript_context=transcript_context),
             schema=DecomposeOutput,
             semantic_validator=validate_decompose,
             max_retries=2,
@@ -550,7 +577,8 @@ async def decompose(claim_text: str, speaker: str | None = None,
                 feedback = "\n".join(f"- {issue}" for issue in llm_issues)
                 retry_prompt = (
                     DECOMPOSE_USER.format(
-                        claim_text=normalized, speaker_line=speaker_line)
+                        claim_text=normalized, speaker_line=speaker_line,
+                        transcript_context=transcript_context)
                     + f"\n\nYOUR PREVIOUS OUTPUT HAD STRUCTURAL ISSUES:\n{feedback}\n"
                     "Fix these issues in your new output."
                 )
@@ -656,4 +684,8 @@ async def decompose(claim_text: str, speaker: str | None = None,
              claim=claim_text, sub_count=len(facts),
              thesis=thesis_info.get("thesis"),
              structure=thesis_info.get("structure"))
-    return {"facts": facts, "thesis_info": thesis_info}
+    return {
+        "facts": facts,
+        "thesis_info": thesis_info,
+        "speaker_description": speaker_description,
+    }

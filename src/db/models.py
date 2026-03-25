@@ -20,7 +20,9 @@ class Claim(Base):
     source_url = Column(String(2048), nullable=True)
     source_name = Column(String(256), nullable=True)
     speaker = Column(String(256), nullable=True)
+    speaker_description = Column(String(512), nullable=True)  # Wikidata role/title (e.g. "45th president")
     claim_date = Column(String(64), nullable=True)  # when the claim was made (from transcript, article, etc.)
+    transcript_title = Column(String(512), nullable=True)  # source transcript title for topic context
     status = Column(
         Enum("queued", "pending", "processing", "verified", "flagged", name="claim_status"),
         default="pending",
@@ -151,6 +153,7 @@ class TranscriptClaim(Base):
     skip_reason = Column(String(64), nullable=True)
     checkable = Column(Boolean, nullable=True)
     checkability_rationale = Column(Text, nullable=True)
+    is_restatement = Column(Boolean, nullable=True, default=False)
     segment_gist = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 

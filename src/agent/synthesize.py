@@ -22,6 +22,7 @@ async def synthesize(
     child_results: list[dict],
     thesis_info: dict | None = None,
     claim_date: str | None = None,
+    transcript_title: str | None = None,
 ) -> dict:
     """Combine child verdicts into a final overall verdict.
 
@@ -94,6 +95,7 @@ async def synthesize(
                 synthesis_framing=synthesis_framing,
                 sub_verdicts_text=sub_verdicts_text,
                 evidence_digest=evidence_digest_text,
+                transcript_context=f"\nSource transcript: {transcript_title}" if transcript_title else "",
             ),
             schema=SynthesizeOutput,
             semantic_validator=validate_synthesize,

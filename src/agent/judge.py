@@ -164,6 +164,8 @@ async def judge(
     speaker: str | None = None,
     claim_date: str | None = None,
     verification_target: str = "",
+    transcript_title: str | None = None,
+    key_test: str = "",
 ) -> dict:
     """Evaluate evidence and return a verdict.
 
@@ -173,6 +175,8 @@ async def judge(
         evidence: Evidence dicts from research phase.
         interested_parties: Pre-expanded dict (all_parties, affiliated_media, etc).
         verification_target: The factual question to answer (prevents attribution checks).
+        key_test: The overarching test from decompose — what must be true for the
+                  original claim to hold. Anchors each sub-judgment to the core question.
 
     Returns:
         Dict: sub_claim, verdict, confidence, reasoning, evidence.
@@ -248,8 +252,10 @@ async def judge(
                 claim_text=claim_text,
                 sub_claim=sub_claim,
                 verification_line=f"Verification question: {verification_target}" if verification_target else "",
+                key_test_line=f"\nKey test for overall claim: {key_test}" if key_test else "",
                 evidence_text=full_evidence,
                 speaker_line=f"\nSpeaker: {speaker}" if speaker else "",
+                transcript_context=f"\nSource transcript: {transcript_title}" if transcript_title else "",
             ),
             schema=JudgeOutput,
             semantic_validator=validate_judge,
@@ -288,6 +294,16 @@ async def judge(
                     "title": meta.get("title"),
                     "domain": meta.get("domain"),
                 })
+
+        # Citation count check — flag thin reasoning
+        min_citations = min(4, len(evidence_metadata))
+        if len(citations) < min_citations:
+            log.warning(logger, MODULE, "low_citations",
+                        "Judge reasoning has too few citations",
+                        sub_claim=sub_claim,
+                        citations=len(citations),
+                        evidence_count=len(evidence_metadata),
+                        minimum=min_citations)
 
         # Log rubric steps — INFO level for key decisions, DEBUG for details
         independent_count = sum(
@@ -420,17 +436,19 @@ def _rank_evidence(source_evidence: list[dict]) -> list[dict]:
     than discovery order — prevents high-quality late-discovered sources
     from being dropped.
     """
-    if len(source_evidence) > MAX_JUDGE_EVIDENCE:
-        from src.utils.evidence_ranker import rank_and_select, format_ranking_log
-        original_count = len(source_evidence)
-        source_evidence, dropped = rank_and_select(
-            source_evidence, max_items=MAX_JUDGE_EVIDENCE,
-        )
-        content_filtered = sum(1 for d in dropped if d.get("reason") == "no_content")
-        log.info(logger, MODULE, "evidence_ranked",
-                 "Ranked and selected evidence for judge prompt",
-                 original=original_count, selected=len(source_evidence),
-                 content_filtered=content_filtered)
+    from src.utils.evidence_ranker import rank_and_select, format_ranking_log
+    original_count = len(source_evidence)
+    source_evidence, dropped = rank_and_select(
+        source_evidence, max_items=MAX_JUDGE_EVIDENCE,
+    )
+    content_filtered = sum(1 for d in dropped if d.get("reason") == "no_content")
+    unrated_filtered = sum(1 for d in dropped if d.get("reason") == "unrated")
+    log.info(logger, MODULE, "evidence_ranked",
+             "Ranked and selected evidence for judge prompt",
+             original=original_count, selected=len(source_evidence),
+             content_filtered=content_filtered,
+             unrated_filtered=unrated_filtered)
+    if dropped:
         log.debug(logger, MODULE, "evidence_ranking_detail",
                   "Evidence ranking breakdown",
                   **format_ranking_log(source_evidence, dropped))
@@ -537,7 +555,7 @@ def _annotate_evidence(
     """
     evidence_parts = []
     evidence_metadata = []
-    bias_distribution = {"left": 0, "center": 0, "right": 0, "unrated": 0}
+    bias_distribution = {"left": 0, "left-center": 0, "center": 0, "right-center": 0, "right": 0, "unrated": 0}
     interested_party_count = 0
     affiliated_media_count = 0
     party_quotes_count = 0
@@ -584,6 +602,23 @@ def _annotate_evidence(
         evidence_metadata.append(ev_meta)
 
         interest_warnings = []
+
+        # Check 0: Is this a gov/mil domain? Always tag — the judge prompt
+        # already says gov sources are interested parties, but the per-item
+        # warning makes the model actually apply it instead of glossing over.
+        if url != "N/A":
+            from src.utils.evidence_ranker import _is_gov_domain
+            ev_domain = extract_domain(url)
+            if ev_domain and _is_gov_domain(ev_domain):
+                interested_party_count += 1
+                interest_warnings.append(
+                    f"⚠️ GOVERNMENT SOURCE: {ev_domain} is a government "
+                    f"website. Government sources CANNOT independently "
+                    f"verify claims about government actions."
+                )
+                log.debug(logger, MODULE, "gov_source_tagged",
+                          "Gov/mil domain tagged",
+                          domain=ev_domain)
 
         # Check 1: Is the source URL from affiliated media?
         if affiliated_media and url != "N/A":
@@ -683,10 +718,14 @@ def _annotate_evidence(
             bias = rating["bias"]
             if bias in ("left", "extreme-left"):
                 bias_distribution["left"] += 1
+            elif bias == "left-center":
+                bias_distribution["left-center"] += 1
+            elif bias == "center":
+                bias_distribution["center"] += 1
+            elif bias == "right-center":
+                bias_distribution["right-center"] += 1
             elif bias in ("right", "extreme-right"):
                 bias_distribution["right"] += 1
-            elif bias in ("center", "left-center", "right-center"):
-                bias_distribution["center"] += 1
             else:
                 bias_distribution["unrated"] += 1
         else:
@@ -706,16 +745,14 @@ def _annotate_evidence(
     evidence_text = "\n\n".join(evidence_parts)
 
     # Determine bias skew for logging
-    total_rated = (
-        bias_distribution["left"]
-        + bias_distribution["center"]
-        + bias_distribution["right"]
-    )
+    total_rated = sum(v for k, v in bias_distribution.items() if k != "unrated")
+    left_leaning = bias_distribution["left"] + bias_distribution["left-center"]
+    right_leaning = bias_distribution["right"] + bias_distribution["right-center"]
     bias_skew = "none"
     if total_rated >= 3:
-        if bias_distribution["left"] / total_rated > 0.6:
+        if left_leaning / total_rated > 0.7:
             bias_skew = "left"
-        elif bias_distribution["right"] / total_rated > 0.6:
+        elif right_leaning / total_rated > 0.7:
             bias_skew = "right"
 
     log.info(logger, MODULE, "annotation_summary",
@@ -730,23 +767,21 @@ def _annotate_evidence(
 
     # Add bias distribution warning if evidence is skewed
     if total_rated >= 3:
-        left_pct = bias_distribution["left"] / total_rated
-        right_pct = bias_distribution["right"] / total_rated
-        if left_pct > 0.6:
+        left_pct = left_leaning / total_rated
+        right_pct = right_leaning / total_rated
+        if left_pct > 0.7:
             evidence_text += (
-                "\n\n⚠️ BIAS WARNING: Evidence skews LEFT "
-                "({}% of rated sources). Consider whether right-leaning "
-                "sources have covered this differently.".format(
-                    int(left_pct * 100)
-                )
+                "\n\n⚠️ BIAS WARNING: Evidence skews LEFT-LEANING "
+                "({}% of rated sources are left or left-center). "
+                "Weight any right-leaning or center sources more heavily "
+                "for cross-bias confirmation.".format(int(left_pct * 100))
             )
-        elif right_pct > 0.6:
+        elif right_pct > 0.7:
             evidence_text += (
-                "\n\n⚠️ BIAS WARNING: Evidence skews RIGHT "
-                "({}% of rated sources). Consider whether left-leaning "
-                "sources have covered this differently.".format(
-                    int(right_pct * 100)
-                )
+                "\n\n⚠️ BIAS WARNING: Evidence skews RIGHT-LEANING "
+                "({}% of rated sources are right or right-center). "
+                "Weight any left-leaning or center sources more heavily "
+                "for cross-bias confirmation.".format(int(right_pct * 100))
             )
 
     # Add warning if significant portion of evidence is from interested parties
@@ -788,7 +823,7 @@ def _annotate_evidence(
 
     # Format bias spread
     bias_parts = []
-    for direction in ("left", "center", "right", "unrated"):
+    for direction in ("left", "left-center", "center", "right-center", "right", "unrated"):
         if bias_distribution[direction] > 0:
             bias_parts.append(
                 f"{bias_distribution[direction]} {direction}"

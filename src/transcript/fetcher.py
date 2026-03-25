@@ -61,7 +61,6 @@ class Transcript:
             return ""
         blocks: list[str] = []
         current_speaker = self.segments[0].speaker
-        current_timestamp = self.segments[0].timestamp
         current_paragraphs: list[str] = [self.segments[0].text]
 
         for seg in self.segments[1:]:
@@ -69,16 +68,15 @@ class Transcript:
                 current_paragraphs.append(seg.text)
             else:
                 blocks.append(
-                    f"{current_speaker} ({current_timestamp}):\n"
+                    f"{current_speaker}:\n"
                     + "\n\n".join(current_paragraphs)
                 )
                 current_speaker = seg.speaker
-                current_timestamp = seg.timestamp
                 current_paragraphs = [seg.text]
 
         # Flush last block
         blocks.append(
-            f"{current_speaker} ({current_timestamp}):\n"
+            f"{current_speaker}:\n"
             + "\n\n".join(current_paragraphs)
         )
         return "\n\n".join(blocks)

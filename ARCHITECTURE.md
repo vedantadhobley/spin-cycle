@@ -4,16 +4,17 @@
 
 Spin Cycle is an automated news claim verification system. The goal: take verifiable factual claims from the news, decompose them into atomic sub-claims, research real evidence using web tools, and deliver structured verdicts with full reasoning chains.
 
-```
-News Sources (RSS, APIs)
-    │
-    ▼
-Temporal (scheduled)  →  LLM extracts claims  →  VerifyClaimWorkflow  →  Postgres
-                                                                              │
-                                          vedanta-systems (3100)  ←  API  ◄───┘
+```mermaid
+flowchart LR
+    T["Transcripts\n(Rev.com)"] --> TW["ExtractTranscriptWorkflow\n(Temporal)"]
+    API["POST /claims\n(manual)"] --> VW
+    TW --> |"extracted claims"| VW["VerifyClaimWorkflow\n(Temporal)"]
+    VW --> DB[(PostgreSQL)]
+    DB --> FastAPI["FastAPI\n(read layer)"]
+    FastAPI --> FE["vedanta-systems\n(frontend @ 3100)"]
 ```
 
-The primary intake is **automated extraction** — Temporal scheduled workflows pull articles from news feeds, the LLM extracts verifiable claims, and each claim is fed into the verification pipeline. The FastAPI backend is a **read layer** for the frontend, with a secondary `POST /claims` for manual submission.
+The primary intake is **transcript extraction** — Temporal workflows fetch transcripts from Rev.com, the LLM extracts verifiable claims, and each claim is fed into the verification pipeline. The FastAPI backend is a **read layer** for the frontend, with a secondary `POST /claims` for manual submission.
 
 ---
 
@@ -48,14 +49,12 @@ LangGraph is the **agent engine**. It builds on LangChain to create state machin
 
 The critical pattern in Spin Cycle is the **ReAct (Reason + Act) agent** with progress awareness:
 
-```
-    ┌────────────┐     ┌──────────┐     ┌───────┐
-    │ pre_model  │────▶│  agent   │────▶│ tools │
-    │ (progress) │     │  (LLM)   │◀────│       │
-    └────────────┘     └────┬─────┘     └───────┘
-                            │ (no more tool calls)
-                            ▼
-                           END
+```mermaid
+flowchart LR
+    PM["pre_model\n(progress)"] --> AG["agent\n(LLM)"]
+    AG --> |"tool calls"| TL["tools"]
+    TL --> PM
+    AG --> |"no more tool calls"| E["END"]
 ```
 
 1. **Pre-model hook** analyzes the conversation so far — counting tool calls, unique URLs, search queries, engines tried — and injects a progress summary into the LLM's system message (ephemeral, doesn't modify state)
@@ -82,34 +81,32 @@ Temporal is the **scheduler and reliability layer**. It handles:
 
 The key insight: **LangGraph runs inside Temporal activities, not instead of them.**
 
-```
-Temporal Workflow
-└── Activity: research_subclaim (retryable, timeout: 420s)
-    ├── Phase 1a: Programmatic seed search (no LLM, ~3-8s)
-    │   ├── claim_category.py routes LLM-written queries + base queries
-    │   └── Fire to Serper/DuckDuckGo/Wikipedia concurrently (~30-50 URLs)
-    ├── Phase 1b: MBFC + party enrichment + ranking (~15-50s cold, ~0s cached)
-    │   ├── _collect_domains() + await_ratings_parallel() — bounded MBFC lookups
-    │   ├── _enrich_parties_from_mbfc() — SpaCy NER extracts owners from MBFC
-    │   │   ownership strings → Wikidata-expand (parallel, cap 6) → overlap-gated:
-    │   │   only adds owner + media holdings when graph intersects existing parties
-    │   ├── score_url() — quality scoring with real MBFC data + enriched parties
-    │   ├── media_matching.py — conflict detection (affiliated media + ownership)
-    │   ├── CONFLICT_PENALTY (-15) for conflicted sources
-    │   └── Sort → keep top 30 → annotate with tier + conflict labels
-    ├── Phase 2: LangGraph ReAct Agent (seeds pre-loaded as prior searches)
-    │   ├── pre_model_hook (progress: tool calls, URLs, tier/conflict coverage)
-    │   ├── LLM call (sees seed results + progress, decides what to fetch/follow-up)
-    │   ├── Serper/DuckDuckGo search (filtered by source_filter)
-    │   ├── Wikipedia search, Page fetcher (full article reads)
-    │   └── ... (8-12 tool calls, then agent stops)
-    └── Phase 3: Programmatic enrichment
-        ├── LegiScan (US legislation: bill details, roll call votes, bill text)
-        ├── _enrich_parties_from_evidence_content() — SpaCy NER on evidence
-        │   articles → Wikidata-expand (parallel, cap 8) → add if graph overlaps
-        └── _filter_irrelevant_evidence() — date proximity + entity anchor check
-            (both must fail to drop; catches off-topic evidence)
-    Returns: (evidence, enriched_interested_parties)
+```mermaid
+flowchart TD
+    subgraph P1a["Phase 1a — Seed Search (no LLM, ~3-8s)"]
+        SS["claim_category.py routes\nLLM-written + base queries"] --> FIRE["Fire to Serper/DuckDuckGo/\nWikipedia concurrently\n(~30-50 URLs)"]
+    end
+
+    subgraph P1b["Phase 1b — MBFC + Party Enrichment + Ranking (~15-50s cold)"]
+        MBFC["_collect_domains() +\nawait_ratings_parallel()"] --> NER["_enrich_parties_from_mbfc()\nSpaCy NER → Wikidata (cap 6)\noverlap-gated"]
+        NER --> SCORE["score_url() + media_matching.py\nconflict detection\nCONFLICT_PENALTY (-15)"]
+        SCORE --> RANK["Sort → top 30\nannotate tier + conflict labels"]
+    end
+
+    subgraph P2["Phase 2 — LangGraph ReAct Agent"]
+        HOOK["pre_model_hook\n(progress awareness)"] --> LLM["LLM call\n(sees seeds + progress)"]
+        LLM --> TOOLS["Serper / DuckDuckGo /\nWikipedia / Page fetcher"]
+        TOOLS --> HOOK
+        LLM --> DONE["Agent stops\n(8-12 tool calls)"]
+    end
+
+    subgraph P3["Phase 3 — Programmatic Enrichment"]
+        LEGI["LegiScan\n(bills, votes, text)"] --> ENER["_enrich_parties_from_evidence_content()\nSpaCy NER → Wikidata (cap 8)\noverlap-gated"]
+        ENER --> FILT["_filter_irrelevant_evidence()\ndate + entity anchor check"]
+    end
+
+    P1a --> P1b --> P2 --> P3
+    P3 --> RET["Returns: (evidence, enriched_interested_parties)"]
 ```
 
 Temporal handles the **macro orchestration** (decompose → research → judge → synthesize → store). LangGraph handles the **micro orchestration** (search → read → decide → search more).
@@ -142,11 +139,10 @@ Thinking mode is toggled per-request via `chat_template_kwargs`, but currently *
 **Why thinking is disabled everywhere:**
 llama.cpp's `--reasoning-budget` flag only supports `-1` (unlimited) or `0` (disabled) — no intermediate values for token limits. The model generates excessive internal monologue before responding. Until llama.cpp adds proper `max_thinking_tokens` support (or we migrate to vLLM which supports it), thinking mode is impractical.
 
-### Step 1: decompose_claim (normalize → flat facts + linguistic patterns + thesis)
+### Step 1: decompose_claim (normalize → flat facts + thesis)
 
 **File:** `src/activities/verify_activities.py`
 **Prompts:** `src/prompts/verification.py` → `NORMALIZE_SYSTEM` / `NORMALIZE_USER` + `DECOMPOSE_SYSTEM` / `DECOMPOSE_USER`
-**Patterns:** `src/prompts/linguistic_patterns.py` → 15 canonical linguistic categories + decomposition checklist
 
 The decompose activity runs **up to four LLM calls** internally:
 
@@ -211,32 +207,10 @@ The previous approach used `entities + predicates + applies_to` with `{entity}` 
 
 The current approach:
 1. LLM outputs facts directly as strings — no templates, no expansion
-2. Linguistic patterns module guides decomposition (presuppositions, quantifiers, causation, etc.)
+2. 15 extraction rules in the decompose prompt guide decomposition (decontextualization, presuppositions, quantifiers, causation, etc.)
 3. Thesis extraction captures speaker intent for synthesis
 
-**Linguistic patterns for decomposition:**
-
-The decompose prompt is augmented with a comprehensive **linguistic pattern taxonomy** (`src/prompts/linguistic_patterns.py`) covering 15 canonical categories from formal semantics:
-
-| Category | What it catches |
-|----------|----------------|
-| **Presupposition Triggers** | "stopped", "started", "again", "still" — hidden assumptions |
-| **Quantifier Scope** | "all" vs "most" vs "some" — different truth conditions |
-| **Modality** | "may", "must", "should" — different claim strengths |
-| **Evidentiality Markers** | "reportedly", "sources say" — hedging and attribution |
-| **Temporal/Aspectual** | "since", "before", "after" — time boundaries |
-| **Causation Types** | "caused", "contributed to" — causal vs correlational |
-| **Comparison/Degree** | "first", "only", "largest" — superlatives need exhaustive verification |
-| **Negation Scope** | "never", "nobody" — proving absence |
-| **Speech Acts** | Assertions vs predictions vs opinions |
-| **Vagueness/Hedging** | "significant", "many", "experts" — undefined terms |
-| **Attribution** | "X said" — verify both attribution AND substance |
-| **Conditionals** | "if X then Y" — may be unverifiable |
-| **Definition/Category** | "X is a Y" — contested definitions |
-| **Generics** | "Politicians lie" — generalizations |
-| **Implicature** | Hidden meaning beyond literal text |
-
-These patterns are appended to `DECOMPOSE_SYSTEM` at runtime.
+**Key extraction rules** in the decompose prompt guide the LLM to handle linguistic patterns including presupposition triggers, quantifier scope, modality, causation types, comparisons, negation, and more. These are embedded directly in `DECOMPOSE_SYSTEM`.
 
 **Extraction rules 6-9** (added alongside normalization) address missing capabilities from the literature:
 
@@ -475,38 +449,40 @@ Evidence records with `source_type` not in the DB enum (`web`, `wikipedia`, `new
 
 The workflow processes claims in a flat pipeline — decompose once, then research ALL facts (Phase 1), then judge ALL facts (Phase 2), then synthesize. Research and judge are separate phases to prevent longer judge calls (structured rubric evaluation) from starving faster research agents.
 
-```
-VerifyClaimWorkflow
-├── create_claim (if needed)
-├── decompose_claim (180s timeout)
-│   ├── normalize (LLM call, graceful fallback if fails)
-│   ├── extract (LLM call) → {facts: [{text, categories, seed_queries}, ...], thesis_info: {...}}
-│   ├── quality validate (LLM call, ~6-8s) — checks for semantic dupes + group enumeration
-│   ├── decompose retry (LLM call, conditional) — re-runs if validator found issues
-│   └── Wikidata expansion → interested_parties dict (all_parties, affiliated_media, ...)
-│
-├── RESEARCH PHASE — sliding window, MAX_CONCURRENT=2
-│   └── asyncio.gather(research_subclaim × N facts, semaphore=2)
-│       Each research_subclaim returns {evidence, enriched_parties}:
-│       ├── Phase 1a: Seed search (~30-50 URLs)
-│       ├── Phase 1b: MBFC await → MBFC→Wikidata enrichment → rank/filter → top 30
-│       ├── Phase 2: ReAct agent (seeds pre-loaded, 8-12 tool calls)
-│       └── Phase 3: LegiScan enrichment + evidence NER→Wikidata enrichment + relevance filter
-│   Merge enriched parties across all sub-claims (union of all_parties + affiliated_media)
-│
-├── JUDGE PHASE — sliding window, MAX_CONCURRENT=2 (receives merged parties)
-│   └── asyncio.gather(judge_subclaim × N facts, semaphore=2)
-│       Each judge_subclaim:
-│       ├── Rank + cap evidence (score_evidence + rank_and_select)
-│       ├── Lightweight NER cleanup (SpaCy → Wikidata, parallel, catches stragglers)
-│       ├── Annotate evidence (MBFC, conflict flags, bias distribution)
-│       └── LLM verdict (6-level scale)
-│
-├── IF 1 fact: skip synthesis, use judgment directly
-├── IF 2+ facts: synthesize_verdict (300s timeout, thesis_info passed)
-│
-├── store_result (30s timeout)
-└── start_next_queued_claim (30s timeout)
+```mermaid
+flowchart TD
+    CREATE["create_claim\n(if needed)"] --> DECOMPOSE
+
+    subgraph DECOMPOSE["decompose_claim (180s timeout)"]
+        NORM["normalize\n(LLM, graceful fallback)"] --> EXTRACT["decompose\n(LLM → facts + thesis_info)"]
+        EXTRACT --> QV["quality validate\n(LLM, ~6-8s)"]
+        QV --> |"issues found"| RETRY["decompose retry\n(LLM, temp=0.1)"]
+        QV --> |"ok"| WIKI["Wikidata expansion\n→ interested_parties"]
+        RETRY --> WIKI
+    end
+
+    DECOMPOSE --> RESEARCH
+
+    subgraph RESEARCH["RESEARCH PHASE — sliding window, MAX_CONCURRENT=2"]
+        R1["research_subclaim × N facts\n(asyncio.gather, semaphore=2)"]
+        R1 --> |"each returns"| R2["evidence + enriched_parties"]
+        R2 --> MERGE["Merge enriched parties\nacross all sub-claims"]
+    end
+
+    RESEARCH --> JUDGE
+
+    subgraph JUDGE["JUDGE PHASE — sliding window, MAX_CONCURRENT=2"]
+        J1["judge_subclaim × N facts\n(asyncio.gather, semaphore=2)"]
+        J1 --> J2["Rank + cap evidence\nAnnotate (MBFC, conflicts)\nLLM verdict (6-level scale)"]
+    end
+
+    JUDGE --> DECISION{{"1 fact?"}}
+    DECISION -->|"Yes"| SKIP["Use judge verdict directly"]
+    DECISION -->|"No (2+)"| SYNTH["synthesize_verdict\n(300s, thesis_info passed)"]
+
+    SKIP --> STORE["store_result (30s)"]
+    SYNTH --> STORE
+    STORE --> NEXT["start_next_queued_claim (30s)"]
 ```
 
 Key properties:
@@ -515,7 +491,9 @@ Key properties:
 - **Sliding window concurrency** — semaphore-based, not batch-based. As one task finishes, the next starts immediately.
 - **MAX_FACTS = 10** — caps decomposition output to prevent runaway processing.
 - **MAX_CONCURRENT = 2** — matched to GPU `--parallel 2`. Each agent gets a dedicated inference slot.
-- **Thesis-aware** — decompose extracts speaker's intent (thesis, structure, key_test). Synthesis evaluates whether the argument survives the evidence.
+- **Thesis-aware** — decompose extracts speaker's intent (thesis, structure, key_test). key_test is passed to BOTH judge (per-subclaim) AND synthesis (overall claim). Single-fact claims that skip synthesis still get the key_test anchor.
+- **Speaker enrichment** — Wikidata descriptions (role/title) are resolved once during transcript extraction and stored on the claim record. Standalone claims fall back to a Wikidata lookup in decompose. No redundant lookups.
+- **Citation enforcement** — judge validator requires minimum 3 unique [N] citations per subclaim, synthesize validator requires minimum 5. Failures trigger LLM retries.
 - **Streaming evidence** — agent uses `astream()` to collect evidence incrementally. Timeout or step limit preserves all evidence gathered so far.
 - **Programmatic enrichment** — LegiScan, Wikidata, and MBFC all run deterministically (not as agent tools). MBFC ownership → Wikidata enrichment runs in research (before ranking). Evidence NER → Wikidata runs in research (after agent). Judge NER is a parallel cleanup pass.
 - **Cross-sub-claim party merging** — enriched parties from each research sub-claim are merged (union) before the judge phase, so every sub-claim benefits from every other sub-claim's discoveries.
@@ -586,81 +564,35 @@ The judge prompt mirrors this hierarchy: primary documents outweigh reporting, a
 
 ---
 
-## The Extraction Pipeline (planned, not built)
+## The Transcript Extraction Pipeline
 
-The verification pipeline works end-to-end. The next major piece is **automated claim extraction** — getting claims into the system without manual submission.
+The verification pipeline works end-to-end. Claim intake is via **transcript extraction** — Temporal workflows fetch transcripts from Rev.com, extract verifiable claims in segment batches, and auto-submit them to the verification queue.
 
 ### Design
 
-A new Temporal workflow: `ExtractClaimsWorkflow`, scheduled on a cron (every 15 min):
+`ExtractTranscriptWorkflow` processes a transcript URL through 5 phases:
 
-```
-ExtractClaimsWorkflow (cron: every 15 min)
-├── fetch_articles         → pull latest from RSS feeds + news APIs
-├── for each article:
-│   ├── extract_claims     → LLM reads article, extracts verifiable claims
-│   └── for each claim:
-│       └── start VerifyClaimWorkflow (child workflow)
-└── update_source_cursors  → track what we've already processed
-```
-
-### New Database Models Needed
-
-```
-source_feeds
-├── id (uuid)
-├── name (e.g. "BBC News - Top Stories")
-├── url (RSS feed URL or API endpoint)
-├── feed_type (rss | newsapi | custom)
-├── enabled (bool)
-├── fetch_interval_minutes (default: 15)
-├── last_fetched_at
-└── created_at
-
-articles
-├── id (uuid)
-├── url (unique — dedup key)
-├── title
-├── content (full text or summary)
-├── source_feed_id (fk → source_feeds)
-├── published_at
-├── processed_at
-└── created_at
+```mermaid
+flowchart TD
+    URL["POST /transcripts\n{url}"] --> FETCH["fetch_transcript\n(HTTP fetch + parse Rev.com)"]
+    FETCH --> STORE["store_transcript\n(DB + Wikidata speaker enrichment)"]
+    FETCH --> BATCH["extract_transcript_batch × N\n(semaphore=2, word-count batches,\n3-segment overlap)"]
+    STORE --> FINAL["finalize_extraction\n(dedup + filter across batches)"]
+    BATCH --> FINAL
+    FINAL --> STCL["store_transcript_claims\n(ALL claims to DB)"]
+    STCL --> CREATE["create_claims_for_transcript\n(Claim records for worth_checking)"]
+    CREATE --> VERIFY["Child VerifyClaimWorkflow × N\n(sequential, one at a time)"]
+    VERIFY --> DONE["Mark transcript complete\nStart next queued transcript"]
 ```
 
-### Target News Sources
+**Key design decisions:**
+- **One pipeline at a time** — extraction OR verification, not both (LLM server has 2 inference slots)
+- **ALL claims stored** — including skipped ones with extraction metadata (worth_checking=false, skip_reason)
+- **Programmatic filtering** — checkable AND NOT restatement AND NOT future_prediction
+- **Speaker enrichment** — Wikidata resolves speaker descriptions once during `store_transcript`, passed down to all child verification workflows
+- **Transcript claims → claims FK bridge** — `transcript_claims.claim_id` links to `claims.id` when a claim is sent to verification
 
-| Source | Type | Notes |
-|--------|------|-------|
-| BBC News RSS | rss | Multiple topic feeds (world, politics, science) |
-| Reuters RSS | rss | Wire service — high factual density |
-| AP News RSS | rss | Wire services are claim-heavy |
-| The Guardian RSS | rss | UK-focused, political claims |
-| NewsAPI | newsapi | Aggregator — keyword search, requires API key |
-| Google News RSS | rss | Aggregated headlines from multiple sources |
-
-RSS is the core — free, no auth, every major outlet has feeds.
-
-### Extraction Prompt Strategy
-
-The `extract_claims` activity sends article text to the LLM:
-
-```
-You are a fact-checker's assistant. Read this article and extract all
-verifiable factual claims. Each claim should be:
-- A single, atomic factual statement
-- Independently verifiable (not opinion, prediction, or vague)
-- Self-contained (makes sense without the article context)
-
-Return a JSON array of objects:
-[{"claim": "...", "context": "brief quote from article where this appeared"}]
-```
-
-Key decisions:
-- **Atomic claims only** — "Country A spent $50B on Project X" not "Country A spent $50B on Project X and cancelled the second phase"
-- **No opinions** — "The government wasted money" is not a verifiable claim
-- **Context preserved** — knowing where in the article the claim appeared helps with verification
-- **Dedup at insert** — same claim text (or near-duplicate) already exists → skip it
+See `docs/transcript-pipeline-plan.md` for the full design doc.
 
 ---
 
@@ -668,86 +600,145 @@ Key decisions:
 
 ### Entity Relationship Diagram
 
-```
-┌─────────────────────┐       ┌──────────────────────┐       ┌────────────────────┐
-│       claims        │       │     sub_claims        │       │     evidence       │
-│─────────────────────│       │──────────────────────│       │────────────────────│
-│ id (uuid) PK        │───┐   │ id (uuid) PK         │───┐   │ id (uuid) PK      │
-│ text (text)         │   │   │ claim_id (uuid) FK   │   │   │ sub_claim_id (FK) │
-│ source_url          │   ├──▶│ parent_id (FK, self) │   └──▶│ source_type (enum)│
-│ source_name         │   │   │ is_leaf (bool)       │       │ source_url        │
-│ speaker             │   │   │ text (text)          │       │ content, title    │
-│ status (enum)       │   │   │ verdict (enum)       │       │ domain, bias      │
-│ normalized_claim    │   │   │ confidence (float)   │       │ factual, tier     │
-│ normalization_changes│   │   │ reasoning (text)     │       │ judge_index       │
-│ thesis              │   │   │ categories (jsonb)   │       │ assessment        │
-│ key_test            │   │   │ seed_queries (jsonb) │       │ is_independent    │
-│ claim_structure     │   │   │ category_rationale   │       │ key_point         │
-│ claim_analysis      │   │   │ judge_rubric (jsonb) │       │ retrieved_at      │
-│ structure_justif.   │   │   └──────────────────────┘       └────────────────────┘
-│ ip_reasoning        │   │
-│ wikidata_context    │   │   ┌──────────────────────┐
-│ created_at          │   │   │ interested_parties   │
-│ updated_at          │   │   │──────────────────────│
-└─────────┬───────────┘   ├──▶│ id (uuid) PK         │
-          │               │   │ claim_id (FK)        │
-          │               │   │ entity_name          │
-          │               │   │ role, source         │
-          │               │   │ created_at           │
-          │               │   └──────────────────────┘
-          │
-          │       ┌──────────────────────┐
-          │       │      verdicts        │
-          │       │──────────────────────│
-          └──────▶│ id (uuid) PK         │
-                  │ claim_id (FK) UQ     │
-                  │ verdict (enum)       │
-                  │ confidence (float)   │
-                  │ reasoning (text)     │
-                  │ reasoning_chain (jsonb)│
-                  │ citations (jsonb)    │
-                  │ synthesis_rubric (jsonb)│
-                  │ created_at           │
-                  └──────────────────────┘
+```mermaid
+erDiagram
+    claims ||--o{ sub_claims : "has many"
+    claims ||--o| verdicts : "has one"
+    claims ||--o{ interested_parties : "has many"
+    sub_claims ||--o{ evidence : "has many"
+    sub_claims ||--o{ sub_claims : "parent/children"
+    transcripts ||--o{ transcript_claims : "has many"
+    transcript_claims }o--o| claims : "optional FK"
 
-Transcript tables:
+    claims {
+        uuid id PK
+        text text
+        varchar source_url
+        varchar source_name
+        varchar speaker
+        varchar speaker_description
+        varchar transcript_title
+        varchar claim_date
+        enum status
+        text normalized_claim
+        jsonb normalization_changes
+        text thesis
+        text key_test
+        varchar claim_structure
+        text claim_analysis
+        text structure_justification
+        text interested_parties_reasoning
+        text wikidata_context
+        timestamptz created_at
+        timestamptz updated_at
+    }
 
-┌──────────────────────┐       ┌──────────────────────────┐
-│    transcripts       │       │   transcript_claims      │
-│──────────────────────│       │──────────────────────────│
-│ id (uuid) PK         │───┐   │ id (uuid) PK             │
-│ url (unique)         │   └──▶│ transcript_id (FK)       │
-│ title                │       │ claim_id (FK → claims)   │
-│ date                 │       │ claim_text               │
-│ speakers (jsonb)     │       │ original_quote           │
-│ word_count           │       │ speaker, timestamp       │
-│ segment_count        │       │ timestamp_secs           │
-│ display_text         │       │ claim_type               │
-│ status               │       │ worth_checking (bool)    │
-│ created_at           │       │ skip_reason              │
-└──────────────────────┘       │ checkable                │
-                               │ checkability_rationale   │
-                               │ is_restatement           │
-                               │ segment_gist             │
-                               │ created_at               │
-                               └──────────────────────────┘
+    sub_claims {
+        uuid id PK
+        uuid claim_id FK
+        uuid parent_id FK
+        boolean is_leaf
+        text text
+        enum verdict
+        float confidence
+        text reasoning
+        jsonb categories
+        jsonb seed_queries
+        text category_rationale
+        jsonb judge_rubric
+    }
 
-Cache tables (no FK relationships — standalone lookup):
+    evidence {
+        uuid id PK
+        uuid sub_claim_id FK
+        enum source_type
+        varchar source_url
+        text content
+        varchar title
+        varchar domain
+        varchar bias
+        varchar factual
+        varchar tier
+        integer judge_index
+        varchar assessment
+        boolean is_independent
+        text key_point
+        timestamptz retrieved_at
+    }
 
-┌──────────────────────┐       ┌──────────────────────┐
-│   source_ratings     │       │   wikidata_cache     │
-│──────────────────────│       │──────────────────────│
-│ domain (varchar) PK  │       │ entity_name (PK)     │
-│ bias (enum)          │       │ qid (varchar)        │
-│ bias_score (float)   │       │ relationships (jsonb)│
-│ factual_reporting    │       │ scraped_at           │
-│ credibility (enum)   │       └──────────────────────┘
-│ country, media_type  │
-│ ownership (varchar)  │
-│ traffic, mbfc_url    │
-│ raw_data (jsonb)     │
-│ scraped_at, updated  │
-└──────────────────────┘
+    verdicts {
+        uuid id PK
+        uuid claim_id FK
+        enum verdict
+        float confidence
+        text reasoning
+        jsonb reasoning_chain
+        jsonb citations
+        jsonb synthesis_rubric
+        timestamptz created_at
+    }
+
+    interested_parties {
+        uuid id PK
+        uuid claim_id FK
+        varchar entity_name
+        varchar role
+        varchar source
+        timestamptz created_at
+    }
+
+    transcripts {
+        uuid id PK
+        varchar url
+        varchar title
+        varchar date
+        jsonb speakers
+        integer word_count
+        integer segment_count
+        text display_text
+        varchar status
+        timestamptz created_at
+    }
+
+    transcript_claims {
+        uuid id PK
+        uuid transcript_id FK
+        uuid claim_id FK
+        text claim_text
+        text original_quote
+        varchar speaker
+        varchar claim_type
+        boolean worth_checking
+        varchar skip_reason
+        boolean checkable
+        text checkability_rationale
+        boolean is_restatement
+        text segment_gist
+        timestamptz created_at
+    }
+
+    source_ratings {
+        varchar domain PK
+        enum bias
+        float bias_score
+        enum factual_reporting
+        enum credibility
+        varchar country
+        varchar media_type
+        varchar ownership
+        varchar traffic
+        varchar mbfc_url
+        jsonb raw_data
+        timestamptz scraped_at
+        timestamptz updated_at
+    }
+
+    wikidata_cache {
+        varchar entity_name PK
+        varchar qid
+        jsonb relationships
+        timestamptz scraped_at
+    }
 ```
 
 ### Table: `claims`
@@ -761,6 +752,9 @@ The top-level entity. One row per claim submitted (manually or via transcript ex
 | `source_url` | `VARCHAR(2048)` | nullable | URL where the claim was found |
 | `source_name` | `VARCHAR(256)` | nullable | Name of the source (e.g., "BBC News") |
 | `speaker` | `VARCHAR(256)` | nullable | Person who made the claim |
+| `speaker_description` | `VARCHAR(512)` | nullable | Wikidata role/title (e.g., "45th president of the United States") |
+| `claim_date` | `VARCHAR(64)` | nullable | When the claim was made (from transcript, article, etc.) |
+| `transcript_title` | `VARCHAR(512)` | nullable | Source transcript title for topic context |
 | `status` | `ENUM('queued','pending','processing','verified','flagged')` | NOT NULL, default 'pending' | Workflow state |
 | `normalized_claim` | `TEXT` | nullable | Claim after bias-neutralization normalization |
 | `normalization_changes` | `JSONB` | nullable | List of changes made during normalization |
@@ -908,7 +902,7 @@ Stored transcripts with cleaned display text. One row per unique URL.
 | `url` | `VARCHAR(2048)` | UNIQUE, NOT NULL | Transcript source URL (Rev.com) |
 | `title` | `VARCHAR(512)` | NOT NULL | Transcript title |
 | `date` | `VARCHAR(64)` | nullable | Publication date |
-| `speakers` | `JSONB` | NOT NULL | List of speaker names |
+| `speakers` | `JSONB` | NOT NULL | Enriched speaker list: `[{"name": "...", "description": "Wikidata role/title"}, ...]` |
 | `word_count` | `INTEGER` | NOT NULL | Total word count |
 | `segment_count` | `INTEGER` | NOT NULL | Number of speaker segments |
 | `display_text` | `TEXT` | NOT NULL | Cleaned, merged same-speaker segments |
@@ -927,20 +921,16 @@ Claims extracted from transcripts, linking extraction to verification. Stores AL
 | `id` | `UUID` | PK, default uuid4 | Unique identifier |
 | `transcript_id` | `UUID` | FK → transcripts.id, NOT NULL | Parent transcript |
 | `claim_id` | `UUID` | FK → claims.id, nullable | Set when sent to verification (NULL for skipped claims) |
-| `claim_text` | `TEXT` | NOT NULL | Contextualized claim with [brackets] |
+| `claim_text` | `TEXT` | NOT NULL | Decontextualized claim — pronouns resolved, stands alone |
 | `original_quote` | `TEXT` | NOT NULL | Speaker's exact words (for inline highlighting) |
 | `speaker` | `VARCHAR(256)` | NOT NULL | Speaker name |
-| `timestamp` | `VARCHAR(32)` | NOT NULL | "MM:SS" timestamp |
-| `timestamp_secs` | `FLOAT` | NOT NULL | Timestamp in seconds |
-| `claim_type` | `VARCHAR(64)` | nullable | quantitative, historical, causal, comparative, attribution, other |
+| `claim_type` | `VARCHAR(64)` | nullable | Legacy field, no longer populated |
 | `worth_checking` | `BOOLEAN` | NOT NULL, default TRUE | Whether this claim was sent for verification (computed: checkable AND NOT restatement AND NOT future_prediction) |
 | `skip_reason` | `VARCHAR(64)` | nullable | Why not worth checking (not_checkable, restatement, future_prediction) |
 | `checkable` | `BOOLEAN` | nullable | Could independent data confirm or deny? |
 | `checkability_rationale` | `TEXT` | nullable | Why checkable or not |
-| `is_restatement` | `BOOLEAN` | nullable | True if speaker repeats a claim already extracted |
+| `is_restatement` | `BOOLEAN` | nullable, default FALSE | True if speaker repeats a claim already extracted |
 | `segment_gist` | `TEXT` | nullable | What the speaker is arguing in this segment |
-
-Note: DB columns `argument_summary`, `supports_argument`, `consequence_if_wrong`, and `consequence_rationale` still exist for backward compatibility with older extractions but are no longer populated by the simplified extraction pipeline.
 | `created_at` | `TIMESTAMPTZ` | default now() | When the claim was extracted |
 
 **Relationships:**
@@ -981,8 +971,9 @@ One unified model running via llama.cpp, with thinking toggled per-request:
 
 ### Connection Path
 
-```
-Container → Docker DNS (127.0.0.11) → Tailscale FQDN → LLM server
+```mermaid
+flowchart LR
+    C["Container"] --> DNS["Docker DNS\n(127.0.0.11)"] --> TS["Tailscale FQDN"] --> LLM["LLM server"]
 ```
 
 The `LLAMA_URL` env var points to the LLM server's Tailscale FQDN (e.g. `http://host.tailf424db.ts.net:3101`).
@@ -993,7 +984,7 @@ All LLM calls go through `src/llm/`:
 - `client.py` — `get_llm()` returns a configured ChatOpenAI instance
 - `invoker.py` — `invoke_llm()` handles structured output parsing, Pydantic schema validation, semantic validation, and retry logic
 - `parser.py` — JSON extraction from raw LLM output (handles markdown fences, partial JSON)
-- `validators.py` — semantic validators per step (normalize, decompose, synthesize)
+- `validators.py` — semantic validators per step (normalize, decompose, judge, synthesize, extraction)
 
 ```python
 # src/llm/client.py
@@ -1022,12 +1013,10 @@ All prompts live in `src/prompts/verification.py` with extensive inline document
 
 Five prompt pairs (system + user):
 1. `NORMALIZE_SYSTEM` / `NORMALIZE_USER` — 7 bias-neutralization transformations
-2. `DECOMPOSE_SYSTEM` / `DECOMPOSE_USER` — flat fact extraction with categories + seed queries, guided by linguistic patterns taxonomy
+2. `DECOMPOSE_SYSTEM` / `DECOMPOSE_USER` — flat fact extraction with categories + seed queries, 15 extraction rules
 3. `RESEARCH_SYSTEM` / `RESEARCH_USER` — guide the research agent (tier awareness, conflict flags, fetch budget)
-4. `JUDGE_SYSTEM` / `JUDGE_USER` — evaluate evidence for a sub-claim (conflict-of-interest guidance)
-5. `SYNTHESIZE_SYSTEM` / `SYNTHESIZE_USER` — combine child verdicts (importance-weighted, thesis-aware)
-
-Plus the linguistic patterns module (`src/prompts/linguistic_patterns.py`) which is appended to `DECOMPOSE_SYSTEM` at runtime.
+4. `JUDGE_SYSTEM` / `JUDGE_USER` — 5-step rubric evaluation with key_test anchoring, citation enforcement
+5. `SYNTHESIZE_SYSTEM` / `SYNTHESIZE_USER` — 4-step thesis-aware synthesis with citation enforcement
 
 ---
 
@@ -1056,7 +1045,7 @@ The app uses a lifespan context manager for startup/shutdown:
 
 | Schema | Purpose | Key Fields |
 |--------|---------|------------|
-| `ClaimSubmit` | POST request body | `text` (required, non-empty), `source` (optional URL), `source_name` (optional) |
+| `ClaimSubmit` | POST request body | `text` (required), `speaker`, `speaker_description`, `claim_date`, `transcript_title`, `source`, `source_name` (all optional) |
 | `ClaimResponse` | POST response | `id`, `text`, `status`, `created_at` |
 | `SubClaimResponse` | Sub-claim in verdict | `text`, `verdict`, `confidence`, `reasoning`, `evidence_count`, `children[]` (recursive) |
 | `VerdictResponse` | Full claim detail | All claim fields + `verdict`, `confidence`, `reasoning`, `sub_claims[]` (tree) |
@@ -1064,16 +1053,24 @@ The app uses a lifespan context manager for startup/shutdown:
 
 ### Claim Lifecycle via API
 
-```
-POST /claims {"text": "..."}
-  → Insert Claim (status: pending)
-  → Start VerifyClaimWorkflow in Temporal
-  → Return {id, status: "pending"}
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant API as FastAPI
+    participant T as Temporal
+    participant DB as PostgreSQL
 
-[Temporal runs pipeline: decompose → research → judge → synthesize → store]
+    C->>API: POST /claims {"text": "...", "speaker": "...", ...}
+    API->>DB: Insert Claim (status: pending)
+    API->>T: Start VerifyClaimWorkflow
+    API-->>C: {id, status: "pending"}
 
-GET /claims/{id}
-  → Returns {status: "verified", verdict: "true", confidence: 0.95, sub_claims: [...]}
+    T->>T: decompose → research → judge → synthesize → store
+    T->>DB: Write sub_claims, evidence, verdict
+
+    C->>API: GET /claims/{id}
+    API->>DB: Query claim + verdict + sub_claims
+    API-->>C: {status: "verified", verdict: "true", confidence: 0.95, sub_claims: [...]}
 ```
 
 ---
@@ -1266,7 +1263,7 @@ Config: `~/workspace/monitor/promtail/promtail.yml`
 | FastAPI API | **Done** | POST/GET claims, health check, lifespan management |
 | Temporal workflows | **Done** | VerifyClaimWorkflow (7 activities) + ExtractTranscriptWorkflow (8 activities), flat pipeline, thesis-aware synthesis |
 | Temporal worker | **Done** | Registers 2 workflows + 15 activities, max_concurrent_activities=2, structured logging |
-| `decompose_claim` | **Done** | LLM decomposes text into flat facts (guided by linguistic patterns) + thesis (structure, key_test) in one pass |
+| `decompose_claim` | **Done** | LLM decomposes text into flat facts (guided by 15 extraction rules) + thesis (structure, key_test) in one pass |
 | `research_subclaim` | **Done** | LangGraph ReAct agent with Serper (primary) + DuckDuckGo (fallback) + Brave (optional) + Wikipedia + page_fetcher |
 | `judge_subclaim` | **Done** | LLM evaluates evidence, returns structured verdict |
 | `synthesize_verdict` | **Done** | Thesis-aware synthesis — evaluates whether speaker's argument survives sub-verdicts (importance-weighted, not count-based) |
@@ -1322,8 +1319,8 @@ The Temporal UI at http://localhost:4501 lets you start workflows directly:
    - **Workflow Type**: `VerifyClaimWorkflow`
    - **Workflow ID**: any unique string (e.g. `manual-test-1`)
    - **Task Queue**: `spin-cycle-verify`
-   - **Input**: `[null, "The claim text you want to verify"]`
-3. The first argument is `null` — the workflow creates the claim record in the database automatically. (If you already have a claim ID from the API, pass it as a string instead of `null`.)
+   - **Input**: `[null, "The claim text you want to verify", "Speaker Name", "2024-03-20", false, "Transcript Title", "speaker's job title"]`
+3. Arguments: `[claim_id, claim_text, speaker, claim_date, is_child, transcript_title, speaker_description]`. Only `claim_text` is required — pass `null` for `claim_id` (auto-creates), and omit or null the rest. Speaker description is resolved via Wikidata if not provided.
 
 From the Temporal UI you can also:
 - **Inspect running workflows** — see each activity's input/output/duration in the Event History tab
@@ -1415,7 +1412,7 @@ spin-cycle/
 │   │   ├── client.py               # ChatOpenAI config (get_llm)
 │   │   ├── invoker.py              # invoke_llm() — parse + validate + retry
 │   │   ├── parser.py               # JSON extraction from raw LLM output
-│   │   └── validators.py           # Semantic validators (normalize, decompose, synthesize)
+│   │   └── validators.py           # Semantic validators (normalize, decompose, judge, synthesize, extraction)
 │   │
 │   ├── utils/                      # Shared utilities
 │   │   ├── logging.py              # Structured logging (JSON for Loki, pretty for dev)
@@ -1428,7 +1425,8 @@ spin-cycle/
 │   │   ├── app.py                  # App + lifespan (DB + Temporal init)
 │   │   └── routes/
 │   │       ├── health.py           # GET / and GET /health
-│   │       └── claims.py           # POST + GET claims
+│   │       ├── claims.py           # POST + GET claims
+│   │       └── transcripts.py      # POST + GET transcripts
 │   │
 │   ├── agent/                      # Domain logic (called by Temporal activities)
 │   │   ├── decompose.py            # Normalize + extract facts + Wikidata expansion
@@ -1457,8 +1455,7 @@ spin-cycle/
 │   │
 │   ├── prompts/                    # All LLM prompts with documentation
 │   │   ├── verification.py         # Normalize, Decompose, Research, Judge, Synthesize
-│   │   ├── extraction.py           # Transcript claim extraction
-│   │   └── linguistic_patterns.py  # 15-category linguistic pattern taxonomy
+│   │   └── extraction.py           # Transcript claim extraction
 │   │
 │   ├── workflows/                  # Temporal workflow definitions
 │   │   ├── verify.py               # VerifyClaimWorkflow (7 activities)

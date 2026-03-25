@@ -315,6 +315,27 @@ def _deduplicate_claims(claims: list[ExtractedClaim]) -> list[ExtractedClaim]:
     return unique
 
 
+async def _enrich_speakers(speakers: list[str]) -> list[dict]:
+    """Look up Wikidata descriptions for speakers.
+
+    Returns list of dicts like:
+        [{"name": "Donald Trump", "description": "45th and 47th president of the United States"},
+         {"name": "John Smith", "description": null}]
+    """
+    import asyncio
+    from src.tools.wikidata import get_entity_description
+
+    async def _lookup(name: str) -> dict:
+        try:
+            desc = await get_entity_description(name)
+            return {"name": name, "description": desc}
+        except Exception:
+            return {"name": name, "description": None}
+
+    results = await asyncio.gather(*[_lookup(s) for s in speakers])
+    return list(results)
+
+
 # ---------------------------------------------------------------------------
 # Core extraction — single batch
 # ---------------------------------------------------------------------------
@@ -323,6 +344,7 @@ async def extract_batch(
     text_segments: list[TranscriptSegment],
     target_segments: list[TranscriptSegment],
     batch_label: str | None = None,
+    transcript_title: str | None = None,
 ) -> list[ExtractedClaim]:
     """Extract claims from a single batch of segments.
 
@@ -335,11 +357,27 @@ async def extract_batch(
     """
     transcript_text = _format_transcript(text_segments)
     segment_manifest = _build_segment_manifest(target_segments)
-    speakers = ", ".join(dict.fromkeys(s.speaker for s in target_segments))
+    unique_speakers = list(dict.fromkeys(s.speaker for s in target_segments))
+    speakers = ", ".join(unique_speakers)
     word_count = sum(len(s.text.split()) for s in text_segments)
 
+    # Enrich speaker names with Wikidata descriptions (e.g. "Donald Trump
+    # (45th and 47th president of the United States)"). Helps the model
+    # resolve pronouns like "we" and "their" during decontextualization.
+    enriched_speakers = await _enrich_speakers(unique_speakers)
+    speaker_labels = []
+    for s in enriched_speakers:
+        if s["description"]:
+            speaker_labels.append(f"{s['name']} ({s['description']})")
+        else:
+            speaker_labels.append(s["name"])
+    if speaker_labels:
+        speakers = ", ".join(speaker_labels)
+
     has_overlap = len(text_segments) != len(target_segments)
+    title_line = f"Transcript title: {transcript_title}. " if transcript_title else ""
     context_note = (
+        f"{title_line}"
         f"Transcript text covers {word_count} words across "
         f"{len(text_segments)} segments. "
         f"Manifest lists {len(target_segments)} segments to process. "

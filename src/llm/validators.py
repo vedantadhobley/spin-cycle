@@ -8,8 +8,11 @@ Examples:
 - Decompose: At least one fact must exist
 - Judge: Verdict must be one of the valid values
 - Judge: Confidence and verdict should be consistent
+- Judge: Minimum 3 [N] citations in reasoning
+- Synthesize: Minimum 5 [N] citations in reasoning
 """
 
+import re
 from typing import Callable, Tuple
 
 from src.schemas.llm_outputs import (
@@ -117,10 +120,20 @@ def validate_decompose(output: DecomposeOutput) -> tuple[bool, str]:
     return True, ""
 
 
+def _count_citations(text: str) -> int:
+    """Count unique [N] citation indices in text."""
+    return len(set(int(m) for m in re.findall(r'\[(\d+)\]', text)))
+
+
+# Minimum citation counts — enforced via validator retry
+MIN_JUDGE_CITATIONS = 3
+MIN_SYNTHESIZE_CITATIONS = 5
+
+
 def validate_judge(output: JudgeOutput) -> tuple[bool, str]:
     """Validate judge output semantically.
 
-    Checks rubric completeness + confidence/verdict consistency.
+    Checks rubric completeness + confidence/verdict consistency + citation density.
     """
     # Check 1: Rubric fields are populated
     if not output.claim_interpretation or len(output.claim_interpretation.strip()) < 5:
@@ -139,7 +152,20 @@ def validate_judge(output: JudgeOutput) -> tuple[bool, str]:
     if not output.reasoning or len(output.reasoning.strip()) < 10:
         return False, "Reasoning is empty or too short"
 
-    # Check 3: Confidence/verdict consistency (warnings, not hard failures)
+    # Check 3: Minimum citation density in reasoning
+    # Every subclaim judgment must cite at least 3 sources (or all evidence
+    # items if fewer than 3). Unverifiable verdicts are exempt — thin evidence
+    # is the problem, not lazy citing.
+    if output.verdict != "unverifiable":
+        min_required = min(MIN_JUDGE_CITATIONS, len(output.key_evidence))
+        citation_count = _count_citations(output.reasoning)
+        if citation_count < min_required:
+            return False, (
+                f"Reasoning cites only {citation_count} sources (minimum {min_required}). "
+                f"Every factual assertion must cite at least one source using [N] notation."
+            )
+
+    # Check 4: Confidence/verdict consistency (warnings, not hard failures)
     if output.verdict in ("true", "false") and output.confidence < 0.3:
         log.warning(logger, MODULE, "low_confidence_strong_verdict",
                    f"Strong verdict '{output.verdict}' with low confidence {output.confidence}",
@@ -156,7 +182,7 @@ def validate_judge(output: JudgeOutput) -> tuple[bool, str]:
 def validate_synthesize(output: SynthesizeOutput) -> tuple[bool, str]:
     """Validate synthesize output semantically.
 
-    Checks rubric completeness + confidence/verdict consistency.
+    Checks rubric completeness + confidence/verdict consistency + citation density.
     """
     # Check 1: Rubric fields are populated
     if not output.thesis_restatement or len(output.thesis_restatement.strip()) < 5:
@@ -169,7 +195,18 @@ def validate_synthesize(output: SynthesizeOutput) -> tuple[bool, str]:
     if not output.reasoning or len(output.reasoning.strip()) < 10:
         return False, "Reasoning is empty or too short"
 
-    # Check 3: Confidence/verdict consistency
+    # Check 3: Minimum citation density in reasoning
+    # Final synthesis must cite at least 5 sources from the evidence digest.
+    # Unverifiable verdicts are exempt.
+    if output.verdict != "unverifiable":
+        citation_count = _count_citations(output.reasoning)
+        if citation_count < MIN_SYNTHESIZE_CITATIONS:
+            return False, (
+                f"Reasoning cites only {citation_count} sources (minimum {MIN_SYNTHESIZE_CITATIONS}). "
+                f"Cite evidence using [N] notation from the evidence digest."
+            )
+
+    # Check 4: Confidence/verdict consistency
     if output.verdict in ("true", "false") and output.confidence < 0.3:
         log.warning(logger, MODULE, "low_confidence_strong_verdict",
                    f"Strong verdict '{output.verdict}' with low confidence {output.confidence}")

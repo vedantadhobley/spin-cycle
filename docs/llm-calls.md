@@ -2,39 +2,30 @@
 
 Every LLM invocation in the verification pipeline, with prompt locations,
 structured output schemas, forcing fields, validation, and scoring/ranking
-behavior. Updated 2026-03-24.
+behavior. Updated 2026-03-25.
 
 ---
 
 ## Pipeline Overview
 
-```
-Transcript
-    |
-[EXTRACT] ──── 1 LLM call (extraction)
-    |
-Raw Claim
-    |
-[NORMALIZE] ── 1 LLM call
-    |
-[DECOMPOSE] ── 1 LLM call + 1 conditional quality check
-    |               + Wikidata expansion (programmatic)
-    |
-[RESEARCH] ─── LangGraph ReAct agent (8-12 tool calls)
-    |               + programmatic seed pipeline
-    |               + relevance filter (programmatic)
-    |
-[JUDGE] ────── 1 LLM call per sub-claim
-    |               + evidence ranking (programmatic)
-    |
-[SYNTHESIZE] ─ 1 LLM call (skipped if single fact)
-    |
-Final Verdict
+```mermaid
+flowchart TD
+    T[Transcript] --> EXT["EXTRACT — 1 LLM call (extraction)"]
+    EXT --> RAW[Raw Claim]
+    RAW --> NORM["NORMALIZE — 1 LLM call"]
+    NORM --> DEC["DECOMPOSE — 1 LLM call + 1 conditional quality check\n+ Wikidata expansion (programmatic)"]
+    DEC --> RES["RESEARCH — LangGraph ReAct agent (8-12 tool calls)\n+ programmatic seed pipeline\n+ relevance filter (programmatic)"]
+    RES --> JDG["JUDGE — 1 LLM call per sub-claim\n+ evidence ranking (programmatic)"]
+    JDG --> SYN["SYNTHESIZE — 1 LLM call (skipped if single fact)"]
+    SYN --> V[Final Verdict]
+
+    style T fill:#e1f5fe
+    style V fill:#e8f5e9
 ```
 
 **Model**: Qwen3.5-122B-A10B (122B params, 10B active MoE, Q4_K_M)
 via llama.cpp ROCm on AMD Strix Halo (125GB unified memory).
-Thinking: disabled (`enable_thinking=False`). Max tokens: 16384 (all calls).
+Thinking: disabled (`enable_thinking=False`). Max tokens: 8192 (default for all calls).
 
 ---
 
@@ -43,9 +34,9 @@ Thinking: disabled (`enable_thinking=False`). Max tokens: 16384 (all calls).
 **When**: Processing a transcript (not used for direct claim submissions).
 
 **Files**:
-- Prompts: `src/prompts/extraction.py` — `EXTRACTION_SYSTEM` (L19-135), `EXTRACTION_USER` (L141-189)
-- Invoker: `src/transcript/extractor.py:370-385`
-- Schema: `src/transcript/extractor.py` — `ExtractionOutput` (L74), `SegmentExtraction` (L66), `ExtractedClaim` (L50)
+- Prompts: `src/prompts/extraction.py` — `EXTRACTION_SYSTEM` (L18), `EXTRACTION_USER` (L93)
+- Invoker: `src/transcript/extractor.py`
+- Schema: `src/transcript/extractor.py` — `ExtractionOutput` (L70), `SegmentExtraction` (L63), `ExtractedClaim` (L50)
 - Validator: `src/llm/validators.py` — `validate_extraction()`
 
 **Temperature**: 0.0 initial, 0.3 on retry. **Retries**: 1 (only if <50% segment coverage).
@@ -64,20 +55,18 @@ judgment at extraction time — filtering is entirely programmatic.
 ```
 ExtractionOutput
   segments: list[SegmentExtraction]
-    timestamp: str (MM:SS)
     speaker: str
     segment_gist: str          ← FORCING: 1-sentence segment purpose
     assertion_count: int       ← FORCING: count before listing
     claims: list[ExtractedClaim]
-      claim_text: str          ← with [bracket] context insertions
-      original_quote: str      ← exact speaker words
-      speaker: str
-      timestamp: str
-      claim_type: str          ← quantitative|historical|causal|comparative|attribution|other
+      claim_text: str          ← decontextualized — pronouns resolved, stands alone
+      original_quote: str      ← speaker's exact words
+      speaker: str             ← propagated from segment level
       checkable: bool
       checkability_rationale: str
-      context_insertions: list[str] ← FORCING: each bracket listed
       is_restatement: bool
+      worth_checking: bool     ← computed: checkable AND NOT restatement
+      skip_reason: str?        ← set programmatically if not worth checking
 ```
 
 Fields computed programmatically (not in LLM output):
@@ -99,7 +88,7 @@ Fields computed programmatically (not in LLM output):
 - **Future predictions**: Regex-detected post-LLM → forced to
   checkable=False, worth_checking=False
 
-### Post-LLM enforcement (extractor.py:210-234)
+### Post-LLM enforcement
 
 - Future prediction regex → checkable=False, worth_checking=False, skip_reason="future_prediction"
 - is_restatement → worth_checking=False, skip_reason="restatement"
@@ -112,8 +101,8 @@ Fields computed programmatically (not in LLM output):
 **When**: First step of verification for every claim.
 
 **Files**:
-- Prompts: `src/prompts/verification.py` — `NORMALIZE_SYSTEM` (L360-474, ~6.7K chars), `NORMALIZE_USER` (L476-482, ~126 chars)
-- Invoker: `src/agent/decompose.py:486-497`
+- Prompts: `src/prompts/verification.py` — `NORMALIZE_SYSTEM` (L422), `NORMALIZE_USER` (L472)
+- Invoker: `src/agent/decompose.py`
 - Schema: `src/schemas/llm_outputs.py` — `NormalizeOutput`
 - Validator: `src/llm/validators.py` — `validate_normalize()`
 
@@ -154,9 +143,8 @@ NormalizeOutput
 **When**: After normalization, for every claim.
 
 **Files**:
-- Prompts: `src/prompts/verification.py` — `DECOMPOSE_SYSTEM` (L489-1012, ~35.5K chars), `DECOMPOSE_USER` (L1014-1036, ~1.2K chars)
-- Appended: `src/prompts/linguistic_patterns.py` — `LINGUISTIC_PATTERNS` (~13K chars) + `DECOMPOSITION_CHECKLIST` (~4.5K chars)
-- Invoker: `src/agent/decompose.py:516-526`
+- Prompts: `src/prompts/verification.py` — `DECOMPOSE_SYSTEM` (L485), `DECOMPOSE_USER` (L679)
+- Invoker: `src/agent/decompose.py:448`
 - Schema: `src/schemas/llm_outputs.py` — `DecomposeOutput`
 - Validator: `src/llm/validators.py` — `validate_decompose()`
 
@@ -195,7 +183,7 @@ DecomposeOutput
     seed_queries: list[str]     ← 2-4 search queries for evidence
 ```
 
-### 15 extraction rules (from literature — do not modify)
+### 15 extraction rules
 
 1. Expand parallel structures ("Both X and Y do Z" → 2 facts)
 2. Preserve exact quantities and values
@@ -215,7 +203,7 @@ DecomposeOutput
 14. No injection of "overwhelming" or modifiers not in original
 15. Verification target must ask whether something IS true, not whether someone SAID it
 
-### Post-LLM pipeline (decompose.py:542-600+)
+### Post-LLM pipeline (decompose.py)
 
 1. Programmatic dedup (trivial: punctuation, case, whitespace)
 2. Quality check (Call 4) — semantic dupes + group enumeration
@@ -224,6 +212,12 @@ DecomposeOutput
 5. Wikidata expansion: `get_ownership_chain()` → executives, family, media holdings, affiliated orgs
 6. If quality check finds issues → retry decompose with feedback (temp=0.1)
 
+### Speaker description pre-resolution
+
+If `speaker_description` is provided (from transcript extraction's Wikidata lookup),
+decompose skips its own Wikidata speaker lookup. Standalone claims without a
+pre-resolved description fall back to looking up the speaker in Wikidata during decompose.
+
 ---
 
 ## Call 4: Sub-claim Quality Check (Conditional)
@@ -231,8 +225,7 @@ DecomposeOutput
 **When**: After decompose, only if ≥2 facts. Triggers retry of Call 3 if issues found.
 
 **Files**:
-- Prompts: `src/agent/decompose.py` — `_SUBCLAIM_QUALITY_SYSTEM` (L266-281, ~419 chars), `_SUBCLAIM_QUALITY_USER` (L283-287, ~58 chars)
-- Invoker: `src/agent/decompose.py:357-368`
+- Prompts: `src/agent/decompose.py` — inline system/user prompts
 - Schema: `src/schemas/llm_outputs.py` — `SubclaimQualityCheck`
 
 **Temperature**: 0.3. **Retries**: 1.
@@ -263,15 +256,40 @@ SubclaimQualityCheck
 **When**: For each atomic fact from decompose.
 
 **Files**:
-- Prompts: `src/prompts/verification.py` — `RESEARCH_SYSTEM` (L1043-1204, ~8.8K chars), `RESEARCH_USER` (L1206-1227, ~1K chars)
-- Agent builder: `src/agent/research.py` — `build_research_agent()`
-- Entry point: `src/agent/research.py` — `research_claim()`
+- Prompts: `src/prompts/verification.py` — `RESEARCH_SYSTEM` (L695), `RESEARCH_USER` (L780)
+- Agent builder: `src/agent/research.py` — `build_research_agent()` (L352)
+- Entry point: `src/agent/research.py` — `research_claim()` (L1395)
 
 **Temperature**: 0. **Max steps**: 47 (~15 tool calls). **Timeout**: 420s.
 
 **Placeholders**: `{current_date}`, `{claim_date_line}`, `{speaker_line}`, `{sub_claim}`
 
 ### Architecture
+
+```mermaid
+flowchart TD
+    subgraph Phase1["Phase 1 — Programmatic Seed Pipeline (no LLM)"]
+        S1["Run seed searches\n(Serper + DuckDuckGo)"] --> S2["Collect domains +\nawait MBFC ratings"]
+        S2 --> S3["Enrich parties from MBFC\n(NER on ownership → Wikidata)"]
+        S3 --> S4["Score + rank seeds\n(conflict penalties, top 30)"]
+        S4 --> S5["Prefetch top seed pages\n(up to 10, TIER 1/2 first)"]
+        S5 --> S6["Build seed messages\n(tier + conflict annotations)"]
+    end
+
+    subgraph Phase2["Phase 2 — LangGraph ReAct Agent"]
+        A1["Agent sees seeds +\nprogress note"] --> A2{"Call a tool?"}
+        A2 -->|Yes| A3["Execute tool\n(search/fetch/wiki)"]
+        A3 --> A1
+        A2 -->|No| A4["Final summary with\nRELEVANT SOURCES list"]
+    end
+
+    subgraph Phase3["Phase 3 — Programmatic Enrichment"]
+        E1["LegiScan search\n(US legislation)"] --> E2["Evidence NER →\nWikidata expansion"]
+        E2 --> E3["Filter irrelevant evidence\n(date + entity anchor check)"]
+    end
+
+    Phase1 --> Phase2 --> Phase3
+```
 
 **Phase 1 — Programmatic seed pipeline** (no LLM, ~3-20s):
 1. `_run_seed_searches()`: Fire LLM-written queries + base queries to Serper/DuckDuckGo
@@ -339,19 +357,19 @@ fails both checks when researching a 2026 Iran claim → dropped.
 **When**: For each sub-claim after research completes.
 
 **Files**:
-- Prompts: `src/prompts/verification.py` — `JUDGE_SYSTEM` (L1255-1520, ~15K chars), `JUDGE_USER` (L1522-1535, ~341 chars)
-- Invoker: `src/agent/judge.py:242-260`
+- Prompts: `src/prompts/verification.py` — `JUDGE_SYSTEM` (L829), `JUDGE_USER` (L1001)
+- Invoker: `src/agent/judge.py:159`
 - Schema: `src/schemas/llm_outputs.py` — `JudgeOutput`
-- Validator: `src/llm/validators.py` — `validate_judge()`
+- Validator: `src/llm/validators.py` — `validate_judge()` (L133)
 
 **Temperature**: 0.0. **Retries**: 2.
 
-**Placeholders**: `{current_date}`, `{claim_date_line}`, `{speaker_line}`, `{claim_text}`, `{sub_claim}`, `{verification_line}`, `{evidence_text}`
+**Placeholders**: `{current_date}`, `{claim_date_line}`, `{speaker_line}`, `{transcript_context}`, `{claim_text}`, `{sub_claim}`, `{verification_line}`, `{key_test_line}`, `{evidence_text}`
 
 ### What it does
 
 5-step rubric evaluation:
-1. **Interpret claim** — charitable restatement, handle absolute language
+1. **Interpret claim** — charitable restatement, handle absolute language. If a key test is provided (from decompose), evaluation must address whether evidence satisfies or undermines that test.
 2. **Triage key evidence** — assess 3-5 sources for independence
 3. **Assess direction** — (independent evidence only) supports/contradicts/mixed
 4. **Assess precision** — claim specificity vs evidence completeness
@@ -375,14 +393,26 @@ JudgeOutput
   reasoning: str                  ← public-facing with [N] citations
 ```
 
+### Key test passthrough
+
+The `key_test` from decompose (what must be true for the overall claim to hold) is injected
+into the judge user prompt via `{key_test_line}`. This anchors subclaim evaluation to the
+overall claim's success criteria. Critical for single-fact claims that skip synthesis entirely.
+
 ### Evidence annotation (judge.py, pre-LLM)
 
 Before the LLM call, each evidence item is annotated with:
+- **Check 0 — Government source warning**: All `.gov`/`.mil` domains get `⚠️ GOVERNMENT SOURCE: {domain} is a government website. Government sources CANNOT independently verify claims about government actions.`
 - **Source tag**: `[Center (-0.5) | Very High factual | UK Wire Service]` or
   `[USA Government | FBI]` (from MBFC data via `_format_source_tag()`)
 - **Tier label**: from `evidence_ranker.tier_label()` — e.g., "TIER 1 (very high factual)", "TIER 2 (high factual)", "government" (no tier for unrated gov)
 - **Conflict flags**: `⚠️ INTERESTED PARTY`, `⚠️ AFFILIATED MEDIA`, `⚠️ QUOTES INTERESTED PARTY`, `⚠️ PUBLISHER OWNS/IS OWNED BY`
 - **Quality summary**: tier distribution, bias spread, domain count
+
+### Unrated source filtering
+
+Evidence items with no MBFC rating (tier 0 / unrated) are dropped before the judge sees them.
+This prevents low-quality unknown sources from diluting the evidence pool.
 
 ### Scoring, tiering, and ranking (evidence_ranker.py)
 
@@ -457,7 +487,7 @@ decisions use `source_tier()` (System 2) instead.
 #### `rank_and_select` caps (applied in order)
 
 1. **Content floor**: items <80 chars dropped (hub pages, failed fetches)
-2. **Domain cap**: max 3 per domain
+2. **Domain cap**: max 3 per domain (default), **max 5 per domain for TIER 1** sources (via `max_per_domain_tier1` parameter — wire services like Reuters/AP often have multiple high-quality articles)
 3. **Gov/mil category cap**: max 4 gov/mil items total. Excess removed (lowest-scoring first), backfilled with non-gov items from overflow.
 4. **Overall cap**: max 20 items
 
@@ -481,14 +511,17 @@ as an unknown domain. Max 4 gov items per 20 evidence slots.
 8. False balance — 1 dissenter ≠ 10 corroborating
 9. Retroactive status — current title ≠ role at event time
 
-### Semantic validation (validators.py:120-153)
+### Semantic validation (validators.py)
 
-- claim_interpretation not empty
-- key_evidence not empty
-- direction_reasoning ≥10 chars
-- precision_assessment ≥10 chars
-- reasoning ≥10 chars
-- Warnings (log, no reject): low confidence on strong verdict, high confidence on "unverifiable"
+8 checks in `validate_judge()`:
+1. `claim_interpretation` not empty
+2. `key_evidence` not empty
+3. `direction_reasoning` ≥10 chars
+4. `precision_assessment` ≥10 chars
+5. `reasoning` ≥10 chars
+6. **Citation enforcement (hard)**: If verdict ≠ "unverifiable", require `min(3, len(key_evidence))` unique [N] citations in reasoning. Failures trigger LLM retry. (`MIN_JUDGE_CITATIONS=3`)
+7. Warning (log, no reject): low confidence (<0.3) on strong verdict
+8. Warning (log, no reject): high confidence (>0.8) on "unverifiable"
 
 ### Consistency check (permissive, log-only)
 
@@ -503,14 +536,14 @@ as an unknown domain. Max 4 gov items per 20 evidence slots.
 **When**: Only if decompose produced >1 fact. Skipped for single-fact claims.
 
 **Files**:
-- Prompts: `src/prompts/verification.py` — `SYNTHESIZE_SYSTEM` (L1541-1661, ~5.3K chars), `SYNTHESIZE_USER` (L1663-1674, ~237 chars)
-- Invoker: `src/agent/synthesize.py:87-104`
+- Prompts: `src/prompts/verification.py` — `SYNTHESIZE_SYSTEM` (L1022), `SYNTHESIZE_USER` (L1118)
+- Invoker: `src/agent/synthesize.py:20`
 - Schema: `src/schemas/llm_outputs.py` — `SynthesizeOutput`
-- Validator: `src/llm/validators.py` — `validate_synthesize()`
+- Validator: `src/llm/validators.py` — `validate_synthesize()` (L182)
 
 **Temperature**: 0.0. **Retries**: 2.
 
-**Placeholders**: `{current_date}`, `{claim_date_line}`, `{synthesis_context}`, `{synthesis_framing}`, `{sub_verdicts_text}`, `{evidence_digest}`
+**Placeholders**: `{current_date}`, `{claim_date_line}`, `{transcript_context}`, `{synthesis_framing}`, `{sub_verdicts_text}`, `{evidence_digest}`
 
 ### What it does
 
@@ -543,7 +576,12 @@ SynthesizeOutput
 - Unverifiable elements: if some facts are unverifiable but core facts are judged, still render a verdict on the verifiable parts
 - Reasoning must never reference internal process (sub-claim numbers, rubric steps)
 
-### Evidence digest (synthesize.py:192-226)
+### Citation enforcement (hard validation)
+
+If verdict ≠ "unverifiable", reasoning must contain at least 5 unique [N] citations from the
+evidence digest. Failures trigger LLM retry. (`MIN_SYNTHESIZE_CITATIONS=5`)
+
+### Evidence digest (synthesize.py)
 
 Built from judge-cited sources only (sources referenced in [N] notation).
 Typically 10-20 unique items after deduplication across sub-claims.
@@ -557,14 +595,14 @@ Typically 10-20 unique items after deduplication across sub-claims.
 
 ## Summary Table
 
-| # | Stage | Prompt Constants | Chars | Temp | Schema | Validator |
-|---|-------|-----------------|-------|------|--------|-----------|
-| 1 | Extract | EXTRACTION_SYSTEM + _USER | ~5.2K | 0→0.3 | ExtractionOutput | validate_extraction |
-| 2 | Normalize | NORMALIZE_SYSTEM + _USER | ~6.8K | 0 | NormalizeOutput | validate_normalize |
-| 3 | Decompose | DECOMPOSE_SYSTEM + _USER + LINGUISTIC_PATTERNS + CHECKLIST | ~54.7K | 0→0.1 | DecomposeOutput | validate_decompose |
-| 4 | Quality Check | _SUBCLAIM_QUALITY_SYSTEM + _USER | ~477 | 0.3 | SubclaimQualityCheck | — |
-| — | Research | RESEARCH_SYSTEM + _USER | ~9.8K | 0.1 | (none — agent) | — |
-| 5 | Judge | JUDGE_SYSTEM + _USER | ~15.4K | 0 | JudgeOutput | validate_judge |
-| 6 | Synthesize | SYNTHESIZE_SYSTEM + _USER | ~5.6K | 0 | SynthesizeOutput | validate_synthesize |
+| # | Stage | Prompt Constants | Temp | Schema | Validator |
+|---|-------|-----------------|------|--------|-----------|
+| 1 | Extract | EXTRACTION_SYSTEM + _USER | 0→0.3 | ExtractionOutput | validate_extraction |
+| 2 | Normalize | NORMALIZE_SYSTEM + _USER | 0 | NormalizeOutput | validate_normalize |
+| 3 | Decompose | DECOMPOSE_SYSTEM + _USER | 0→0.1 | DecomposeOutput | validate_decompose |
+| 4 | Quality Check | inline system + user | 0.3 | SubclaimQualityCheck | — |
+| — | Research | RESEARCH_SYSTEM + _USER | 0 | (none — agent) | — |
+| 5 | Judge | JUDGE_SYSTEM + _USER | 0 | JudgeOutput | validate_judge |
+| 6 | Synthesize | SYNTHESIZE_SYSTEM + _USER | 0 | SynthesizeOutput | validate_synthesize |
 
-**Total prompt text**: ~98K chars across all stages (decompose is largest at ~55K due to 15 extraction rules + linguistic patterns + worked examples).
+All prompts live in `src/prompts/verification.py` (verification pipeline) and `src/prompts/extraction.py` (transcript extraction).
