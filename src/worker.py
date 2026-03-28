@@ -39,6 +39,8 @@ from src.activities.verify_activities import (  # noqa: E402
 )
 from src.activities.transcript_activities import (  # noqa: E402
     fetch_transcript,
+    fetch_raw_transcript,
+    extract_theses_activity,
     extract_transcript_batch,
     finalize_extraction,
     store_transcript,
@@ -83,6 +85,8 @@ async def main():
             start_next_queued_claim,
             # Transcript extraction
             fetch_transcript,
+            fetch_raw_transcript,
+            extract_theses_activity,
             extract_transcript_batch,
             finalize_extraction,
             store_transcript,

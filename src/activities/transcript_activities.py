@@ -2,13 +2,15 @@
 
 Activities:
   1. fetch_transcript              — fetch + parse a Rev.com transcript
-  2. extract_transcript_batch      — extract claims from one batch of segments
-  3. finalize_extraction           — filter + deduplicate claims across all batches
+  2. extract_transcript_batch      — extract claims from one batch of segments (v1, archived)
+  3. finalize_extraction           — filter + deduplicate claims across all batches (v1, archived)
   4. store_transcript              — persist cleaned transcript to DB
   5. store_transcript_claims       — persist extracted claims linked to transcript
   6. create_claims_for_transcript  — batch-create Claim records + link FKs
   7. update_transcript_status      — set transcript status field
   8. finish_transcript_and_start_next — mark transcript complete, start next queued
+  9. extract_theses_activity       — thesis-level extraction (v2, single LLM call)
+ 10. fetch_raw_transcript          — parse raw text into TranscriptData
 
 Each batch is a separate activity so it's visible in Temporal UI.
 The workflow orchestrates batches — Temporal's max_concurrent_activities
@@ -58,6 +60,127 @@ async def fetch_transcript(url: str) -> dict:
              word_count=transcript.word_count,
              segment_count=len(transcript.segments),
              speaker_count=len(transcript.speakers))
+
+    return result
+
+
+@activity.defn
+async def fetch_raw_transcript(
+    content: str,
+    url: str = "",
+    title: str = "",
+    date: str | None = None,
+) -> dict:
+    """Parse raw text content into a TranscriptData structure.
+
+    Returns a serialized transcript dict compatible with the thesis workflow.
+    """
+    from src.transcript.parsers.raw_text import parse_raw_text
+
+    log.info(activity.logger, "transcript", "parse_raw_start",
+             "Parsing raw text transcript",
+             title=title, content_length=len(content))
+
+    td = parse_raw_text(content, url=url, title=title, date=date)
+
+    result = {
+        "url": td.url,
+        "title": td.title,
+        "date": td.date,
+        "speakers": td.speakers,
+        "word_count": td.word_count,
+        "display_text": td.display_text,
+        "source_format": td.source_format,
+        "speaker_aliases": td.speaker_aliases,
+        "segments": [
+            {
+                "index": s.index,
+                "speaker": s.speaker,
+                "text": s.text,
+                "timestamp": s.timestamp,
+                "section_header": s.section_header,
+            }
+            for s in td.segments
+        ],
+    }
+
+    log.info(activity.logger, "transcript", "parse_raw_done",
+             "Raw text parsed",
+             title=td.title,
+             word_count=td.word_count,
+             segment_count=td.segment_count,
+             speaker_count=len(td.speakers))
+
+    return result
+
+
+@activity.defn
+async def extract_theses_activity(
+    transcript_data: dict,
+    enriched_speakers: list[dict] | None = None,
+) -> list[dict]:
+    """Extract theses from a transcript via single LLM call.
+
+    Takes serialized TranscriptData + optional enriched speakers.
+    Returns list of thesis dicts with supporting references.
+    """
+    from src.transcript.parsers import TranscriptData, NumberedSegment
+    from src.transcript.thesis_extractor import extract_theses
+    from src.utils.reference_matcher import resolve_all_references
+
+    # Reconstruct TranscriptData
+    segments = [
+        NumberedSegment(
+            index=s["index"],
+            speaker=s["speaker"],
+            text=s["text"],
+            timestamp=s.get("timestamp"),
+            section_header=s.get("section_header"),
+        )
+        for s in transcript_data["segments"]
+    ]
+    td = TranscriptData(
+        url=transcript_data["url"],
+        title=transcript_data["title"],
+        date=transcript_data.get("date"),
+        speakers=transcript_data["speakers"],
+        segments=segments,
+        source_format=transcript_data.get("source_format", "revcom"),
+        speaker_aliases=transcript_data.get("speaker_aliases", {}),
+    )
+
+    log.info(activity.logger, "transcript", "thesis_extraction_start",
+             "Starting thesis extraction",
+             title=td.title, word_count=td.word_count,
+             segment_count=td.segment_count)
+
+    theses = await extract_theses(td, enriched_speakers=enriched_speakers)
+
+    # Programmatic reference verification
+    theses, ref_stats = resolve_all_references(theses, td.segments)
+
+    # Serialize for Temporal transport
+    result = []
+    for t in theses:
+        result.append({
+            "thesis_statement": t.thesis_statement,
+            "speakers": t.speakers,
+            "supporting_references": [
+                {"segment_index": r.segment_index, "excerpt": r.excerpt}
+                for r in t.supporting_references
+            ],
+            "topic": t.topic,
+            "checkable": t.checkable,
+            "checkability_rationale": t.checkability_rationale,
+            "worth_checking": t.checkable,  # checkable = worth_checking for theses
+        })
+
+    checkable = sum(1 for t in result if t["checkable"])
+    log.info(activity.logger, "transcript", "thesis_extraction_done",
+             "Thesis extraction complete",
+             thesis_count=len(result),
+             checkable=checkable,
+             ref_stats=ref_stats)
 
     return result
 
@@ -272,6 +395,13 @@ async def store_transcript(transcript_data: dict) -> dict:
             record.segment_count = len(transcript_data["segments"])
             record.display_text = transcript_data["display_text"]
             record.status = "extracting"
+            # v2 fields
+            if "segments" in transcript_data:
+                record.segments_data = transcript_data["segments"]
+            if "source_format" in transcript_data:
+                record.source_format = transcript_data["source_format"]
+            if "speaker_aliases" in transcript_data:
+                record.speaker_aliases = transcript_data["speaker_aliases"]
         else:
             record = TranscriptRecord(
                 url=url,
@@ -282,6 +412,10 @@ async def store_transcript(transcript_data: dict) -> dict:
                 segment_count=len(transcript_data["segments"]),
                 display_text=transcript_data["display_text"],
                 status="extracting",
+                # v2 fields
+                segments_data=transcript_data.get("segments"),
+                source_format=transcript_data.get("source_format", "revcom"),
+                speaker_aliases=transcript_data.get("speaker_aliases"),
             )
             session.add(record)
 
@@ -320,11 +454,17 @@ async def store_transcript_claims(
         )
 
         for c in claims:
+            # For thesis v2, original_quote comes from first supporting reference
+            original_quote = c.get("original_quote", "")
+            if not original_quote and c.get("supporting_references"):
+                first_ref = c["supporting_references"][0]
+                original_quote = first_ref.get("excerpt", "")
+
             tc = TranscriptClaim(
                 transcript_id=tid,
-                claim_text=c["claim_text"],
-                original_quote=c["original_quote"],
-                speaker=c["speaker"],
+                claim_text=c.get("claim_text") or c.get("thesis_statement", ""),
+                original_quote=original_quote,
+                speaker=c.get("speaker", c.get("speakers", [""])[0] if c.get("speakers") else ""),
                 claim_type=c.get("claim_type"),
                 worth_checking=c.get("worth_checking", True),
                 skip_reason=c.get("skip_reason"),
@@ -332,6 +472,10 @@ async def store_transcript_claims(
                 checkability_rationale=c.get("checkability_rationale"),
                 is_restatement=c.get("is_restatement", False),
                 segment_gist=c.get("segment_gist"),
+                # v2 fields
+                supporting_references=c.get("supporting_references"),
+                topic=c.get("topic"),
+                thesis_version=c.get("thesis_version", 1),
             )
             session.add(tc)
             await session.flush()

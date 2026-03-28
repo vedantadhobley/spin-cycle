@@ -1,123 +1,144 @@
-"""Prompts for extracting verifiable claims from transcripts.
+"""Prompts for thesis-level transcript extraction.
 
-The extraction LLM receives a transcript with speaker labels and a segment
-manifest.  It processes each segment, outputting a structured per-segment
-result with an assertion_count forcing field.
+The extraction LLM receives a full transcript with numbered segments and
+identifies 15-30 major ARGUMENTS (theses), each with supporting segment
+references.  This replaces per-segment atomic claim extraction.
 
-Key forcing fields:
-- `assertion_count`: Forces the model to scan each segment before listing claims.
-
-Filtering is programmatic: checkable=true → verified. No editorial judgment
-at extraction time.
+Key design:
+- One LLM pass over the full transcript (no batching)
+- Merge repetitions: same argument in segments 5, 23, 41 → one thesis
+- Segment numbers must match [N] labels in transcript
+- Excerpts must be actual words from the segment, not paraphrased
+- Checkable = could independent data confirm or deny?
 """
 
 # ---------------------------------------------------------------------------
 # System prompt
 # ---------------------------------------------------------------------------
 
-EXTRACTION_SYSTEM = """\
-You are a fact-check analyst extracting verifiable statements from a
-transcript so a newsroom can check them.
+THESIS_EXTRACTION_SYSTEM = """\
+You are a fact-check analyst identifying the major ARGUMENTS in a transcript \
+so a newsroom can verify them.
 
 Today's date: {current_date}
 
 ## Your Task
 
-You receive a transcript with speaker labels and a segment manifest.
-Process EVERY segment and output a result for each one.
+You receive a full transcript with numbered segments: [0], [1], [2], etc. \
+Identify the 15-30 major arguments (theses) that speakers make.
 
-## Step 1 — Segment Analysis
+## What Is a Thesis?
 
-Read the segment. State in one sentence what the speaker is arguing.
-→ Output: segment_gist
+A thesis is a COMPLETE ARGUMENT, not an individual sentence. If a speaker \
+makes the same point across segments [5], [23], and [41], that is ONE thesis \
+with THREE supporting references.
 
-## Step 2 — Sentence-by-Sentence Extraction
+Examples of theses vs. not-theses:
+- THESIS: "The United States military spending exceeded $1 trillion per year \
+during the first Trump administration" (verifiable aggregate claim)
+- NOT A THESIS: "Thank you for being here" (greeting)
+- NOT A THESIS: "This is going to be amazing" (subjective prediction)
+- THESIS: "Operation X destroyed Country Y's nuclear facilities" (specific \
+military claim)
+- NOT A THESIS: "We have the best people" (vague rhetoric)
 
-Go through the segment sentence by sentence. For each sentence that
-contains at least one factual assertion about the real world, extract
-it as ONE claim. The sentence is the unit — never split a sentence
-into multiple claims, and never merge multiple sentences into one claim.
+## Step 1 — Scan the Full Transcript
 
-A sentence with no factual assertion (greetings, pure opinion, vague
-rhetoric) gets no claim.
+Read the entire transcript. Identify the distinct arguments being made. \
+Many speakers repeat and elaborate the same argument across multiple segments \
+— these are ONE thesis, not many.
 
-A sentence with MULTIPLE factual assertions (lists, stacked superlatives,
-compound claims) still gets exactly ONE claim — a downstream system
-handles granular splitting.
+## Step 2 — Write Thesis Statements
 
-Set assertion_count to the number of sentences that contain assertions.
+For each argument, write a thesis_statement that:
+- Is NEUTRAL and DECONTEXTUALIZED (no pronouns, no "we", no "they")
+- Replaces ALL pronouns with specific entities
+- Could be understood by someone who hasn't read the transcript
+- Captures the FULL argument, not just one sentence of it
 
-## Step 3 — Decontextualize
+## Step 3 — Attach Supporting References
 
-For each claim, the claim_text must be understandable WITHOUT the
-transcript. Replace ALL pronouns and possessives with the specific
-entity they refer to.
+For each thesis, list 2-6 supporting_references. Each reference has:
+- segment_index: the [N] number from the transcript
+- excerpt: the ACTUAL first 15-20 words from that passage (copy directly, \
+do not paraphrase)
 
-RESOLVE: "he", "she", "they", "we", "I", "them", "it", "this",
-"his", "her", "their", "our", "my", "its", "the company", "that country"
+CRITICAL: segment_index must be an actual [N] label from the transcript. \
+Excerpts must be real words from that segment — the system verifies them.
 
-The original_quote preserves the speaker's exact words unchanged.
-The claim_text is your rewrite with all references resolved.
+## Step 4 — Assess Checkability
 
-Examples:
-- Quote: "We have hit hundreds of targets including their facilities"
-  → Claim: "The United States has hit hundreds of targets including Iran's facilities"
-- Quote: "I rebuilt our military in my first term"
-  → Claim: "Donald Trump rebuilt the United States military in his first term"
-- Quote: "Their exports dropped 40%"
-  → Claim: "Country Y's exports dropped 40%"
+Could independent data (statistics, records, official documents, reporting) \
+confirm or deny this argument?
 
-## Step 4 — Checkability
+NOT checkable:
+- Pure subjective opinions ("this is the greatest")
+- Future predictions ("we will achieve")
+- Promises or intentions ("I'm going to do")
+- Unmeasurable states (resolve, commitment, determination)
+- Vague rhetoric without specific claims
 
-Could independent data confirm or deny this? State why in one sentence.
+Checkable:
+- Quantitative claims (amounts, percentages, rankings)
+- Historical events (operations, votes, agreements)
+- Attribution (who said or did what)
+- Policy descriptions (what a law does, what a program costs)
+- Comparisons with specific metrics
 
-Not checkable: pure subjective judgments, future predictions, promises,
-unmeasurable states (resolve, commitment, determination).
+## Step 5 — Classify Topic
 
-## Step 5 — Restatements
-
-If a speaker repeats a claim already extracted above, mark is_restatement.
+Assign one topic label: economic, military, political, legal, social, \
+diplomatic, technological, environmental, health, or other.
 
 ## Output Rules
 
-1. One result per manifest segment — no skipping
-2. original_quote must be a COMPLETE sentence from the transcript, not a fragment
-3. Speaker name exactly as in transcript
-4. We filter programmatically — include all assertions, even borderline ones\
+1. [Section: ...] headers in the transcript are editorial context, NOT spoken words
+2. Aim for 15-30 theses for a typical transcript
+3. Merge repetitions — if the same point appears in 5 segments, ONE thesis
+4. Every thesis needs at least 2 supporting references
+5. Excerpts must be copied from the transcript, not invented\
 """
 
 # ---------------------------------------------------------------------------
-# User prompt — receives transcript + segment manifest
+# User prompt
 # ---------------------------------------------------------------------------
 
-EXTRACTION_USER = """\
-Process every segment in this transcript and extract all factual assertions.
+THESIS_EXTRACTION_USER = """\
+Identify the major arguments in this transcript.
 
 ## Transcript
-{transcript_text}
+{numbered_transcript}
 
-## Segment Manifest
-{segment_manifest}
-
+## Context
 {context_note}
+
+## Speaker Descriptions
+{speaker_descriptions}
 
 Return JSON:
 {{
-  "segments": [
+  "theses": [
     {{
-      "speaker": "Speaker Name",
-      "segment_gist": "What the speaker is arguing (one sentence)",
-      "assertion_count": 3,
-      "claims": [
-        {{
-          "claim_text": "The United States destroyed Iran's military headquarters",
-          "original_quote": "We destroyed their military headquarters in a single strike.",
-          "checkable": true,
-          "checkability_rationale": "Military operations are documented by CENTCOM and independent media.",
-          "is_restatement": false
-        }}
-      ]
+      "thesis_statement": "Neutral, decontextualized argument statement",
+      "speakers": ["Speaker Name"],
+      "supporting_references": [
+        {{"segment_index": 0, "excerpt": "First 15-20 words from segment..."}},
+        {{"segment_index": 5, "excerpt": "First 15-20 words from segment..."}}
+      ],
+      "topic": "military",
+      "checkable": true,
+      "checkability_rationale": "Military operations are documented by defense agencies and independent media."
     }}
   ]
 }}\
 """
+
+
+# ---------------------------------------------------------------------------
+# Legacy re-exports (old batch extraction prompt, still importable)
+# ---------------------------------------------------------------------------
+
+from src.prompts._archive_extraction import (  # noqa: F401, E402
+    EXTRACTION_SYSTEM,
+    EXTRACTION_USER,
+)

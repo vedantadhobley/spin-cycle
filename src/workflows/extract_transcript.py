@@ -1,18 +1,18 @@
 """Temporal workflow for transcript claim extraction.
 
-Takes a transcript URL, fetches it, extracts verifiable claims via per-batch
-activities, and optionally submits them to the verification pipeline.
+Supports two extraction modes:
+  - v2 (thesis): Single LLM pass over full transcript → 15-30 theses with
+    segment references → decompose each → verify. No batching, no semaphore.
+  - v1 (batch): Legacy per-segment batch extraction (still available, not
+    default). Kept for backward compatibility.
 
-Each batch of ~30 segments is a separate Temporal activity — visible in the
-UI with its own timing, retries, and status.  Temporal's max_concurrent_activities
-on the worker naturally limits GPU contention (no internal semaphore needed).
-
-Phases visible in Temporal UI:
-  1. fetching    — downloading and parsing the transcript
-  2. extracting  — N batch activities running (with overlap context)
-  3. finalizing  — dedup + filter across batches
-  4. submitting  — creating claim records for verification (if auto_verify=True)
-  5. complete    — done
+Phases visible in Temporal UI (v2):
+  1. fetching           — downloading and parsing the transcript
+  2. extracting_theses  — single LLM call over full transcript
+  3. storing            — persisting transcript + theses to DB
+  4. submitting         — creating claim records for verification
+  5. verifying          — running child verification workflows
+  6. complete           — done
 """
 
 import asyncio
@@ -23,6 +23,8 @@ from temporalio.common import RetryPolicy, SearchAttributeKey
 with workflow.unsafe.imports_passed_through():
     from src.activities.transcript_activities import (
         fetch_transcript,
+        fetch_raw_transcript,
+        extract_theses_activity,
         extract_transcript_batch,
         finalize_extraction,
         store_transcript,
@@ -33,7 +35,6 @@ with workflow.unsafe.imports_passed_through():
         notify_frontend_refresh,
     )
     from src.workflows.verify import VerifyClaimWorkflow
-    from src.transcript.extractor import build_batches
     from src.utils.logging import log
 
 MODULE = "transcript_workflow"
@@ -46,13 +47,15 @@ SA_TRANSCRIPT_TITLE = SearchAttributeKey.for_keyword("TranscriptTitle")
 
 @workflow.defn
 class ExtractTranscriptWorkflow:
-    """Extract verifiable claims from a transcript URL.
+    """Extract verifiable claims from a transcript URL or raw text.
 
-    Phases:
-    1. Fetch and parse the transcript
-    2. Extract claims in parallel batches (each a visible Temporal activity)
-    3. Finalize — dedup + filter across batch boundaries
-    4. Optionally submit claims to verification pipeline
+    Default mode (v2 thesis extraction):
+    1. Fetch/parse the transcript
+    2. Single LLM call → 15-30 theses with segment references
+    3. Reference verification (programmatic)
+    4. Store transcript + all theses
+    5. Create Claim records for checkable theses
+    6. Spawn child VerifyClaimWorkflow per thesis (sequential)
     """
 
     def __init__(self) -> None:
@@ -62,9 +65,7 @@ class ExtractTranscriptWorkflow:
         self._word_count = 0
         self._segment_count = 0
         self._speakers: list[str] = []
-        self._batch_count = 0
-        self._batches_done = 0
-        self._batches_failed = 0
+        self._thesis_count = 0
         self._claim_count = 0
         self._claims: list[dict] = []
         self._transcript_id = ""
@@ -80,11 +81,7 @@ class ExtractTranscriptWorkflow:
             "word_count": self._word_count,
             "segment_count": self._segment_count,
             "speakers": self._speakers,
-            "batches": {
-                "total": self._batch_count,
-                "done": self._batches_done,
-                "failed": self._batches_failed,
-            },
+            "thesis_count": self._thesis_count,
             "claim_count": self._claim_count,
             "claims": self._claims,
             "transcript_id": self._transcript_id,
@@ -97,33 +94,49 @@ class ExtractTranscriptWorkflow:
         workflow.upsert_search_attributes([SA_PHASE.value_set(phase)])
 
     @workflow.run
-    async def run(self, url: str) -> dict:
+    async def run(self, url: str, raw_text: str | None = None,
+                  title: str | None = None, date: str | None = None) -> dict:
         """Run the transcript extraction pipeline.
 
-        After extraction, batch-creates Claim records, links FKs, and kicks
-        off the verification pipeline. Always verifies — no opt-out.
-
         Args:
-            url: Rev.com transcript URL.
+            url: Transcript URL (for Rev.com fetching or as identifier for raw text).
+            raw_text: If provided, parse this text instead of fetching from URL.
+            title: Override title (used with raw_text).
+            date: Override date (used with raw_text).
 
         Returns:
-            Dict with transcript metadata and extracted claims.
+            Dict with transcript metadata and extracted theses.
         """
         self._url = url
 
         log.info(workflow.logger, MODULE, "started",
                  "Starting transcript extraction",
-                 url=url)
+                 url=url, has_raw_text=bool(raw_text))
 
-        # Step 1: Fetch and parse transcript
+        # Step 1: Fetch/parse transcript
         self._set_phase("fetching")
 
-        transcript_data = await workflow.execute_activity(
-            fetch_transcript,
-            args=[url],
-            start_to_close_timeout=timedelta(seconds=60),
-            retry_policy=RetryPolicy(maximum_attempts=3),
-        )
+        if raw_text:
+            transcript_data = await workflow.execute_activity(
+                fetch_raw_transcript,
+                args=[raw_text, url, title or "", date],
+                start_to_close_timeout=timedelta(seconds=60),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+        else:
+            transcript_data = await workflow.execute_activity(
+                fetch_transcript,
+                args=[url],
+                start_to_close_timeout=timedelta(seconds=60),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+            # Convert v1 fetch result to include v2 fields
+            if "source_format" not in transcript_data:
+                transcript_data["source_format"] = "revcom"
+                # Add segment indices for revcom transcripts
+                for i, seg in enumerate(transcript_data["segments"]):
+                    if "index" not in seg:
+                        seg["index"] = i
 
         self._title = transcript_data["title"]
         self._word_count = transcript_data["word_count"]
@@ -141,265 +154,210 @@ class ExtractTranscriptWorkflow:
                  segment_count=self._segment_count,
                  speakers=self._speakers)
 
-        # Step 2: Build batch specs and extract in parallel
-        self._set_phase("extracting")
+        # Step 2: Store transcript metadata + enrich speakers
+        self._set_phase("storing")
 
-        segment_word_counts = [
-            len(seg["text"].split()) for seg in transcript_data["segments"]
-        ]
-        batches = build_batches(segment_word_counts)
-        self._batch_count = len(batches)
-
-        log.info(workflow.logger, MODULE, "batching",
-                 "Extraction batches planned",
-                 batch_count=self._batch_count,
-                 segment_count=self._segment_count)
-
-        # 2 concurrent batches to match LLM server parallelism
-        MAX_CONCURRENT_BATCHES = 2
-        batch_semaphore = asyncio.Semaphore(MAX_CONCURRENT_BATCHES)
-
-        async def _run_batch(i: int, batch: dict) -> list[dict]:
-            async with batch_semaphore:
-                label = f"Batch {i+1} of {self._batch_count}"
-                result = await workflow.execute_activity(
-                    extract_transcript_batch,
-                    args=[
-                        transcript_data,
-                        batch["target_start"],
-                        batch["target_end"],
-                        batch["text_start"],
-                        batch["text_end"],
-                        label,
-                        self._title,
-                    ],
-                    # Structured output for 30-40 segments can take 15-25 min on local LLM
-                    start_to_close_timeout=timedelta(seconds=1800),
-                    retry_policy=RetryPolicy(maximum_attempts=3),
-                )
-                self._batches_done += 1
-                return result
-
-        # Store transcript metadata + speaker enrichment BEFORE batches start
         store_result = await workflow.execute_activity(
             store_transcript,
             args=[transcript_data],
             start_to_close_timeout=timedelta(seconds=60),
             retry_policy=RetryPolicy(maximum_attempts=3),
         )
-
-        batch_results = await asyncio.gather(
-            *[_run_batch(i, b) for i, b in enumerate(batches)],
-            return_exceptions=True,
-        )
         self._transcript_id = store_result["transcript_id"]
 
-        # Build speaker → description lookup from Wikidata-enriched speakers
+        # Build speaker descriptions
         speaker_descriptions = {}
-        for s in store_result.get("speakers", []):
+        enriched_speakers = store_result.get("speakers", [])
+        for s in enriched_speakers:
             if isinstance(s, dict) and s.get("description"):
                 speaker_descriptions[s["name"]] = s["description"]
 
-        # Collect results, log failures
-        all_batch_claims: list[list[dict]] = []
-        for i, result in enumerate(batch_results):
-            if isinstance(result, Exception):
-                self._batches_failed += 1
-                log.warning(workflow.logger, MODULE, "batch_failed",
-                            f"Batch {i+1} failed",
-                            error=str(result))
-            else:
-                all_batch_claims.append(result)
+        # Step 3: Extract theses (single LLM call)
+        self._set_phase("extracting_theses")
 
-        log.info(workflow.logger, MODULE, "extraction_done",
-                 "All batches complete",
-                 succeeded=len(all_batch_claims),
-                 failed=self._batches_failed)
-
-        # Step 3: Finalize — dedup + filter across batches
-        self._set_phase("finalizing")
-
-        finalize_result = await workflow.execute_activity(
-            finalize_extraction,
-            args=[transcript_data, all_batch_claims],
-            start_to_close_timeout=timedelta(seconds=30),
+        theses = await workflow.execute_activity(
+            extract_theses_activity,
+            args=[transcript_data, enriched_speakers],
+            # Single LLM call over full transcript — can take 20-40 min on local LLM
+            start_to_close_timeout=timedelta(seconds=2700),
             retry_policy=RetryPolicy(maximum_attempts=2),
         )
 
-        claims = finalize_result["worth_checking"]
-        all_claims_for_storage = finalize_result["all_claims"]
-        # Indices into all_claims_for_storage that survived finalization
-        # (filtering + dedup). These map 1:1 to `claims` (worth_checking).
-        surviving_indices: list[int] = finalize_result.get("surviving_indices", [])
+        self._thesis_count = len(theses)
 
-        self._claim_count = len(claims)
-        self._claims = claims
+        # Tag all theses as v2 and separate checkable from skipped
+        for t in theses:
+            t["thesis_version"] = 2
+            t["claim_text"] = t["thesis_statement"]
+
+        checkable_theses = [t for t in theses if t.get("worth_checking", False)]
+        self._claim_count = len(checkable_theses)
+        self._claims = checkable_theses
 
         workflow.upsert_search_attributes([
             SA_CLAIM_COUNT.value_set(self._claim_count),
         ])
 
-        log.info(workflow.logger, MODULE, "finalized",
-                 "Claims finalized",
-                 worth_checking=len(claims),
-                 total_stored=len(all_claims_for_storage))
+        log.info(workflow.logger, MODULE, "theses_extracted",
+                 "Theses extracted",
+                 total=len(theses),
+                 checkable=len(checkable_theses))
 
-        # Step 3b: Store ALL extracted claims in DB (linked to transcript)
-        if self._transcript_id and all_claims_for_storage:
+        # Step 4: Store ALL theses as transcript_claims
+        if self._transcript_id and theses:
             tc_ids = await workflow.execute_activity(
                 store_transcript_claims,
-                args=[self._transcript_id, all_claims_for_storage],
-                start_to_close_timeout=timedelta(seconds=15),
+                args=[self._transcript_id, theses],
+                start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
 
-            # Use surviving_indices to pick the tc_ids that correspond
-            # exactly to the worth_checking claims (post-filter, post-dedup).
-            # This avoids the FK cross-wiring bug where dedup removes a claim
-            # from worth_checking but not from tc_ids.
-            if surviving_indices:
-                worth_checking_tc_ids = [tc_ids[i] for i in surviving_indices]
+            # Build index mapping: only checkable theses get Claim records
+            checkable_tc_ids = []
+            for i, t in enumerate(theses):
+                if t.get("worth_checking", False):
+                    checkable_tc_ids.append(tc_ids[i])
+
+            # Step 5: Create Claim records for checkable theses
+            if checkable_theses:
+                self._set_phase("submitting")
+
+                # Build claim dicts for create_claims_for_transcript
+                claim_dicts = []
+                for t in checkable_theses:
+                    claim_dicts.append({
+                        "claim_text": t["thesis_statement"],
+                        "speaker": t["speakers"][0] if t.get("speakers") else "",
+                        "source_url": url,
+                    })
+
+                claim_ids = await workflow.execute_activity(
+                    create_claims_for_transcript,
+                    args=[self._transcript_id, checkable_tc_ids, claim_dicts,
+                          transcript_data.get("date"), self._title,
+                          speaker_descriptions],
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=RetryPolicy(maximum_attempts=3),
+                )
+                self._verification_submitted = len(claim_ids)
+
+                # Step 6: Transition to verifying
+                await workflow.execute_activity(
+                    update_transcript_status,
+                    args=[self._transcript_id, "verifying"],
+                    start_to_close_timeout=timedelta(seconds=15),
+                    retry_policy=RetryPolicy(maximum_attempts=3),
+                )
+
+                # Notify frontend that extraction is done
+                await workflow.execute_activity(
+                    notify_frontend_refresh,
+                    start_to_close_timeout=timedelta(seconds=10),
+                    retry_policy=RetryPolicy(maximum_attempts=1),
+                )
+
+                self._set_phase("verifying")
+                transcript_date = transcript_data.get("date")
+
+                log.info(workflow.logger, MODULE, "verification_started",
+                         "Starting sequential child verification workflows",
+                         claim_count=len(claim_ids))
+
+                # Run child verification workflows sequentially
+                verified = 0
+                failed = 0
+                for claim_id_str, thesis in zip(claim_ids, checkable_theses):
+                    try:
+                        speaker_name = thesis["speakers"][0] if thesis.get("speakers") else None
+                        speaker_desc = speaker_descriptions.get(speaker_name, "") if speaker_name else ""
+
+                        # Collect supporting quote texts for decompose context
+                        supporting_quotes = []
+                        for ref in thesis.get("supporting_references", []):
+                            seg_idx = ref.get("segment_index")
+                            if seg_idx is not None:
+                                for seg in transcript_data["segments"]:
+                                    if seg.get("index") == seg_idx:
+                                        supporting_quotes.append(seg["text"])
+                                        break
+
+                        await workflow.execute_child_workflow(
+                            VerifyClaimWorkflow.run,
+                            args=[claim_id_str, thesis["thesis_statement"],
+                                  speaker_name, transcript_date,
+                                  True,  # is_child
+                                  self._title,  # transcript_title
+                                  speaker_desc,  # speaker_description
+                                  supporting_quotes],  # supporting_quotes
+                            id=f"verify-{claim_id_str}",
+                            task_queue="spin-cycle-verify",
+                        )
+                        verified += 1
+                    except Exception as e:
+                        failed += 1
+                        log.warning(workflow.logger, MODULE,
+                                    "child_verify_failed",
+                                    "Child verification workflow failed",
+                                    claim_id=claim_id_str,
+                                    error=str(e))
+
+                log.info(workflow.logger, MODULE, "verification_done",
+                         "All child verifications complete",
+                         verified=verified, failed=failed)
+
+                # Mark transcript complete
+                await workflow.execute_activity(
+                    update_transcript_status,
+                    args=[self._transcript_id, "complete"],
+                    start_to_close_timeout=timedelta(seconds=15),
+                    retry_policy=RetryPolicy(maximum_attempts=3),
+                )
+
+                await workflow.execute_activity(
+                    finish_transcript_and_start_next,
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
+                )
+
             else:
-                # Fallback for older finalize_extraction without surviving_indices
-                worth_checking_tc_ids = [
-                    tc_id for tc_id, c in zip(tc_ids, all_claims_for_storage)
-                    if c.get("worth_checking", True)
-                ]
-
-            # Step 4: Batch-create Claim records and link FKs (only for worth_checking)
-            self._set_phase("submitting")
-
-            log.info(workflow.logger, MODULE, "creating_claims",
-                     "Batch-creating Claim records for verification",
-                     claim_count=len(claims),
-                     tc_id_count=len(worth_checking_tc_ids))
-
-            claim_ids = await workflow.execute_activity(
-                create_claims_for_transcript,
-                args=[self._transcript_id, worth_checking_tc_ids, claims,
-                      transcript_data.get("date"), self._title,
-                      speaker_descriptions],
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=3),
-            )
-            self._verification_submitted = len(claim_ids)
-
-            # Step 5: Transition to verifying, run child verification workflows
-            await workflow.execute_activity(
-                update_transcript_status,
-                args=[self._transcript_id, "verifying"],
-                start_to_close_timeout=timedelta(seconds=15),
-                retry_policy=RetryPolicy(maximum_attempts=3),
-            )
-
-            # Notify frontend that extraction is done and claims are ready
-            await workflow.execute_activity(
-                notify_frontend_refresh,
-                start_to_close_timeout=timedelta(seconds=10),
-                retry_policy=RetryPolicy(maximum_attempts=1),
-            )
-
-            self._set_phase("verifying")
-            transcript_date = transcript_data.get("date")
-
-            log.info(workflow.logger, MODULE, "verification_started",
-                     "Starting sequential child verification workflows",
-                     claim_count=len(claim_ids))
-
-            verified = 0
-            failed = 0
-            for claim_id_str, claim_data in zip(claim_ids, claims):
-                try:
-                    speaker_name = claim_data.get("speaker")
-                    speaker_desc = speaker_descriptions.get(speaker_name, "") if speaker_name else ""
-                    await workflow.execute_child_workflow(
-                        VerifyClaimWorkflow.run,
-                        args=[claim_id_str, claim_data["claim_text"],
-                              speaker_name, transcript_date,
-                              True,  # is_child
-                              self._title,  # transcript_title
-                              speaker_desc],  # speaker_description
-                        id=f"verify-{claim_id_str}",
-                        task_queue="spin-cycle-verify",
-                    )
-                    verified += 1
-                except Exception as e:
-                    failed += 1
-                    log.warning(workflow.logger, MODULE,
-                                "child_verify_failed",
-                                "Child verification workflow failed",
-                                claim_id=claim_id_str,
-                                error=str(e))
-
-            log.info(workflow.logger, MODULE, "verification_done",
-                     "All child verifications complete",
-                     verified=verified, failed=failed)
-
-            # Mark transcript complete and start next queued transcript
-            await workflow.execute_activity(
-                update_transcript_status,
-                args=[self._transcript_id, "complete"],
-                start_to_close_timeout=timedelta(seconds=15),
-                retry_policy=RetryPolicy(maximum_attempts=3),
-            )
-
-            await workflow.execute_activity(
-                finish_transcript_and_start_next,
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=2),
-            )
-
-        elif self._transcript_id and not claims and all_claims_for_storage:
-            # Skipped claims exist but none worth checking — store them, then mark complete
-            await workflow.execute_activity(
-                store_transcript_claims,
-                args=[self._transcript_id, all_claims_for_storage],
-                start_to_close_timeout=timedelta(seconds=15),
-                retry_policy=RetryPolicy(maximum_attempts=3),
-            )
-            await workflow.execute_activity(
-                update_transcript_status,
-                args=[self._transcript_id, "complete"],
-                start_to_close_timeout=timedelta(seconds=15),
-                retry_policy=RetryPolicy(maximum_attempts=3),
-            )
-
-            await workflow.execute_activity(
-                finish_transcript_and_start_next,
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=2),
-            )
-
-            log.info(workflow.logger, MODULE, "no_worth_checking",
-                     "No worth-checking claims, stored skipped claims",
-                     stored=len(all_claims_for_storage))
+                # No checkable theses — mark complete
+                await workflow.execute_activity(
+                    update_transcript_status,
+                    args=[self._transcript_id, "complete"],
+                    start_to_close_timeout=timedelta(seconds=15),
+                    retry_policy=RetryPolicy(maximum_attempts=3),
+                )
+                await workflow.execute_activity(
+                    finish_transcript_and_start_next,
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
+                )
+                log.info(workflow.logger, MODULE, "no_checkable",
+                         "No checkable theses, transcript marked complete")
 
         elif self._transcript_id:
-            # No claims at all — mark complete and try next queued transcript
+            # No theses extracted at all
             await workflow.execute_activity(
                 update_transcript_status,
                 args=[self._transcript_id, "complete"],
                 start_to_close_timeout=timedelta(seconds=15),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
-
             await workflow.execute_activity(
                 finish_transcript_and_start_next,
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
+            log.info(workflow.logger, MODULE, "no_theses",
+                     "No theses extracted, transcript marked complete")
 
-            log.info(workflow.logger, MODULE, "no_claims",
-                     "No claims extracted, transcript marked complete")
-
-        # Notify frontend (fire-and-forget, don't fail workflow)
+        # Final frontend notification
         await workflow.execute_activity(
             notify_frontend_refresh,
             start_to_close_timeout=timedelta(seconds=10),
             retry_policy=RetryPolicy(maximum_attempts=1),
         )
 
-        # Done
         self._set_phase("complete")
 
         result = {
@@ -408,8 +366,9 @@ class ExtractTranscriptWorkflow:
             "word_count": self._word_count,
             "segment_count": self._segment_count,
             "speakers": self._speakers,
+            "thesis_count": self._thesis_count,
             "claim_count": self._claim_count,
-            "claims": claims,
+            "claims": checkable_theses,
             "transcript_id": self._transcript_id,
             "verification_submitted": self._verification_submitted,
         }
@@ -417,6 +376,7 @@ class ExtractTranscriptWorkflow:
         log.info(workflow.logger, MODULE, "complete",
                  "Transcript extraction complete",
                  title=self._title,
+                 thesis_count=self._thesis_count,
                  claim_count=self._claim_count)
 
         return result

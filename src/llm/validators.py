@@ -20,6 +20,7 @@ from src.schemas.llm_outputs import (
     DecomposeOutput,
     JudgeOutput,
     SynthesizeOutput,
+    ThesisExtractionOutput,
 )
 from src.utils.logging import log, get_logger
 
@@ -246,6 +247,51 @@ def validate_extraction(output) -> tuple[bool, str]:
     if dropped:
         log.info(logger, MODULE, "extraction_claims_filtered",
                  f"Filtered {dropped} malformed claims from extraction output",
+                 dropped=dropped)
+
+    return True, ""
+
+
+def validate_thesis_extraction(output: ThesisExtractionOutput) -> tuple[bool, str]:
+    """Validate thesis extraction output semantically.
+
+    Drops malformed theses in-place (same pattern as validate_extraction).
+    Never rejects the entire output — the LLM call is expensive.
+    """
+    if not output.theses:
+        return False, "Thesis extraction produced no theses"
+
+    dropped = 0
+    good_theses = []
+    for thesis in output.theses:
+        # Must have a substantive thesis statement
+        if not thesis.thesis_statement or len(thesis.thesis_statement.strip()) < 15:
+            dropped += 1
+            log.warning(logger, MODULE, "thesis_dropped",
+                        "Dropped thesis with short/empty statement",
+                        statement=thesis.thesis_statement[:60] if thesis.thesis_statement else "")
+            continue
+        # Must have at least one supporting reference
+        if not thesis.supporting_references:
+            dropped += 1
+            log.warning(logger, MODULE, "thesis_dropped",
+                        "Dropped thesis with no supporting references",
+                        statement=thesis.thesis_statement[:60])
+            continue
+        # Must have at least one speaker
+        if not thesis.speakers:
+            dropped += 1
+            log.warning(logger, MODULE, "thesis_dropped",
+                        "Dropped thesis with no speakers",
+                        statement=thesis.thesis_statement[:60])
+            continue
+        good_theses.append(thesis)
+
+    output.theses = good_theses
+
+    if dropped:
+        log.info(logger, MODULE, "thesis_extraction_filtered",
+                 f"Filtered {dropped} malformed theses",
                  dropped=dropped)
 
     return True, ""

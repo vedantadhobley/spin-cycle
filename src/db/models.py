@@ -132,6 +132,10 @@ class TranscriptRecord(Base):
     segment_count = Column(Integer, nullable=False)
     display_text = Column(Text, nullable=False)  # cleaned, merged same-speaker segments
     status = Column(String(32), default="queued", nullable=False)  # queued → extracting → verifying → complete → failed
+    # Thesis extraction v2 fields
+    segments_data = Column(JSONB, nullable=True)  # list of NumberedSegment dicts
+    source_format = Column(String(32), default="revcom", nullable=True)  # "revcom", "raw_text"
+    speaker_aliases = Column(JSONB, nullable=True)  # canonical → variants
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     transcript_claims = relationship("TranscriptClaim", back_populates="transcript", cascade="all, delete-orphan")
@@ -155,6 +159,10 @@ class TranscriptClaim(Base):
     checkability_rationale = Column(Text, nullable=True)
     is_restatement = Column(Boolean, nullable=True, default=False)
     segment_gist = Column(Text, nullable=True)
+    # Thesis extraction v2 fields
+    supporting_references = Column(JSONB, nullable=True)  # list of {segment_index, excerpt}
+    topic = Column(String(64), nullable=True)
+    thesis_version = Column(Integer, default=1, nullable=True)  # 1=old batch, 2=thesis
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     transcript = relationship("TranscriptRecord", back_populates="transcript_claims")

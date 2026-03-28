@@ -409,7 +409,8 @@ def _validate_decompose_consistency(output: DecomposeOutput) -> None:
 async def decompose(claim_text: str, speaker: str | None = None,
                     claim_date: str | None = None,
                     transcript_title: str | None = None,
-                    speaker_description: str = "") -> dict:
+                    speaker_description: str = "",
+                    supporting_quotes: list[str] | None = None) -> dict:
     """Full decompose pipeline: normalize → extract → quality validate → NER → Wikidata.
 
     Pipeline:
@@ -429,6 +430,9 @@ async def decompose(claim_text: str, speaker: str | None = None,
         claim_text: The claim to decompose.
         speaker: Optional name of the person making the claim. Automatically
                  added as a direct interested party and Wikidata-expanded.
+        supporting_quotes: Optional list of supporting quotes from transcript
+                          (thesis extraction v2). Injected into decompose prompt
+                          so the LLM has full argument context.
 
     Returns:
         {"facts": [{"text", "categories", "seed_queries"}, ...],
@@ -462,6 +466,24 @@ async def decompose(claim_text: str, speaker: str | None = None,
     transcript_context = (
         f"\nSource transcript: {transcript_title}" if transcript_title else ""
     )
+
+    # Build optional supporting quotes section (thesis extraction v2)
+    supporting_quotes_section = ""
+    if supporting_quotes:
+        # Cap at 5 quotes, 500 words each
+        capped = supporting_quotes[:5]
+        quote_lines = []
+        for i, q in enumerate(capped, 1):
+            words = q.split()
+            if len(words) > 500:
+                q = " ".join(words[:500]) + "..."
+            quote_lines.append(f"[{i}] \"{q}\"")
+        supporting_quotes_section = (
+            "\nSUPPORTING EVIDENCE FROM TRANSCRIPT:\n"
+            + "\n".join(quote_lines)
+            + "\n\nUse the supporting evidence to understand the full argument. "
+            "Extract atomic facts from the THESIS, not individual quotes."
+        )
 
     # Step 1: Normalize claim
     norm_output = None
@@ -503,7 +525,8 @@ async def decompose(claim_text: str, speaker: str | None = None,
             system_prompt=decompose_system,
             user_prompt=DECOMPOSE_USER.format(
                 claim_text=normalized, speaker_line=speaker_line,
-                transcript_context=transcript_context),
+                transcript_context=transcript_context,
+                supporting_quotes_section=supporting_quotes_section),
             schema=DecomposeOutput,
             semantic_validator=validate_decompose,
             max_retries=2,
@@ -539,7 +562,8 @@ async def decompose(claim_text: str, speaker: str | None = None,
                 retry_prompt = (
                     DECOMPOSE_USER.format(
                         claim_text=normalized, speaker_line=speaker_line,
-                        transcript_context=transcript_context)
+                        transcript_context=transcript_context,
+                        supporting_quotes_section=supporting_quotes_section)
                     + f"\n\nYOUR PREVIOUS OUTPUT HAD STRUCTURAL ISSUES:\n{feedback}\n"
                     "Fix these issues in your new output."
                 )

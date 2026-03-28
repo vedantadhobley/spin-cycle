@@ -27,8 +27,16 @@ router = APIRouter()
 
 
 class TranscriptSubmit(BaseModel):
-    """Request body for submitting a transcript."""
-    url: str = Field(..., description="Rev.com transcript URL")
+    """Request body for submitting a transcript.
+
+    Exactly one of `url` or `raw_text` is required:
+    - url: Fetch and parse from a Rev.com transcript page
+    - raw_text: Parse raw transcript text directly (requires title)
+    """
+    url: str | None = Field(None, description="Rev.com transcript URL")
+    raw_text: str | None = Field(None, description="Raw transcript text (alternative to URL)")
+    title: str | None = Field(None, description="Transcript title (required with raw_text)")
+    date: str | None = Field(None, description="ISO date string (optional, used with raw_text)")
 
 
 class TranscriptResponse(BaseModel):
@@ -55,28 +63,49 @@ async def submit_transcript(
     body: TranscriptSubmit,
     request: Request,
 ):
-    """Submit a transcript URL for claim extraction.
+    """Submit a transcript URL or raw text for claim extraction.
+
+    Accepts either:
+    - url: Fetch and parse from Rev.com
+    - raw_text + title: Parse raw transcript text directly
 
     Idempotent: re-submitting a URL that is queued/extracting/verifying returns
     the existing status.  Completed or failed transcripts can be re-submitted.
     """
+    from fastapi import HTTPException
+
+    # Validate: exactly one of url or raw_text
+    if not body.url and not body.raw_text:
+        raise HTTPException(400, "Either 'url' or 'raw_text' is required")
+    if body.url and body.raw_text:
+        raise HTTPException(400, "Provide either 'url' or 'raw_text', not both")
+    if body.raw_text and not body.title:
+        raise HTTPException(400, "'title' is required when using 'raw_text'")
+
     temporal = request.app.state.temporal
+
+    # For raw text, generate a stable URL-like identifier from the title
+    if body.raw_text:
+        import hashlib
+        content_hash = hashlib.sha256(body.raw_text.encode()).hexdigest()[:12]
+        effective_url = f"raw://{content_hash}/{body.title}"
+    else:
+        effective_url = body.url
 
     # Check if this URL already exists
     async with async_session() as session:
         result = await session.execute(
-            select(TranscriptRecord).where(TranscriptRecord.url == body.url)
+            select(TranscriptRecord).where(TranscriptRecord.url == effective_url)
         )
         existing = result.scalar_one_or_none()
 
         if existing and existing.status in ("queued", "extracting", "verifying"):
-            # Already in progress — return current status (idempotent)
             log.info(logger, MODULE, "already_active",
                      "Transcript already in pipeline",
-                     url=body.url, status=existing.status)
+                     url=effective_url, status=existing.status)
             return TranscriptResponse(
                 transcript_id=str(existing.id),
-                url=body.url,
+                url=effective_url,
                 status=existing.status,
             )
 
@@ -84,10 +113,9 @@ async def submit_transcript(
     pipeline_busy = await _any_pipeline_running(temporal)
 
     if pipeline_busy:
-        # Queue it — upsert transcript record with status="queued"
         async with async_session() as session:
             result = await session.execute(
-                select(TranscriptRecord).where(TranscriptRecord.url == body.url)
+                select(TranscriptRecord).where(TranscriptRecord.url == effective_url)
             )
             record = result.scalar_one_or_none()
 
@@ -95,8 +123,8 @@ async def submit_transcript(
                 record.status = "queued"
             else:
                 record = TranscriptRecord(
-                    url=body.url,
-                    title="(pending extraction)",
+                    url=effective_url,
+                    title=body.title or "(pending extraction)",
                     speakers=[],
                     word_count=0,
                     segment_count=0,
@@ -110,18 +138,18 @@ async def submit_transcript(
 
         log.info(logger, MODULE, "queued",
                  "Transcript queued (pipeline busy)",
-                 url=body.url, transcript_id=transcript_id)
+                 url=effective_url, transcript_id=transcript_id)
 
         return TranscriptResponse(
             transcript_id=transcript_id,
-            url=body.url,
+            url=effective_url,
             status="queued",
         )
 
     # Pipeline idle — start immediately
     async with async_session() as session:
         result = await session.execute(
-            select(TranscriptRecord).where(TranscriptRecord.url == body.url)
+            select(TranscriptRecord).where(TranscriptRecord.url == effective_url)
         )
         record = result.scalar_one_or_none()
 
@@ -129,8 +157,8 @@ async def submit_transcript(
             record.status = "extracting"
         else:
             record = TranscriptRecord(
-                url=body.url,
-                title="(pending extraction)",
+                url=effective_url,
+                title=body.title or "(pending extraction)",
                 speakers=[],
                 word_count=0,
                 segment_count=0,
@@ -143,21 +171,28 @@ async def submit_transcript(
         transcript_id = str(record.id)
 
     workflow_id = f"extract-{transcript_id}"
+
+    # Build workflow args
+    workflow_args = [effective_url]
+    if body.raw_text:
+        workflow_args.extend([body.raw_text, body.title, body.date])
+
     await temporal.start_workflow(
         ExtractTranscriptWorkflow.run,
-        args=[body.url],
+        args=workflow_args,
         id=workflow_id,
         task_queue=TASK_QUEUE,
     )
 
     log.info(logger, MODULE, "started",
              "Transcript extraction started",
-             workflow_id=workflow_id, url=body.url,
-             transcript_id=transcript_id)
+             workflow_id=workflow_id, url=effective_url,
+             transcript_id=transcript_id,
+             mode="raw_text" if body.raw_text else "url")
 
     return TranscriptResponse(
         transcript_id=transcript_id,
         workflow_id=workflow_id,
-        url=body.url,
+        url=effective_url,
         status="started",
     )

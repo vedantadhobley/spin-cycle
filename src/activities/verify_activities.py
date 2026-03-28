@@ -70,7 +70,8 @@ async def create_claim(
 async def decompose_claim(claim_text: str, speaker: str | None = None,
                           claim_date: str | None = None,
                           transcript_title: str | None = None,
-                          speaker_description: str = "") -> dict:
+                          speaker_description: str = "",
+                          supporting_quotes: list[str] | None = None) -> dict:
     """Normalize and extract atomic verifiable facts and thesis from a claim.
 
     Delegates to src/agent/decompose.decompose() for all domain logic.
@@ -80,12 +81,14 @@ async def decompose_claim(claim_text: str, speaker: str | None = None,
              claim_length=len(claim_text), speaker=speaker,
              claim_date=claim_date,
              transcript_title=transcript_title,
-             has_speaker_desc=bool(speaker_description))
+             has_speaker_desc=bool(speaker_description),
+             has_supporting_quotes=bool(supporting_quotes))
     from src.agent.decompose import decompose
     result = await decompose(claim_text, speaker=speaker,
                              claim_date=claim_date,
                              transcript_title=transcript_title,
-                             speaker_description=speaker_description)
+                             speaker_description=speaker_description,
+                             supporting_quotes=supporting_quotes)
     log.info(activity.logger, "decompose", "done", "Decompose complete",
              fact_count=len(result.get("facts", [])),
              thesis=result.get("thesis_info", {}).get("thesis", "")[:80])

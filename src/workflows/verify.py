@@ -131,7 +131,8 @@ class VerifyClaimWorkflow:
                   claim_date: str | None = None,
                   is_child: bool = False,
                   transcript_title: str | None = None,
-                  speaker_description: str = "") -> dict:
+                  speaker_description: str = "",
+                  supporting_quotes: list[str] | None = None) -> dict:
         """Run the verification pipeline.
 
         Args:
@@ -151,6 +152,9 @@ class VerifyClaimWorkflow:
                                "45th and 47th president of the United States").
                                Passed from transcript extraction to avoid
                                redundant Wikidata lookups.
+            supporting_quotes: Optional list of supporting quote texts from
+                             transcript segments (thesis extraction v2).
+                             Passed to decompose for richer argument context.
         """
         self._claim_text = claim_text
 
@@ -175,7 +179,7 @@ class VerifyClaimWorkflow:
         decomposition = await workflow.execute_activity(
             decompose_claim,
             args=[claim_text, speaker, claim_date, transcript_title,
-                  speaker_description],
+                  speaker_description, supporting_quotes],
             start_to_close_timeout=timedelta(seconds=180),
             retry_policy=RetryPolicy(maximum_attempts=3),
         )

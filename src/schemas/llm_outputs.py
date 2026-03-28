@@ -29,6 +29,43 @@ Verdict = Literal[
 
 
 # =============================================================================
+# THESIS EXTRACTION OUTPUT (transcript → theses)
+# =============================================================================
+
+class SupportingReference(BaseModel):
+    """A reference to a specific segment in the transcript."""
+    segment_index: int = Field(..., description="Matches [N] label in transcript")
+    excerpt: str = Field(..., description="First ~15-20 words of the relevant passage")
+
+
+class ExtractedThesis(BaseModel):
+    """A major argument identified in the transcript."""
+    thesis_statement: str = Field(
+        ..., description="Neutral, decontextualized statement of the argument"
+    )
+    speakers: list[str] = Field(
+        default_factory=list, description="Who advances this argument"
+    )
+    supporting_references: list[SupportingReference] = Field(
+        default_factory=list, description="2-6 transcript segment references"
+    )
+    topic: str = Field(
+        default="", description="Topic area: economic, military, political, legal, social, etc."
+    )
+    checkable: bool = Field(
+        ..., description="Could independent data confirm or deny this argument?"
+    )
+    checkability_rationale: str = Field(
+        default="", description="Why checkable or not (1 sentence)"
+    )
+
+
+class ThesisExtractionOutput(BaseModel):
+    """Output from thesis-level transcript extraction."""
+    theses: list[ExtractedThesis] = Field(default_factory=list)
+
+
+# =============================================================================
 # NORMALIZE OUTPUT
 # =============================================================================
 

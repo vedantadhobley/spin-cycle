@@ -695,7 +695,7 @@ DECOMPOSE_USER = """\
 Decompose this claim into verifiable atomic facts.
 {speaker_line}{transcript_context}
 Claim: {claim_text}
-
+{supporting_quotes_section}
 When a Speaker is provided, the claim is a DIRECT QUOTE — do NOT create \
 sub-claims about whether the speaker said it. Verify the CONTENT.
 
