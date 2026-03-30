@@ -3,28 +3,28 @@
 Two-phase extraction pipeline:
   Phase 1: Chunked extraction — split transcript into overlapping chunks,
     extract claims from each chunk in parallel (up to 2 at a time).
-  Phase 2: Claim review — per-speaker LLM call to classify, deduplicate,
-    group related claims, and assess checkability.
+  Phase 2: Claim review — per-speaker sequential batch review with
+    accumulating group context (ReviewClaimsWorkflow child).
+  Phase 2b: Synthesis — per-group overarching claim generation
+    (SynthesizeClaimsWorkflow child).
 
-After review, one Claim record is created per checkable group. All member
-TranscriptClaims point to their group's Claim. Decompose receives the
-concatenated group text + union of supporting quotes.
-
-Transcript sources:
-  - C-SPAN: Fetched via Playwright (CloudFront WAF), structured JSON segments
-  - Raw text: Copy-pasted transcripts parsed by the raw_text parser
+After review+synthesis, one Claim record is created per checkable group.
+All member TranscriptClaims point to their group's Claim. Decompose
+receives the synthesized overarching claim text.
 
 Phases visible in Temporal UI:
   1. fetching           — downloading and parsing the transcript
   2. storing            — persisting transcript + enriching speakers
   3. extracting_claims  — chunked Phase 1 extraction
-  4. reviewing_claims   — Phase 2 classify/dedup/group per speaker
-  5. submitting         — creating claim records for verification
-  6. verifying          — running child verification workflows
-  7. complete           — done
+  4. reviewing_claims   — Phase 2 classify/group per speaker (child workflows)
+  5. synthesizing       — Phase 2b overarching claims per group
+  6. submitting         — creating claim records for verification
+  7. verifying          — running child verification workflows
+  8. complete           — done
 """
 
 import asyncio
+from collections import Counter
 from datetime import timedelta
 from temporalio import workflow
 from temporalio.common import RetryPolicy, SearchAttributeKey
@@ -34,7 +34,6 @@ with workflow.unsafe.imports_passed_through():
         fetch_transcript,
         fetch_raw_transcript,
         extract_chunk_activity,
-        review_claims_activity,
         store_transcript,
         store_transcript_claims,
         create_claims_for_transcript,
@@ -43,11 +42,12 @@ with workflow.unsafe.imports_passed_through():
         notify_frontend_refresh,
     )
     from src.workflows.verify import VerifyClaimWorkflow
+    from src.workflows.review_claims import ReviewClaimsWorkflow
+    from src.workflows.synthesize_claims import SynthesizeClaimsWorkflow
     from src.utils.logging import log
     from src.transcript.thesis_extractor import build_chunks
     from src.transcript.parsers import NumberedSegment
     from src.transcript.claim_reviewer import make_trivial_review
-    from src.schemas.llm_outputs import ExtractedThesis, SupportingReference
 
 MODULE = "transcript_workflow"
 
@@ -65,9 +65,10 @@ class ExtractTranscriptWorkflow:
     1. Fetch/parse the transcript
     2. Store transcript metadata + enrich speakers
     3. Chunked extraction (Phase 1) — parallel chunks, up to 2 at a time
-    4. Claim review (Phase 2) — per-speaker classify/dedup/group
-    5. Store all claims + create Claim records per checkable group
-    6. Spawn child VerifyClaimWorkflow per checkable group (sequential)
+    4. Claim review (Phase 2) — per-speaker child ReviewClaimsWorkflow
+    5. Synthesis (Phase 2b) — per-speaker child SynthesizeClaimsWorkflow
+    6. Store all claims + create Claim records per checkable group
+    7. Spawn child VerifyClaimWorkflow per checkable group (sequential)
     """
 
     def __init__(self) -> None:
@@ -121,7 +122,9 @@ class ExtractTranscriptWorkflow:
             stop_after: Early exit point for testing. One of:
                 - "fetch"   — fetch + parse only, return transcript data (no DB)
                 - "store"   — fetch + store to DB with speaker enrichment
-                - "extract" — fetch + store + extract + review, skip verification
+                - "phase1"  — Phase 1 extraction only, store raw theses
+                - "review"  — Phase 1 + Phase 2 review, skip synthesis
+                - "extract" — Phase 1 + Phase 2 + Phase 2b synthesis, skip verification
                 - None      — full pipeline (default)
 
         Returns:
@@ -260,139 +263,245 @@ class ExtractTranscriptWorkflow:
                  f"Phase 1 complete: {len(all_theses)} claims extracted",
                  total=len(all_theses))
 
-        # Step 3b: Claim review (Phase 2) — per speaker
+        # Step 3b: Store ALL raw theses as transcript_claims
+        # (stored before review so they exist even if review fails)
+        all_theses_with_meta = _tag_theses_for_storage(all_theses)
+
+        if self._transcript_id and all_theses_with_meta:
+            tc_ids = await workflow.execute_activity(
+                store_transcript_claims,
+                args=[self._transcript_id, all_theses_with_meta],
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+            log.info(workflow.logger, MODULE, "theses_stored",
+                     f"Stored {len(tc_ids)} raw theses to transcript_claims",
+                     transcript_id=self._transcript_id,
+                     tc_count=len(tc_ids))
+        else:
+            tc_ids = []
+
+        if stop_after == "phase1":
+            if self._transcript_id:
+                await workflow.execute_activity(
+                    update_transcript_status,
+                    args=[self._transcript_id, "complete"],
+                    start_to_close_timeout=timedelta(seconds=15),
+                    retry_policy=RetryPolicy(maximum_attempts=3),
+                )
+            self._set_phase("complete")
+            return {
+                "url": url, "title": self._title,
+                "word_count": self._word_count,
+                "segment_count": self._segment_count,
+                "speakers": self._speakers,
+                "transcript_id": self._transcript_id,
+                "thesis_count": self._thesis_count,
+                "all_theses": all_theses,
+                "stopped_after": "phase1",
+            }
+
+        # Step 4: Claim review (Phase 2) — per speaker child workflows
         self._set_phase("reviewing_claims")
 
         # Group theses by primary speaker
-        speaker_theses: dict[str, list[dict]] = {}
-        for t in all_theses:
+        speaker_theses: dict[str, list[tuple[int, dict]]] = {}
+        for global_i, t in enumerate(all_theses):
             speaker = t["speakers"][0] if t.get("speakers") else "Unknown"
-            speaker_theses.setdefault(speaker, []).append(t)
+            speaker_theses.setdefault(speaker, []).append((global_i, t))
 
-        # review_results: list of (speaker, theses_for_speaker, review_dict)
-        review_results: list[tuple[str, list[dict], dict]] = []
+        # Log speaker breakdown
+        speaker_counts = {
+            sp: len(theses) for sp, theses in speaker_theses.items()
+        }
+        log.info(workflow.logger, MODULE, "speaker_breakdown",
+                 f"Claims by speaker: {speaker_counts}",
+                 speaker_counts=speaker_counts,
+                 speaker_count=len(speaker_theses))
 
-        for speaker, sp_theses in speaker_theses.items():
+        transcript_date = transcript_data.get("date") or "unknown"
+
+        # review_results: speaker → { dispositions, groups }
+        review_results: dict[str, dict] = {}
+
+        for speaker, indexed_theses in speaker_theses.items():
+            sp_theses = [t for _, t in indexed_theses]
+            sp_global_indices = [gi for gi, _ in indexed_theses]
+
             if len(sp_theses) <= 1:
                 # Trivial: single claim, skip LLM
-                extracted = [ExtractedThesis(
-                    thesis_statement=sp_theses[0]["thesis_statement"],
-                    speakers=sp_theses[0].get("speakers", [speaker]),
-                    supporting_references=[
-                        SupportingReference(**r) for r in sp_theses[0].get("supporting_references", [])
-                    ],
-                    topic=sp_theses[0].get("topic", ""),
-                )]
-                trivial = make_trivial_review(extracted)
-                review_results.append((speaker, sp_theses, trivial.model_dump()))
+                review_result = make_trivial_review(sp_theses[0])
+                log.info(workflow.logger, MODULE, "trivial_review",
+                         f"Trivial review for {speaker} (1 claim, skipping LLM)",
+                         speaker=speaker)
             else:
-                transcript_date = transcript_data.get("date") or "unknown"
-                review_dict = await workflow.execute_activity(
-                    review_claims_activity,
+                log.info(workflow.logger, MODULE, "review_speaker_start",
+                         f"Starting review for {speaker} "
+                         f"({len(sp_theses)} claims)",
+                         speaker=speaker, claim_count=len(sp_theses))
+
+                review_result = await workflow.execute_child_workflow(
+                    ReviewClaimsWorkflow.run,
                     args=[sp_theses, speaker, transcript_date],
-                    start_to_close_timeout=timedelta(seconds=1800),
-                    retry_policy=RetryPolicy(maximum_attempts=2),
+                    id=f"review-{self._transcript_id}-{speaker[:30]}",
+                    task_queue="spin-cycle-verify",
                 )
-                review_results.append((speaker, sp_theses, review_dict))
 
-        # Build final group structures from review results
-        # Each group becomes one Claim for verification
-        checkable_groups: list[dict] = []  # groups to verify
-        all_theses_with_meta: list[dict] = []  # all theses for storage
+                # Log per-speaker review summary
+                sp_groups = review_result.get("groups", {})
+                sp_checkable = sum(
+                    1 for g in sp_groups.values() if g.get("checkable")
+                )
+                sp_action_counts = Counter(
+                    d["action"] for d in review_result.get("dispositions", [])
+                )
+                log.info(workflow.logger, MODULE, "review_speaker_done",
+                         f"Review done for {speaker}: "
+                         f"{len(sp_groups)} groups ({sp_checkable} checkable), "
+                         f"actions: {dict(sp_action_counts)}",
+                         speaker=speaker,
+                         groups=len(sp_groups),
+                         checkable=sp_checkable,
+                         action_counts=dict(sp_action_counts))
 
-        # Global thesis index → tc_id mapping will be built after storing
-        global_thesis_idx = 0
-        # thesis_to_group: maps global thesis index → group index (or -1 if not grouped)
-        thesis_to_group: dict[int, int] = {}
-        group_idx = 0
+            # Remap speaker-local indices to global indices
+            remapped = _remap_review_to_global(
+                review_result, sp_global_indices
+            )
+            review_results[speaker] = remapped
 
-        for speaker, sp_theses, review_dict in review_results:
-            classifications = review_dict.get("classifications", [])
-            groups = review_dict.get("groups", [])
+        # Build consolidated group structures
+        all_groups = _collect_all_groups(review_results, all_theses)
 
-            # Build classification lookup (local index → classification)
-            class_by_idx = {}
-            for cls in classifications:
-                class_by_idx[cls["claim_index"]] = cls
+        # Tag theses with review metadata (classification, group membership)
+        _apply_review_metadata(
+            all_theses_with_meta, review_results, speaker_theses
+        )
 
-            # Tag all theses with metadata for storage
-            for local_i, t in enumerate(sp_theses):
-                cls = class_by_idx.get(local_i, {})
-                t["thesis_version"] = 3
-                t["claim_text"] = t["thesis_statement"]
-                t["speaker"] = speaker
-                t["classification"] = cls.get("classification", "verifiable_fact")
-                t["is_duplicate"] = cls.get("is_duplicate", False)
-                t["worth_checking"] = False  # default, set True below for grouped
-                all_theses_with_meta.append(t)
+        checkable_groups = [g for g in all_groups if g["checkable"]]
+        self._group_count = len(all_groups)
 
-            # Process groups
-            for g in groups:
-                member_local_indices = g.get("member_indices", [])
-                is_checkable = g.get("checkable", False)
+        # Log classification breakdown across all speakers
+        all_disps = []
+        for r in review_results.values():
+            all_disps.extend(r.get("dispositions", []))
+        class_counts = Counter(d["classification"] for d in all_disps)
+        action_counts = Counter(d["action"] for d in all_disps)
 
-                # Map local indices to global and build group text
-                member_global_indices = []
-                member_statements = []
-                member_refs = []
-                for local_i in member_local_indices:
-                    gi = global_thesis_idx + local_i
-                    member_global_indices.append(gi)
-                    thesis_to_group[gi] = group_idx
+        log.info(workflow.logger, MODULE, "review_done",
+                 f"Phase 2 complete: {len(all_groups)} groups "
+                 f"({len(checkable_groups)} checkable), "
+                 f"classifications: {dict(class_counts)}, "
+                 f"actions: {dict(action_counts)}",
+                 total_groups=len(all_groups),
+                 checkable_groups=len(checkable_groups),
+                 classification_counts=dict(class_counts),
+                 action_counts=dict(action_counts))
 
-                    t = sp_theses[local_i]
-                    member_statements.append(t["thesis_statement"])
-                    # Mark as worth checking if group is checkable
-                    if is_checkable:
-                        all_theses_with_meta[gi]["worth_checking"] = True
+        if stop_after == "review":
+            if self._transcript_id:
+                # Re-store theses with updated metadata
+                await workflow.execute_activity(
+                    store_transcript_claims,
+                    args=[self._transcript_id, all_theses_with_meta],
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=RetryPolicy(maximum_attempts=3),
+                )
+                await workflow.execute_activity(
+                    update_transcript_status,
+                    args=[self._transcript_id, "complete"],
+                    start_to_close_timeout=timedelta(seconds=15),
+                    retry_policy=RetryPolicy(maximum_attempts=3),
+                )
+            self._set_phase("complete")
+            return {
+                "url": url, "title": self._title,
+                "word_count": self._word_count,
+                "segment_count": self._segment_count,
+                "speakers": self._speakers,
+                "transcript_id": self._transcript_id,
+                "thesis_count": self._thesis_count,
+                "group_count": self._group_count,
+                "groups": all_groups,
+                "review_results": review_results,
+                "stopped_after": "review",
+            }
 
-                    # Collect references
-                    for ref in t.get("supporting_references", []):
-                        seg_idx = ref.get("segment_index")
-                        if seg_idx is not None and not any(
-                            r.get("segment_index") == seg_idx for r in member_refs
-                        ):
-                            member_refs.append(ref)
+        # Step 5: Synthesis (Phase 2b) — per speaker child workflows
+        self._set_phase("synthesizing")
 
-                member_refs.sort(key=lambda r: r.get("segment_index", 0))
+        # Build synthesis input per speaker
+        for speaker, indexed_theses in speaker_theses.items():
+            sp_checkable = [
+                g for g in checkable_groups if g["speaker"] == speaker
+            ]
+            if not sp_checkable:
+                log.info(workflow.logger, MODULE, "synthesis_skip_speaker",
+                         f"No checkable groups for {speaker}, skipping synthesis",
+                         speaker=speaker)
+                continue
 
-                group_text = "\n".join(member_statements)
-
-                checkable_groups.append({
-                    "group_idx": group_idx,
-                    "member_global_indices": member_global_indices,
-                    "claim_text": group_text,
-                    "speaker": speaker,
-                    "topic": g.get("topic", ""),
-                    "checkable": is_checkable,
-                    "checkability_rationale": g.get("checkability_rationale", ""),
-                    "group_rationale": g.get("group_rationale", ""),
-                    "supporting_references": member_refs,
+            synth_groups = []
+            for g in sp_checkable:
+                member_stmts = [
+                    all_theses[gi]["thesis_statement"]
+                    for gi in g["member_global_indices"]
+                ]
+                synth_groups.append({
+                    "group_id": g["local_group_id"],
+                    "topic": g["topic"],
+                    "member_statements": member_stmts,
                 })
-                group_idx += 1
 
-            global_thesis_idx += len(sp_theses)
+            log.info(workflow.logger, MODULE, "synthesis_speaker_start",
+                     f"Synthesizing {len(synth_groups)} groups for {speaker}",
+                     speaker=speaker, group_count=len(synth_groups),
+                     group_ids=[g["local_group_id"] for g in sp_checkable])
 
-        # Filter to only checkable groups for verification
-        groups_to_verify = [g for g in checkable_groups if g["checkable"]]
-        self._claim_count = len(groups_to_verify)
-        self._group_count = len(checkable_groups)
-        self._claims = groups_to_verify
+            synth_results = await workflow.execute_child_workflow(
+                SynthesizeClaimsWorkflow.run,
+                args=[synth_groups, speaker],
+                id=f"synthesize-{self._transcript_id}-{speaker[:30]}",
+                task_queue="spin-cycle-verify",
+            )
+
+            # Apply synthesized claims to groups
+            applied = 0
+            for g in sp_checkable:
+                synth = synth_results.get(g["local_group_id"])
+                if synth:
+                    g["claim_text"] = synth["overarching_claim"]
+                    applied += 1
+                else:
+                    log.warning(workflow.logger, MODULE,
+                                "synthesis_missing",
+                                f"No synthesis result for group "
+                                f"{g['local_group_id']} ({g['topic']})",
+                                speaker=speaker,
+                                group_id=g["local_group_id"],
+                                topic=g["topic"])
+
+            log.info(workflow.logger, MODULE, "synthesis_speaker_done",
+                     f"Synthesis done for {speaker}: "
+                     f"{applied}/{len(sp_checkable)} groups",
+                     speaker=speaker,
+                     applied=applied,
+                     total=len(sp_checkable))
+
+        self._claim_count = len(checkable_groups)
+        self._claims = checkable_groups
 
         workflow.upsert_search_attributes([
             SA_CLAIM_COUNT.value_set(self._claim_count),
         ])
 
-        log.info(workflow.logger, MODULE, "review_done",
-                 f"Phase 2 complete: {len(checkable_groups)} groups "
-                 f"({len(groups_to_verify)} checkable)",
-                 total_groups=len(checkable_groups),
-                 checkable_groups=len(groups_to_verify),
-                 total_theses=len(all_theses_with_meta))
+        log.info(workflow.logger, MODULE, "synthesis_done",
+                 f"Phase 2b complete: {len(checkable_groups)} overarching claims",
+                 checkable_groups=len(checkable_groups))
 
         if stop_after == "extract":
-            # Store claims but skip verification
-            if self._transcript_id and all_theses_with_meta:
+            if self._transcript_id:
+                # Re-store theses with updated metadata
                 await workflow.execute_activity(
                     store_transcript_claims,
                     args=[self._transcript_id, all_theses_with_meta],
@@ -416,12 +525,15 @@ class ExtractTranscriptWorkflow:
                 "thesis_count": self._thesis_count,
                 "claim_count": self._claim_count,
                 "group_count": self._group_count,
-                "groups": checkable_groups,
+                "groups": all_groups,
                 "stopped_after": "extract",
             }
 
-        # Step 4: Store ALL theses as transcript_claims
-        if self._transcript_id and all_theses_with_meta:
+        # Step 6: Create Claim records for checkable groups
+        if self._transcript_id and checkable_groups and tc_ids:
+            self._set_phase("submitting")
+
+            # Re-store theses with updated metadata
             tc_ids = await workflow.execute_activity(
                 store_transcript_claims,
                 args=[self._transcript_id, all_theses_with_meta],
@@ -429,127 +541,113 @@ class ExtractTranscriptWorkflow:
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
 
-            # Step 5: Create Claim records for checkable groups
-            if groups_to_verify:
-                self._set_phase("submitting")
+            # Build group dicts with member_tc_ids
+            group_dicts = []
+            for g in checkable_groups:
+                member_tc_ids = [tc_ids[i] for i in g["member_global_indices"]]
+                group_dicts.append({
+                    "claim_text": g["claim_text"],
+                    "speaker": g["speaker"],
+                    "member_tc_ids": member_tc_ids,
+                })
 
-                # Build group dicts with member_tc_ids for create_claims_for_transcript
-                group_dicts = []
-                for g in groups_to_verify:
-                    member_tc_ids = [tc_ids[i] for i in g["member_global_indices"]]
-                    group_dicts.append({
-                        "claim_text": g["claim_text"],
-                        "speaker": g["speaker"],
-                        "member_tc_ids": member_tc_ids,
-                    })
+            log.info(workflow.logger, MODULE, "creating_claims",
+                     f"Creating {len(group_dicts)} Claim records "
+                     f"for verification",
+                     group_count=len(group_dicts))
 
-                claim_ids = await workflow.execute_activity(
-                    create_claims_for_transcript,
-                    args=[self._transcript_id, tc_ids, group_dicts,
-                          transcript_data.get("date"), self._title,
-                          speaker_descriptions, url],
-                    start_to_close_timeout=timedelta(seconds=30),
-                    retry_policy=RetryPolicy(maximum_attempts=3),
-                )
-                self._verification_submitted = len(claim_ids)
+            claim_ids = await workflow.execute_activity(
+                create_claims_for_transcript,
+                args=[self._transcript_id, tc_ids, group_dicts,
+                      transcript_data.get("date"), self._title,
+                      speaker_descriptions, url],
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+            self._verification_submitted = len(claim_ids)
 
-                # Step 6: Transition to verifying
-                await workflow.execute_activity(
-                    update_transcript_status,
-                    args=[self._transcript_id, "verifying"],
-                    start_to_close_timeout=timedelta(seconds=15),
-                    retry_policy=RetryPolicy(maximum_attempts=3),
-                )
+            log.info(workflow.logger, MODULE, "claims_created",
+                     f"Created {len(claim_ids)} Claim records, "
+                     f"starting verification",
+                     claim_count=len(claim_ids))
 
-                # Notify frontend that extraction is done
-                await workflow.execute_activity(
-                    notify_frontend_refresh,
-                    start_to_close_timeout=timedelta(seconds=10),
-                    retry_policy=RetryPolicy(maximum_attempts=1),
-                )
+            # Step 7: Verification
+            await workflow.execute_activity(
+                update_transcript_status,
+                args=[self._transcript_id, "verifying"],
+                start_to_close_timeout=timedelta(seconds=15),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
 
-                self._set_phase("verifying")
-                transcript_date = transcript_data.get("date")
+            await workflow.execute_activity(
+                notify_frontend_refresh,
+                start_to_close_timeout=timedelta(seconds=10),
+                retry_policy=RetryPolicy(maximum_attempts=1),
+            )
 
-                log.info(workflow.logger, MODULE, "verification_started",
-                         "Starting sequential child verification workflows",
-                         claim_count=len(claim_ids))
+            self._set_phase("verifying")
 
-                # Run child verification workflows sequentially
-                verified = 0
-                failed = 0
-                for claim_id_str, group in zip(claim_ids, groups_to_verify):
-                    try:
-                        speaker_name = group["speaker"]
-                        speaker_desc = speaker_descriptions.get(speaker_name, "")
+            log.info(workflow.logger, MODULE, "verification_started",
+                     "Starting sequential child verification workflows",
+                     claim_count=len(claim_ids))
 
-                        # Collect supporting quote texts from ALL member refs
-                        supporting_quotes = []
-                        for ref in group.get("supporting_references", []):
-                            seg_idx = ref.get("segment_index")
-                            if seg_idx is not None:
-                                for seg in transcript_data["segments"]:
-                                    if seg.get("index") == seg_idx:
-                                        if seg["text"] not in supporting_quotes:
-                                            supporting_quotes.append(seg["text"])
-                                        break
+            verified = 0
+            failed = 0
+            for claim_id_str, group in zip(claim_ids, checkable_groups):
+                try:
+                    speaker_name = group["speaker"]
+                    speaker_desc = speaker_descriptions.get(speaker_name, "")
 
-                        await workflow.execute_child_workflow(
-                            VerifyClaimWorkflow.run,
-                            args=[claim_id_str, group["claim_text"],
-                                  speaker_name, transcript_date,
-                                  True,  # is_child
-                                  self._title,  # transcript_title
-                                  speaker_desc,  # speaker_description
-                                  supporting_quotes],  # supporting_quotes
-                            id=f"verify-{claim_id_str}",
-                            task_queue="spin-cycle-verify",
-                        )
-                        verified += 1
-                    except Exception as e:
-                        failed += 1
-                        log.warning(workflow.logger, MODULE,
-                                    "child_verify_failed",
-                                    "Child verification workflow failed",
-                                    claim_id=claim_id_str,
-                                    error=str(e))
+                    # Collect supporting quote texts from ALL member refs
+                    supporting_quotes = []
+                    for ref in group.get("supporting_references", []):
+                        seg_idx = ref.get("segment_index")
+                        if seg_idx is not None:
+                            for seg in transcript_data["segments"]:
+                                if seg.get("index") == seg_idx:
+                                    if seg["text"] not in supporting_quotes:
+                                        supporting_quotes.append(seg["text"])
+                                    break
 
-                log.info(workflow.logger, MODULE, "verification_done",
-                         "All child verifications complete",
-                         verified=verified, failed=failed)
+                    await workflow.execute_child_workflow(
+                        VerifyClaimWorkflow.run,
+                        args=[claim_id_str, group["claim_text"],
+                              speaker_name, transcript_date,
+                              True,  # is_child
+                              self._title,  # transcript_title
+                              speaker_desc,  # speaker_description
+                              supporting_quotes],  # supporting_quotes
+                        id=f"verify-{claim_id_str}",
+                        task_queue="spin-cycle-verify",
+                    )
+                    verified += 1
+                except Exception as e:
+                    failed += 1
+                    log.warning(workflow.logger, MODULE,
+                                "child_verify_failed",
+                                "Child verification workflow failed",
+                                claim_id=claim_id_str,
+                                error=str(e))
 
-                # Mark transcript complete
-                await workflow.execute_activity(
-                    update_transcript_status,
-                    args=[self._transcript_id, "complete"],
-                    start_to_close_timeout=timedelta(seconds=15),
-                    retry_policy=RetryPolicy(maximum_attempts=3),
-                )
+            log.info(workflow.logger, MODULE, "verification_done",
+                     "All child verifications complete",
+                     verified=verified, failed=failed)
 
-                await workflow.execute_activity(
-                    finish_transcript_and_start_next,
-                    start_to_close_timeout=timedelta(seconds=30),
-                    retry_policy=RetryPolicy(maximum_attempts=2),
-                )
+            await workflow.execute_activity(
+                update_transcript_status,
+                args=[self._transcript_id, "complete"],
+                start_to_close_timeout=timedelta(seconds=15),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
 
-            else:
-                # No checkable groups — mark complete
-                await workflow.execute_activity(
-                    update_transcript_status,
-                    args=[self._transcript_id, "complete"],
-                    start_to_close_timeout=timedelta(seconds=15),
-                    retry_policy=RetryPolicy(maximum_attempts=3),
-                )
-                await workflow.execute_activity(
-                    finish_transcript_and_start_next,
-                    start_to_close_timeout=timedelta(seconds=30),
-                    retry_policy=RetryPolicy(maximum_attempts=2),
-                )
-                log.info(workflow.logger, MODULE, "no_checkable",
-                         "No checkable groups, transcript marked complete")
+            await workflow.execute_activity(
+                finish_transcript_and_start_next,
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
 
         elif self._transcript_id:
-            # No theses extracted at all
+            # No checkable groups or no theses — mark complete
             await workflow.execute_activity(
                 update_transcript_status,
                 args=[self._transcript_id, "complete"],
@@ -561,8 +659,8 @@ class ExtractTranscriptWorkflow:
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
-            log.info(workflow.logger, MODULE, "no_theses",
-                     "No theses extracted, transcript marked complete")
+            log.info(workflow.logger, MODULE, "no_checkable",
+                     "No checkable groups, transcript marked complete")
 
         # Final frontend notification
         await workflow.execute_activity(
@@ -582,7 +680,7 @@ class ExtractTranscriptWorkflow:
             "thesis_count": self._thesis_count,
             "claim_count": self._claim_count,
             "group_count": self._group_count,
-            "claims": groups_to_verify,
+            "claims": checkable_groups,
             "transcript_id": self._transcript_id,
             "verification_submitted": self._verification_submitted,
         }
@@ -595,3 +693,141 @@ class ExtractTranscriptWorkflow:
                  group_count=self._group_count)
 
         return result
+
+
+# ---------------------------------------------------------------------------
+# Helper functions (deterministic, safe for workflow code)
+# ---------------------------------------------------------------------------
+
+def _tag_theses_for_storage(all_theses: list[dict]) -> list[dict]:
+    """Tag raw theses with storage metadata. Returns new list of dicts."""
+    tagged = []
+    for t in all_theses:
+        entry = {**t}
+        entry["thesis_version"] = 3
+        entry["claim_text"] = t["thesis_statement"]
+        entry["speaker"] = (
+            t["speakers"][0] if t.get("speakers") else "Unknown"
+        )
+        entry["classification"] = "verifiable_fact"  # default, updated later
+        entry["is_duplicate"] = False
+        entry["worth_checking"] = False  # updated after review
+        tagged.append(entry)
+    return tagged
+
+
+def _remap_review_to_global(
+    review_result: dict,
+    global_indices: list[int],
+) -> dict:
+    """Remap speaker-local indices in review result to global thesis indices.
+
+    Args:
+        review_result: Output from ReviewClaimsWorkflow or make_trivial_review.
+            Has 'dispositions' (list) and 'groups' (dict).
+        global_indices: Mapping from speaker-local index to global index.
+
+    Returns:
+        Same structure with indices remapped to global.
+    """
+    remapped_disps = []
+    for d in review_result["dispositions"]:
+        local_idx = d["claim_index"]
+        remapped_disps.append({
+            **d,
+            "claim_index": global_indices[local_idx],
+        })
+
+    remapped_groups = {}
+    for gid, g in review_result["groups"].items():
+        remapped_groups[gid] = {
+            **g,
+            "member_indices": [
+                global_indices[li] for li in g["member_indices"]
+            ],
+        }
+
+    return {
+        "dispositions": remapped_disps,
+        "groups": remapped_groups,
+    }
+
+
+def _collect_all_groups(
+    review_results: dict[str, dict],
+    all_theses: list[dict],
+) -> list[dict]:
+    """Collect all groups from all speakers into a flat list.
+
+    Group IDs are namespaced by speaker to avoid collisions (each
+    speaker's ReviewClaimsWorkflow independently assigns G1, G2, etc.).
+    The local_group_id is preserved so synthesis lookups still work.
+    """
+    all_groups = []
+
+    for speaker, result in review_results.items():
+        for gid, g in result["groups"].items():
+            member_indices = g["member_indices"]
+
+            # Collect supporting references from all members
+            member_refs = []
+            for gi in member_indices:
+                t = all_theses[gi]
+                for ref in t.get("supporting_references", []):
+                    seg_idx = ref.get("segment_index")
+                    if seg_idx is not None and not any(
+                        r.get("segment_index") == seg_idx for r in member_refs
+                    ):
+                        member_refs.append(ref)
+            member_refs.sort(key=lambda r: r.get("segment_index", 0))
+
+            # Default claim_text is concatenation (replaced by synthesis later)
+            member_stmts = [
+                all_theses[gi]["thesis_statement"] for gi in member_indices
+            ]
+
+            all_groups.append({
+                "group_id": f"{speaker}_{gid}",
+                "local_group_id": gid,
+                "speaker": speaker,
+                "topic": g.get("topic", ""),
+                "checkable": g.get("checkable", False),
+                "checkability_rationale": g.get("checkability_rationale", ""),
+                "member_global_indices": member_indices,
+                "claim_text": "\n".join(member_stmts),
+                "supporting_references": member_refs,
+            })
+
+    return all_groups
+
+
+def _apply_review_metadata(
+    all_theses_with_meta: list[dict],
+    review_results: dict[str, dict],
+    speaker_theses: dict[str, list[tuple[int, dict]]],
+) -> None:
+    """Tag stored theses with classification and worth_checking from review."""
+    for speaker, result in review_results.items():
+        # Build disposition lookup by global index
+        disp_by_idx = {
+            d["claim_index"]: d for d in result["dispositions"]
+        }
+
+        # Find which global indices are in checkable groups
+        checkable_indices: set[int] = set()
+        for gid, g in result["groups"].items():
+            if g.get("checkable", False):
+                checkable_indices.update(g["member_indices"])
+
+        for gi, _ in speaker_theses[speaker]:
+            disp = disp_by_idx.get(gi)
+            if disp:
+                all_theses_with_meta[gi]["classification"] = disp[
+                    "classification"
+                ]
+                all_theses_with_meta[gi]["is_duplicate"] = (
+                    disp["action"] == "duplicate"
+                )
+            all_theses_with_meta[gi]["worth_checking"] = (
+                gi in checkable_indices
+            )

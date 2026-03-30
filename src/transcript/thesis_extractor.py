@@ -62,7 +62,7 @@ def build_chunks(segments: list[NumberedSegment]) -> list[ChunkSpec]:
     n = len(segments)
 
     # Small transcript: single chunk
-    if total_words <= TARGET_WORDS_PER_CHUNK or n <= MAX_SEGMENTS_PER_CHUNK:
+    if total_words <= TARGET_WORDS_PER_CHUNK and n <= MAX_SEGMENTS_PER_CHUNK:
         return [ChunkSpec(
             target_start=0, target_end=n,
             context_start=0, context_end=n,

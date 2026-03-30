@@ -28,6 +28,8 @@ from temporalio.worker import Worker  # noqa: E402
 
 from src.workflows.verify import VerifyClaimWorkflow  # noqa: E402
 from src.workflows.extract_transcript import ExtractTranscriptWorkflow  # noqa: E402
+from src.workflows.review_claims import ReviewClaimsWorkflow  # noqa: E402
+from src.workflows.synthesize_claims import SynthesizeClaimsWorkflow  # noqa: E402
 from src.activities.verify_activities import (  # noqa: E402
     create_claim,
     decompose_claim,
@@ -42,7 +44,8 @@ from src.activities.transcript_activities import (  # noqa: E402
     fetch_raw_transcript,
     extract_theses_activity,
     extract_chunk_activity,
-    review_claims_activity,
+    review_batch_activity,
+    synthesize_claim_activity,
     extract_transcript_batch,
     finalize_extraction,
     store_transcript,
@@ -75,7 +78,12 @@ async def main():
     worker = Worker(
         client,
         task_queue=TASK_QUEUE,
-        workflows=[VerifyClaimWorkflow, ExtractTranscriptWorkflow],
+        workflows=[
+            VerifyClaimWorkflow,
+            ExtractTranscriptWorkflow,
+            ReviewClaimsWorkflow,
+            SynthesizeClaimsWorkflow,
+        ],
         activities=[
             # Verification pipeline
             create_claim,
@@ -90,7 +98,8 @@ async def main():
             fetch_raw_transcript,
             extract_theses_activity,
             extract_chunk_activity,
-            review_claims_activity,
+            review_batch_activity,
+            synthesize_claim_activity,
             extract_transcript_batch,
             finalize_extraction,
             store_transcript,
@@ -107,7 +116,7 @@ async def main():
     )
 
     log.info(logger, MODULE, "ready", "Worker listening",
-             task_queue=TASK_QUEUE, activity_count=15, workflow_count=2)
+             task_queue=TASK_QUEUE, activity_count=17, workflow_count=4)
     try:
         await worker.run()
     finally:

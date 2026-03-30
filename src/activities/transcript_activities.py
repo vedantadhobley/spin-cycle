@@ -167,22 +167,25 @@ async def extract_chunk_activity(
 
 
 @activity.defn
-async def review_claims_activity(
-    theses: list[dict],
+async def review_batch_activity(
+    claims: list[dict],
     speaker: str,
     current_date: str,
+    existing_groups: dict,
+    existing_group_ids: list[str],
+    batch_label: str,
 ) -> dict:
-    """Review and group claims for a single speaker via LLM.
+    """Review a batch of ~10 claims with accumulated group context.
 
-    Takes serialized theses, speaker name, and current date.
-    Returns serialized ClaimReviewOutput dict.
+    Each batch is a separate activity for Temporal UI visibility.
+    Returns serialized ReviewBatchOutput dict.
     """
     from src.schemas.llm_outputs import ExtractedThesis, SupportingReference
-    from src.transcript.claim_reviewer import review_claims
+    from src.transcript.claim_reviewer import review_batch
 
     # Reconstruct ExtractedThesis objects
     extracted = []
-    for t in theses:
+    for t in claims:
         refs = [
             SupportingReference(segment_index=r["segment_index"], excerpt=r["excerpt"])
             for r in t.get("supporting_references", [])
@@ -194,17 +197,49 @@ async def review_claims_activity(
             topic=t.get("topic", ""),
         ))
 
-    log.info(activity.logger, "transcript", "review_start",
-             "Starting claim review",
-             speaker=speaker, claim_count=len(extracted))
+    log.info(activity.logger, "transcript", "review_batch_start",
+             "Starting review batch",
+             speaker=speaker, batch=batch_label,
+             claim_count=len(extracted),
+             existing_groups=len(existing_groups))
 
-    output = await review_claims(extracted, speaker, current_date)
+    output = await review_batch(
+        extracted, speaker, current_date,
+        existing_groups, existing_group_ids, batch_label,
+    )
 
-    log.info(activity.logger, "transcript", "review_done",
-             "Claim review complete",
-             speaker=speaker,
-             classifications=len(output.classifications),
-             groups=len(output.groups))
+    log.info(activity.logger, "transcript", "review_batch_done",
+             "Review batch complete",
+             speaker=speaker, batch=batch_label,
+             dispositions=len(output.dispositions),
+             new_groups=len(output.new_groups))
+
+    return output.model_dump()
+
+
+@activity.defn
+async def synthesize_claim_activity(
+    member_statements: list[str],
+    topic: str,
+    speaker: str,
+) -> dict:
+    """Synthesize an overarching claim for one group.
+
+    Returns dict with overarching_claim and rationale.
+    """
+    from src.transcript.claim_synthesizer import synthesize_group_claim
+
+    log.info(activity.logger, "transcript", "synthesize_start",
+             "Starting claim synthesis",
+             speaker=speaker, topic=topic,
+             member_count=len(member_statements))
+
+    output = await synthesize_group_claim(member_statements, topic, speaker)
+
+    log.info(activity.logger, "transcript", "synthesize_done",
+             "Claim synthesis complete",
+             speaker=speaker, topic=topic,
+             claim_preview=output.overarching_claim[:80])
 
     return output.model_dump()
 

@@ -60,47 +60,54 @@ class ThesisExtractionOutput(BaseModel):
 
 
 # =============================================================================
-# CLAIM REVIEW OUTPUT (Phase 2: classify, dedup, group, assess checkability)
+# REVIEW BATCH OUTPUT (Phase 2: sequential accumulating review)
 # =============================================================================
 
-class ClaimClassification(BaseModel):
-    """Classification of a single extracted claim."""
-    claim_index: int = Field(..., description="Index of the claim in the input list")
+class ClaimDisposition(BaseModel):
+    """Classification + action for a single claim in a review batch."""
+    claim_index: int = Field(..., description="Local index within this batch (0-based)")
     classification: Literal[
         "verifiable_fact", "future_prediction",
         "subjective_opinion", "procedural", "vague_rhetoric"
     ] = Field(..., description="Claim type classification")
-    is_duplicate: bool = Field(default=False, description="Whether this is a duplicate of another claim")
-    duplicate_of: Optional[int] = Field(default=None, description="Index of the claim this duplicates")
-    rationale: str = Field(default="", description="Why this classification was chosen")
+    action: Literal["new_group", "add_to_group", "duplicate", "drop"] = Field(
+        ..., description="What to do with this claim"
+    )
+    group_id: Optional[str] = Field(
+        default=None, description="Group ID for add_to_group/duplicate actions"
+    )
+    rationale: str = Field(default="", description="Why this classification and action")
 
 
-class ClaimGroup(BaseModel):
-    """A group of related verifiable claims forming an argument."""
-    member_indices: list[int] = Field(
-        ..., description="Indices of claims in this group (verifiable + non-duplicate only)"
+class NewGroup(BaseModel):
+    """A new group created in a review batch."""
+    group_id: str = Field(..., description="LLM-assigned group ID (e.g. G1, G2)")
+    topic: str = Field(default="", description="Topic area for the group")
+    checkable: bool = Field(..., description="Could independent evidence confirm or deny this?")
+    checkability_rationale: str = Field(default="", description="Why checkable or not")
+
+
+class ReviewBatchOutput(BaseModel):
+    """Output from a single review batch (~10 claims)."""
+    dispositions: list[ClaimDisposition] = Field(
+        default_factory=list, description="Disposition for each claim in the batch"
     )
-    group_rationale: str = Field(
-        default="", description="Why these claims are related, or 'standalone claim'"
-    )
-    checkable: bool = Field(
-        ..., description="Could independent evidence confirm or deny the core assertion?"
-    )
-    checkability_rationale: str = Field(
-        default="", description="Why checkable or not"
-    )
-    topic: str = Field(
-        default="", description="Topic area for the group"
+    new_groups: list[NewGroup] = Field(
+        default_factory=list, description="New groups created in this batch"
     )
 
 
-class ClaimReviewOutput(BaseModel):
-    """Output from Phase 2 claim review: classify, dedup, group, assess."""
-    classifications: list[ClaimClassification] = Field(
-        default_factory=list, description="Classification for every input claim (Steps 1+2)"
+# =============================================================================
+# SYNTHESIZE CLAIM OUTPUT (Phase 2b: per-group overarching claim)
+# =============================================================================
+
+class SynthesizedClaim(BaseModel):
+    """Output from synthesizing a group's member claims into one statement."""
+    overarching_claim: str = Field(
+        ..., description="Single clean verifiable claim combining all group members"
     )
-    groups: list[ClaimGroup] = Field(
-        default_factory=list, description="Groups of related verifiable claims (Steps 3+4)"
+    rationale: str = Field(
+        default="", description="Why this formulation was chosen"
     )
 
 

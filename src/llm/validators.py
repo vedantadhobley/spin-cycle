@@ -21,7 +21,8 @@ from src.schemas.llm_outputs import (
     JudgeOutput,
     SynthesizeOutput,
     ThesisExtractionOutput,
-    ClaimReviewOutput,
+    ReviewBatchOutput,
+    SynthesizedClaim,
 )
 from src.utils.logging import log, get_logger
 
@@ -298,72 +299,105 @@ def validate_thesis_extraction(output: ThesisExtractionOutput) -> tuple[bool, st
     return True, ""
 
 
-def validate_claim_review(output: ClaimReviewOutput, claim_count: int) -> tuple[bool, str]:
-    """Validate claim review output semantically.
+def validate_review_batch(
+    output: ReviewBatchOutput,
+    claim_count: int,
+    existing_group_ids: list[str],
+) -> tuple[bool, str]:
+    """Validate review batch output semantically.
 
     Checks:
-    1. Every input claim index has exactly one classification
-    2. No claim index appears in more than one group
-    3. Group members are all verifiable_fact and non-duplicate
-    4. At least one group exists (warn if zero verifiable)
-    5. Rationale fields meet minimum length
+    1. Every input index (0 to claim_count-1) has exactly one disposition
+    2. new_group/add_to_group → must be verifiable_fact
+    3. add_to_group/duplicate → group_id must exist in existing_group_ids
+    4. drop → classification must NOT be verifiable_fact
+    5. New group IDs match those referenced by new_group dispositions
+    6. No duplicate new group IDs, no collision with existing
+    7. Rationale min length (10 chars)
     """
-    # Check 1: Every claim index has a classification
-    classified_indices = {c.claim_index for c in output.classifications}
+    # Check 1: Every claim index has a disposition
+    disp_indices = {d.claim_index for d in output.dispositions}
     expected = set(range(claim_count))
-    missing = expected - classified_indices
+    missing = expected - disp_indices
     if missing:
-        return False, f"Missing classifications for claim indices: {sorted(missing)}"
+        return False, f"Missing dispositions for claim indices: {sorted(missing)}"
 
-    extra = classified_indices - expected
+    extra = disp_indices - expected
     if extra:
-        return False, f"Classifications reference invalid indices: {sorted(extra)}"
+        return False, f"Dispositions reference invalid indices: {sorted(extra)}"
 
-    # Build lookup for quick access
-    class_by_idx = {c.claim_index: c for c in output.classifications}
+    # Collect new group IDs defined in this batch
+    new_group_ids_defined = {ng.group_id for ng in output.new_groups}
+    all_known = set(existing_group_ids) | new_group_ids_defined
 
-    # Check 2: No claim index in more than one group
-    seen_in_groups: set[int] = set()
-    for group in output.groups:
-        for idx in group.member_indices:
-            if idx in seen_in_groups:
-                return False, f"Claim index {idx} appears in multiple groups"
-            seen_in_groups.add(idx)
-
-    # Check 3: Group members must be verifiable_fact and non-duplicate
-    for gi, group in enumerate(output.groups):
-        for idx in group.member_indices:
-            if idx not in class_by_idx:
-                return False, f"Group {gi} references unclassified index {idx}"
-            cls = class_by_idx[idx]
-            if cls.classification != "verifiable_fact":
+    for d in output.dispositions:
+        # Check 2: grouped actions require verifiable_fact
+        if d.action in ("new_group", "add_to_group"):
+            if d.classification != "verifiable_fact":
                 return False, (
-                    f"Group {gi} includes index {idx} classified as "
-                    f"'{cls.classification}', not 'verifiable_fact'"
+                    f"Claim {d.claim_index}: action '{d.action}' requires "
+                    f"verifiable_fact, got '{d.classification}'"
                 )
-            if cls.is_duplicate:
-                return False, f"Group {gi} includes duplicate index {idx}"
 
-    # Check 4: At least one group if there are verifiable claims
-    verifiable_non_dup = [
-        c for c in output.classifications
-        if c.classification == "verifiable_fact" and not c.is_duplicate
-    ]
-    if verifiable_non_dup and not output.groups:
-        return False, (
-            f"Found {len(verifiable_non_dup)} verifiable non-duplicate claims "
-            f"but no groups were created"
-        )
+        # Check 3: new_group/add_to_group/duplicate must have group_id
+        if d.action in ("new_group", "add_to_group", "duplicate"):
+            if not d.group_id:
+                return False, f"Claim {d.claim_index}: action '{d.action}' requires group_id"
 
-    if not verifiable_non_dup and not output.groups:
-        log.warning(logger, MODULE, "no_verifiable_claims",
-                    "No verifiable non-duplicate claims found — zero groups")
+        if d.action in ("add_to_group", "duplicate"):
+            if d.group_id not in all_known:
+                return False, (
+                    f"Claim {d.claim_index}: group_id '{d.group_id}' not in "
+                    f"existing or newly created groups"
+                )
 
-    # Check 5: Rationale fields
-    for group in output.groups:
-        if len(group.group_rationale.strip()) < 10:
-            return False, f"group_rationale too short: '{group.group_rationale}'"
-        if len(group.checkability_rationale.strip()) < 10:
-            return False, f"checkability_rationale too short: '{group.checkability_rationale}'"
+        # Check 4: drop must NOT be verifiable_fact
+        if d.action == "drop" and d.classification == "verifiable_fact":
+            return False, (
+                f"Claim {d.claim_index}: cannot drop a verifiable_fact — "
+                f"use new_group or add_to_group instead"
+            )
 
+        # Check 7: Rationale min length
+        if len(d.rationale.strip()) < 10:
+            return False, f"Claim {d.claim_index}: rationale too short"
+
+    # Check 5: new_group dispositions must have matching new_groups entry
+    new_group_refs = {
+        d.group_id for d in output.dispositions if d.action == "new_group"
+    }
+    if new_group_refs != new_group_ids_defined:
+        missing_defs = new_group_refs - new_group_ids_defined
+        extra_defs = new_group_ids_defined - new_group_refs
+        parts = []
+        if missing_defs:
+            parts.append(f"referenced but not defined: {missing_defs}")
+        if extra_defs:
+            parts.append(f"defined but not referenced: {extra_defs}")
+        return False, f"new_groups mismatch: {'; '.join(parts)}"
+
+    # Check 6: No collision with existing group IDs
+    collisions = new_group_ids_defined & set(existing_group_ids)
+    if collisions:
+        return False, f"New group IDs collide with existing: {collisions}"
+
+    # Validate new group fields
+    for ng in output.new_groups:
+        if len(ng.checkability_rationale.strip()) < 10:
+            return False, f"Group {ng.group_id}: checkability_rationale too short"
+
+    return True, ""
+
+
+def validate_synthesized_claim(output: SynthesizedClaim) -> tuple[bool, str]:
+    """Validate synthesized claim output.
+
+    Checks:
+    1. overarching_claim min length (20 chars)
+    2. rationale min length (10 chars)
+    """
+    if len(output.overarching_claim.strip()) < 20:
+        return False, "overarching_claim too short (<20 chars)"
+    if len(output.rationale.strip()) < 10:
+        return False, "rationale too short (<10 chars)"
     return True, ""
