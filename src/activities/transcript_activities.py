@@ -2,18 +2,18 @@
 
 Activities:
   1. fetch_transcript              — fetch + parse a C-SPAN transcript (Playwright WAF)
-  2. extract_transcript_batch      — extract claims from one batch of segments (v1, archived)
-  3. finalize_extraction           — filter + deduplicate claims across all batches (v1, archived)
-  4. store_transcript              — persist cleaned transcript to DB
-  5. store_transcript_claims       — persist extracted claims linked to transcript
-  6. create_claims_for_transcript  — batch-create Claim records + link FKs
-  7. update_transcript_status      — set transcript status field
-  8. finish_transcript_and_start_next — mark transcript complete, start next queued
-  9. extract_theses_activity       — thesis-level extraction (v2, single LLM call)
- 10. fetch_raw_transcript          — parse raw text into TranscriptData
+  2. fetch_raw_transcript          — parse raw text into TranscriptData
+  3. extract_chunk_activity        — extract claims from one chunk of transcript
+  4. review_batch_activity         — review batch of claims (Phase 2)
+  5. synthesize_claim_activity     — synthesize overarching claim per group
+  6. store_transcript              — persist cleaned transcript to DB
+  7. store_transcript_claims       — persist extracted claims linked to transcript
+  8. create_claims_for_transcript  — batch-create Claim records + link FKs
+  9. update_transcript_status      — set transcript status field
+ 10. finish_transcript_and_start_next — mark transcript complete, start next queued
 
-Each batch is a separate activity so it's visible in Temporal UI.
-The workflow orchestrates batches — Temporal's max_concurrent_activities
+Each chunk is a separate activity so it's visible in Temporal UI.
+The workflow orchestrates chunks — Temporal's max_concurrent_activities
 naturally limits GPU contention.
 """
 
@@ -31,7 +31,7 @@ async def fetch_transcript(url: str) -> dict:
     Uses Playwright to solve the CloudFront WAF JS challenge, then fetches
     program metadata and structured transcript JSON.
 
-    Returns a serialized TranscriptData-shaped dict with numbered segments.
+    Returns a serialized TranscriptData-shaped dict with speaker turns.
     """
     from src.transcript.cspan import fetch_cspan_transcript, is_cspan_url
 
@@ -52,22 +52,20 @@ async def fetch_transcript(url: str) -> dict:
         "display_text": td.display_text,
         "source_format": td.source_format,
         "speaker_aliases": td.speaker_aliases,
-        "segments": [
+        "turns": [
             {
-                "index": s.index,
-                "speaker": s.speaker,
-                "text": s.text,
-                "timestamp": s.timestamp,
-                "section_header": s.section_header,
+                "speaker": t.speaker,
+                "text": t.text,
+                "section_header": t.section_header,
             }
-            for s in td.segments
+            for t in td.turns
         ],
     }
 
     log.info(activity.logger, "transcript", "fetch_done", "Transcript fetched",
              url=url, title=td.title,
              word_count=td.word_count,
-             segment_count=td.segment_count,
+             turn_count=td.turn_count,
              speaker_count=len(td.speakers))
 
     return result
@@ -101,15 +99,13 @@ async def fetch_raw_transcript(
         "display_text": td.display_text,
         "source_format": td.source_format,
         "speaker_aliases": td.speaker_aliases,
-        "segments": [
+        "turns": [
             {
-                "index": s.index,
-                "speaker": s.speaker,
-                "text": s.text,
-                "timestamp": s.timestamp,
-                "section_header": s.section_header,
+                "speaker": t.speaker,
+                "text": t.text,
+                "section_header": t.section_header,
             }
-            for s in td.segments
+            for t in td.turns
         ],
     }
 
@@ -117,7 +113,7 @@ async def fetch_raw_transcript(
              "Raw text parsed",
              title=td.title,
              word_count=td.word_count,
-             segment_count=td.segment_count,
+             turn_count=td.turn_count,
              speaker_count=len(td.speakers))
 
     return result
@@ -126,42 +122,35 @@ async def fetch_raw_transcript(
 @activity.defn
 async def extract_chunk_activity(
     transcript_data: dict,
-    chunk_spec: dict,
+    chunk_dict: dict,
     enriched_speakers: list[dict],
 ) -> list[dict]:
     """Extract claims from a single chunk of a transcript.
 
-    Takes serialized TranscriptData, ChunkSpec dict, and enriched speakers.
-    Returns list of thesis dicts with supporting references.
+    Takes serialized TranscriptData, Chunk dict, and enriched speakers.
+    Returns list of thesis dicts with original_quote.
     """
-    from src.transcript.parsers import TranscriptData, NumberedSegment
-    from src.transcript.thesis_extractor import ChunkSpec, extract_chunk
-    from src.utils.reference_matcher import resolve_all_references
+    from src.transcript.thesis_extractor import Chunk, extract_chunk
 
     # Reconstruct TranscriptData
     td = _reconstruct_transcript_data(transcript_data)
-    chunk = ChunkSpec(**chunk_spec)
+    chunk = Chunk(**chunk_dict)
 
     log.info(activity.logger, "transcript", "chunk_extraction_start",
              "Starting chunk extraction",
              title=td.title,
-             target_start=chunk.target_start,
-             target_end=chunk.target_end)
+             chunk_index=chunk.chunk_index,
+             total_chunks=chunk.total_chunks)
 
     theses = await extract_chunk(td, chunk, enriched_speakers)
-
-    # Programmatic reference verification
-    theses, ref_stats = resolve_all_references(theses, td.segments)
 
     # Serialize for Temporal transport
     result = _serialize_theses(theses)
 
     log.info(activity.logger, "transcript", "chunk_extraction_done",
              "Chunk extraction complete",
-             target_start=chunk.target_start,
-             target_end=chunk.target_end,
-             thesis_count=len(result),
-             ref_stats=ref_stats)
+             chunk_index=chunk.chunk_index,
+             thesis_count=len(result))
 
     return result
 
@@ -180,20 +169,16 @@ async def review_batch_activity(
     Each batch is a separate activity for Temporal UI visibility.
     Returns serialized ReviewBatchOutput dict.
     """
-    from src.schemas.llm_outputs import ExtractedThesis, SupportingReference
+    from src.schemas.llm_outputs import ExtractedThesis
     from src.transcript.claim_reviewer import review_batch
 
     # Reconstruct ExtractedThesis objects
     extracted = []
     for t in claims:
-        refs = [
-            SupportingReference(segment_index=r["segment_index"], excerpt=r["excerpt"])
-            for r in t.get("supporting_references", [])
-        ]
         extracted.append(ExtractedThesis(
             thesis_statement=t["thesis_statement"],
             speakers=t.get("speakers", [speaker]),
-            supporting_references=refs,
+            original_quote=t.get("original_quote", ""),
             topic=t.get("topic", ""),
         ))
 
@@ -246,24 +231,22 @@ async def synthesize_claim_activity(
 
 def _reconstruct_transcript_data(transcript_data: dict):
     """Reconstruct TranscriptData from a serialized dict."""
-    from src.transcript.parsers import TranscriptData, NumberedSegment
+    from src.transcript.parsers import TranscriptData, SpeakerTurn
 
-    segments = [
-        NumberedSegment(
-            index=s["index"],
-            speaker=s["speaker"],
-            text=s["text"],
-            timestamp=s.get("timestamp"),
-            section_header=s.get("section_header"),
+    turns = [
+        SpeakerTurn(
+            speaker=t["speaker"],
+            text=t["text"],
+            section_header=t.get("section_header"),
         )
-        for s in transcript_data["segments"]
+        for t in transcript_data["turns"]
     ]
     return TranscriptData(
         url=transcript_data["url"],
         title=transcript_data["title"],
         date=transcript_data.get("date"),
         speakers=transcript_data["speakers"],
-        segments=segments,
+        turns=turns,
         source_format=transcript_data.get("source_format", "revcom"),
         speaker_aliases=transcript_data.get("speaker_aliases", {}),
     )
@@ -276,231 +259,10 @@ def _serialize_theses(theses) -> list[dict]:
         result.append({
             "thesis_statement": t.thesis_statement,
             "speakers": t.speakers,
-            "supporting_references": [
-                {"segment_index": r.segment_index, "excerpt": r.excerpt}
-                for r in t.supporting_references
-            ],
+            "original_quote": t.original_quote,
             "topic": t.topic,
         })
     return result
-
-
-@activity.defn
-async def extract_theses_activity(
-    transcript_data: dict,
-    enriched_speakers: list[dict] | None = None,
-) -> list[dict]:
-    """Legacy: Extract theses via single LLM call (kept for backward compat).
-
-    Prefer extract_chunk_activity for new code.
-    """
-    from src.transcript.parsers import TranscriptData, NumberedSegment
-    from src.transcript.thesis_extractor import ChunkSpec, extract_chunk
-    from src.utils.reference_matcher import resolve_all_references
-
-    td = _reconstruct_transcript_data(transcript_data)
-
-    if enriched_speakers is None:
-        from src.transcript.speakers import _enrich_speakers
-        enriched_speakers = await _enrich_speakers(td.speakers)
-
-    log.info(activity.logger, "transcript", "thesis_extraction_start",
-             "Starting thesis extraction (legacy single-pass)",
-             title=td.title, word_count=td.word_count,
-             segment_count=td.segment_count)
-
-    # Use a single chunk covering the full transcript
-    chunk = ChunkSpec(
-        target_start=0, target_end=len(td.segments),
-        context_start=0, context_end=len(td.segments),
-    )
-    theses = await extract_chunk(td, chunk, enriched_speakers)
-
-    # Programmatic reference verification
-    theses, ref_stats = resolve_all_references(theses, td.segments)
-
-    result = _serialize_theses(theses)
-
-    log.info(activity.logger, "transcript", "thesis_extraction_done",
-             "Thesis extraction complete",
-             thesis_count=len(result),
-             ref_stats=ref_stats)
-
-    return result
-
-
-@activity.defn
-async def extract_transcript_batch(
-    transcript_data: dict,
-    target_start: int,
-    target_end: int,
-    text_start: int,
-    text_end: int,
-    batch_label: str,
-    transcript_title: str | None = None,
-) -> list[dict]:
-    """Extract claims from one batch of transcript segments.
-
-    Takes the full transcript data + indices defining which segments are
-    targets (in manifest) vs context-only (overlap for bracket resolution).
-
-    Each batch is a separate Temporal activity for UI visibility.
-    """
-    from src.transcript._archive_fetcher import TranscriptSegment
-    from src.transcript.extractor import extract_batch
-
-    # Reconstruct segment objects
-    all_segments = [TranscriptSegment(**s) for s in transcript_data["segments"]]
-    text_segments = all_segments[text_start:text_end]
-    target_segments = all_segments[target_start:target_end]
-
-    log.info(activity.logger, "transcript", "batch_start",
-             "Extracting batch",
-             batch_label=batch_label,
-             target_count=len(target_segments),
-             text_count=len(text_segments),
-             overlap=len(text_segments) - len(target_segments))
-
-    claims = await extract_batch(
-        text_segments=text_segments,
-        target_segments=target_segments,
-        batch_label=batch_label,
-        transcript_title=transcript_title,
-    )
-
-    result = [
-        {
-            "claim_text": c.claim_text,
-            "original_quote": c.original_quote,
-            "speaker": c.speaker,
-            "claim_type": None,
-            "worth_checking": c.worth_checking,
-            "skip_reason": c.skip_reason,
-            "checkable": c.checkable,
-            "checkability_rationale": c.checkability_rationale,
-            "is_restatement": c.is_restatement,
-            "segment_gist": getattr(c, "_segment_gist", None),
-        }
-        for c in claims
-    ]
-
-    worth = sum(1 for c in claims if c.worth_checking)
-    log.info(activity.logger, "transcript", "batch_done",
-             "Batch extraction complete",
-             batch_label=batch_label,
-             total_assertions=len(result),
-             worth_checking=worth)
-
-    return result
-
-
-@activity.defn
-async def finalize_extraction(
-    transcript_data: dict,
-    all_batch_claims: list[list[dict]],
-) -> dict:
-    """Filter + deduplicate claims from all batches into final claim list.
-
-    Runs after all batch activities complete.  Applies consistency enforcement,
-    filters to worth_checking, deduplicates across batch boundaries, and
-    converts to the final TranscriptClaim format.
-
-    Returns dict with:
-        - worth_checking: list of dicts for verification pipeline
-        - all_claims: list of ALL claims (including skipped) with full metadata for DB storage
-    """
-    from src.transcript._archive_fetcher import Transcript, TranscriptSegment
-    from src.transcript.extractor import (
-        ExtractedClaim, finalize_claims,
-    )
-
-    # Reconstruct Transcript
-    transcript = Transcript(
-        url=transcript_data["url"],
-        title=transcript_data["title"],
-        date=transcript_data.get("date"),
-        speakers=transcript_data["speakers"],
-        segments=[TranscriptSegment(**s) for s in transcript_data["segments"]],
-    )
-
-    # Reconstruct ExtractedClaim objects from all batches.
-    # Tag each with its raw index so we can trace which raw claims survive
-    # finalization (filtering + dedup) for correct FK linkage later.
-    all_claims: list[ExtractedClaim] = []
-    all_raw_claims: list[dict] = []
-    for batch_claims in all_batch_claims:
-        for c in batch_claims:
-            all_raw_claims.append(c)
-            all_claims.append(ExtractedClaim(
-                claim_text=c["claim_text"],
-                original_quote=c["original_quote"],
-                speaker=c["speaker"],
-                worth_checking=c.get("worth_checking", True),
-                skip_reason=c.get("skip_reason"),
-                checkable=c.get("checkable", True),
-                checkability_rationale=c.get("checkability_rationale", ""),
-                is_restatement=c.get("is_restatement", False),
-            ))
-
-    log.info(activity.logger, "transcript", "finalize_start",
-             "Finalizing extraction",
-             total_claims=len(all_claims),
-             batch_count=len(all_batch_claims))
-
-    final_claims = finalize_claims(all_claims, transcript)
-
-    # Match finalized claims back to their raw indices by claim_text.
-    # finalize_claims filters (worth_checking) and deduplicates, so its
-    # output is a subset of all_claims. We need to know WHICH raw claims
-    # survived so the workflow can link the correct transcript_claim rows.
-    final_claim_texts = {c.claim_text for c in final_claims}
-    seen_texts: set[str] = set()
-    surviving_raw_indices: list[int] = []
-    for i, c in enumerate(all_claims):
-        if c.claim_text in final_claim_texts and c.claim_text not in seen_texts:
-            surviving_raw_indices.append(i)
-            seen_texts.add(c.claim_text)
-
-    worth_checking = [
-        {
-            "claim_text": c.claim_text,
-            "original_quote": c.original_quote,
-            "speaker": c.speaker,
-            "claim_type": None,
-            "source_url": c.source_url,
-        }
-        for c in final_claims
-    ]
-
-    # Build all_claims list with full metadata for DB storage
-    all_claims_for_storage = [
-        {
-            "claim_text": c["claim_text"],
-            "original_quote": c["original_quote"],
-            "speaker": c["speaker"],
-            "claim_type": c.get("claim_type"),
-            "worth_checking": c.get("worth_checking", True),
-            "skip_reason": c.get("skip_reason"),
-            "checkable": c.get("checkable"),
-            "checkability_rationale": c.get("checkability_rationale"),
-            "is_restatement": c.get("is_restatement", False),
-            "segment_gist": c.get("segment_gist"),
-        }
-        for c in all_raw_claims
-    ]
-
-    log.info(activity.logger, "transcript", "finalize_done",
-             "Extraction finalized",
-             input_claims=len(all_claims),
-             worth_checking=len(worth_checking),
-             all_for_storage=len(all_claims_for_storage),
-             surviving_indices=surviving_raw_indices)
-
-    return {
-        "worth_checking": worth_checking,
-        "all_claims": all_claims_for_storage,
-        "surviving_indices": surviving_raw_indices,
-    }
 
 
 @activity.defn
@@ -536,12 +298,12 @@ async def store_transcript(transcript_data: dict) -> dict:
             record.date = transcript_data.get("date")
             record.speakers = transcript_data["speakers"]
             record.word_count = transcript_data["word_count"]
-            record.segment_count = len(transcript_data["segments"])
+            record.segment_count = len(transcript_data["turns"])
             record.display_text = transcript_data["display_text"]
             record.status = "extracting"
             # v2 fields
-            if "segments" in transcript_data:
-                record.segments_data = transcript_data["segments"]
+            if "turns" in transcript_data:
+                record.segments_data = transcript_data["turns"]
             if "source_format" in transcript_data:
                 record.source_format = transcript_data["source_format"]
             if "speaker_aliases" in transcript_data:
@@ -553,11 +315,11 @@ async def store_transcript(transcript_data: dict) -> dict:
                 date=transcript_data.get("date"),
                 speakers=transcript_data["speakers"],
                 word_count=transcript_data["word_count"],
-                segment_count=len(transcript_data["segments"]),
+                segment_count=len(transcript_data["turns"]),
                 display_text=transcript_data["display_text"],
                 status="extracting",
                 # v2 fields
-                segments_data=transcript_data.get("segments"),
+                segments_data=transcript_data.get("turns"),
                 source_format=transcript_data.get("source_format", "revcom"),
                 speaker_aliases=transcript_data.get("speaker_aliases"),
             )
@@ -598,16 +360,10 @@ async def store_transcript_claims(
         )
 
         for c in claims:
-            # For thesis v2, original_quote comes from first supporting reference
-            original_quote = c.get("original_quote", "")
-            if not original_quote and c.get("supporting_references"):
-                first_ref = c["supporting_references"][0]
-                original_quote = first_ref.get("excerpt", "")
-
             tc = TranscriptClaim(
                 transcript_id=tid,
                 claim_text=c.get("claim_text") or c.get("thesis_statement", ""),
-                original_quote=original_quote,
+                original_quote=c.get("original_quote", ""),
                 speaker=c.get("speaker", c.get("speakers", [""])[0] if c.get("speakers") else ""),
                 claim_type=c.get("claim_type"),
                 worth_checking=c.get("worth_checking", True),
@@ -616,10 +372,8 @@ async def store_transcript_claims(
                 checkability_rationale=c.get("checkability_rationale"),
                 is_restatement=c.get("is_restatement", False),
                 segment_gist=c.get("segment_gist"),
-                # v2 fields
-                supporting_references=c.get("supporting_references"),
                 topic=c.get("topic"),
-                thesis_version=c.get("thesis_version", 1),
+                thesis_version=c.get("thesis_version", 3),
             )
             session.add(tc)
             await session.flush()
@@ -745,8 +499,7 @@ async def finish_transcript_and_start_next() -> str | None:
     from src.db.session import async_session
     from src.db.models import TranscriptRecord, TranscriptClaim, Claim
 
-    TEMPORAL_HOST = os.getenv("TEMPORAL_HOST", "localhost:7233")
-    TASK_QUEUE = "spin-cycle-verify"
+    from src.config import TEMPORAL_HOST, TASK_QUEUE
 
     async with async_session() as session:
         # Step 1: Find verifying transcripts where all claims are done

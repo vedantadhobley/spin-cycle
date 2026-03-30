@@ -42,12 +42,9 @@ from src.activities.verify_activities import (  # noqa: E402
 from src.activities.transcript_activities import (  # noqa: E402
     fetch_transcript,
     fetch_raw_transcript,
-    extract_theses_activity,
     extract_chunk_activity,
     review_batch_activity,
     synthesize_claim_activity,
-    extract_transcript_batch,
-    finalize_extraction,
     store_transcript,
     store_transcript_claims,
     create_claims_for_transcript,
@@ -56,8 +53,7 @@ from src.activities.transcript_activities import (  # noqa: E402
     notify_frontend_refresh,
 )
 
-TASK_QUEUE = "spin-cycle-verify"
-TEMPORAL_HOST = os.getenv("TEMPORAL_HOST", "localhost:7233")
+from src.config import TASK_QUEUE, TEMPORAL_HOST, MAX_CONCURRENT
 
 
 async def main():
@@ -96,12 +92,9 @@ async def main():
             # Transcript extraction
             fetch_transcript,
             fetch_raw_transcript,
-            extract_theses_activity,
             extract_chunk_activity,
             review_batch_activity,
             synthesize_claim_activity,
-            extract_transcript_batch,
-            finalize_extraction,
             store_transcript,
             store_transcript_claims,
             create_claims_for_transcript,
@@ -112,7 +105,7 @@ async def main():
         ],
         # Match MAX_CONCURRENT=2 in the workflow — 2 LLM inference slots
         # with 65K context each (2 slots x 65K = 131072 total ctx).
-        max_concurrent_activities=2,
+        max_concurrent_activities=MAX_CONCURRENT,
     )
 
     log.info(logger, MODULE, "ready", "Worker listening",

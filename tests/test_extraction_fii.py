@@ -23,6 +23,11 @@ import os
 
 sys.path.insert(0, ".")
 
+# Configure structured logging so we see validation error details
+os.environ.setdefault("LOG_FORMAT", "pretty")
+from src.utils.logging import configure_logging
+configure_logging()
+
 PHASE1_OUTPUT = "tests/artifacts/fii_phase1_output.json"
 
 
@@ -48,22 +53,20 @@ async def run_phase1():
 
     transcript = parse_transcript()
 
-    print(f"Parsed: {transcript.segment_count} segments, "
+    print(f"Parsed: {transcript.turn_count} turns, "
           f"{transcript.word_count} words, "
           f"speakers: {transcript.speakers}")
 
     # Build chunks
-    chunks = build_chunks(transcript.segments)
+    chunks = build_chunks(transcript.turns)
     print(f"\n{'='*80}")
-    print(f"CHUNKING: {len(chunks)} chunks from {transcript.segment_count} segments")
+    print(f"CHUNKING: {len(chunks)} chunks from {transcript.turn_count} turns")
     print(f"{'='*80}")
     for i, c in enumerate(chunks):
-        # Count words in target segments
-        target_segs = transcript.segments[c.target_start:c.target_end]
-        target_words = sum(len(s.text.split()) for s in target_segs)
-        print(f"  Chunk {i}: target [{c.target_start}-{c.target_end}) "
-              f"({c.target_end - c.target_start} segs, {target_words} words), "
-              f"context [{c.context_start}-{c.context_end})")
+        target_words = len(c.target_text.split())
+        print(f"  Chunk {i}: {target_words} target words, "
+              f"{len(c.context_before.split())} before, "
+              f"{len(c.context_after.split())} after")
 
     # Enrich speakers
     enriched = await _enrich_speakers(transcript.speakers)
@@ -72,16 +75,14 @@ async def run_phase1():
     # Extract from each chunk sequentially (for visibility)
     all_theses = []
     for i, chunk in enumerate(chunks):
-        print(f"\n--- Extracting chunk {i} "
-              f"[{chunk.target_start}-{chunk.target_end}) ---")
+        print(f"\n--- Extracting chunk {i} ---")
         theses = await extract_chunk(transcript, chunk, enriched)
         print(f"  → {len(theses)} claims")
 
         for j, t in enumerate(theses):
-            refs = ", ".join(f"[{r.segment_index}]" for r in t.supporting_references)
             print(f"  [{len(all_theses) + j}] ({t.topic}) {t.speakers[0] if t.speakers else '?'}: "
                   f"{t.thesis_statement[:100]}...")
-            print(f"       refs: {refs}")
+            print(f"       quote: \"{t.original_quote[:80]}...\"")
 
         all_theses.extend(theses)
 
@@ -103,10 +104,7 @@ async def run_phase1():
         output.append({
             "thesis_statement": t.thesis_statement,
             "speakers": t.speakers,
-            "supporting_references": [
-                {"segment_index": r.segment_index, "excerpt": r.excerpt}
-                for r in t.supporting_references
-            ],
+            "original_quote": t.original_quote,
             "topic": t.topic,
         })
 
@@ -117,10 +115,17 @@ async def run_phase1():
     return output
 
 
+PHASE2_OUTPUT = "tests/artifacts/fii_phase2_output.json"
+
+
 async def run_phase2(phase1_data=None):
-    """Phase 2: Review + group claims per speaker."""
-    from src.transcript.claim_reviewer import review_claims, make_trivial_review
-    from src.schemas.llm_outputs import ExtractedThesis, SupportingReference
+    """Phase 2: Review + group claims per speaker (sequential batches)."""
+    from collections import Counter
+    from datetime import date
+    from src.schemas.llm_outputs import ExtractedThesis
+    from src.transcript.claim_reviewer import (
+        review_batch, make_trivial_review, REVIEW_BATCH_SIZE,
+    )
 
     if phase1_data is None:
         if not os.path.exists(PHASE1_OUTPUT):
@@ -134,6 +139,8 @@ async def run_phase2(phase1_data=None):
     print(f"PHASE 2: Reviewing {len(phase1_data)} claims")
     print(f"{'='*80}")
 
+    current_date = date.today().isoformat()
+
     # Group by speaker
     speaker_theses: dict[str, list[dict]] = {}
     for t in phase1_data:
@@ -143,129 +150,160 @@ async def run_phase2(phase1_data=None):
     for speaker, claims in speaker_theses.items():
         print(f"\n  {speaker}: {len(claims)} claims")
 
-    # Review each speaker
-    all_groups = []
-    all_classifications = []
+    all_speaker_results = {}
 
     for speaker, sp_theses in speaker_theses.items():
         # Reconstruct ExtractedThesis objects
         extracted = []
         for t in sp_theses:
-            refs = [SupportingReference(**r) for r in t.get("supporting_references", [])]
             extracted.append(ExtractedThesis(
                 thesis_statement=t["thesis_statement"],
                 speakers=t.get("speakers", [speaker]),
-                supporting_references=refs,
+                original_quote=t.get("original_quote", ""),
                 topic=t.get("topic", ""),
             ))
 
         if len(extracted) <= 1:
             print(f"\n--- {speaker}: 1 claim, trivial group ---")
-            review = make_trivial_review(extracted)
-        else:
-            print(f"\n--- {speaker}: Reviewing {len(extracted)} claims via LLM ---")
-            review = await review_claims(extracted, speaker, "2026-03-27")
+            review = make_trivial_review(sp_theses[0])
+            all_speaker_results[speaker] = review
+            continue
 
-        # Print classifications
-        print(f"\n  CLASSIFICATIONS:")
-        verifiable_count = 0
-        duplicate_count = 0
-        for cls in review.classifications:
-            marker = ""
-            if cls.is_duplicate:
-                marker = f" [DUP of {cls.duplicate_of}]"
-                duplicate_count += 1
-            if cls.classification == "verifiable_fact" and not cls.is_duplicate:
-                verifiable_count += 1
-            thesis_text = sp_theses[cls.claim_index]["thesis_statement"][:80]
-            print(f"    [{cls.claim_index}] {cls.classification}{marker}")
-            print(f"        \"{thesis_text}...\"")
-            if cls.classification != "verifiable_fact":
-                print(f"        Rationale: {cls.rationale[:100]}")
+        # Sequential batch review (mirrors ReviewClaimsWorkflow logic)
+        total = len(extracted)
+        batch_count = (total + REVIEW_BATCH_SIZE - 1) // REVIEW_BATCH_SIZE
+        print(f"\n--- {speaker}: {total} claims → {batch_count} batches of ~{REVIEW_BATCH_SIZE} ---")
 
-        print(f"\n  SUMMARY: {verifiable_count} verifiable, "
-              f"{duplicate_count} duplicates, "
-              f"{len(review.classifications) - verifiable_count - duplicate_count} filtered")
+        all_dispositions: list[dict] = []
+        groups: dict[str, dict] = {}
 
-        # Print groups
-        print(f"\n  GROUPS ({len(review.groups)}):")
-        for gi, group in enumerate(review.groups):
-            checkable_marker = "CHECKABLE" if group.checkable else "NOT CHECKABLE"
-            print(f"\n    Group {gi} ({checkable_marker}) | Topic: {group.topic}")
-            print(f"    Rationale: {group.group_rationale[:120]}")
-            print(f"    Checkability: {group.checkability_rationale[:120]}")
-            print(f"    Members ({len(group.member_indices)}):")
-            for idx in group.member_indices:
-                thesis_text = sp_theses[idx]["thesis_statement"][:100]
-                print(f"      [{idx}] \"{thesis_text}...\"")
+        for batch_start in range(0, total, REVIEW_BATCH_SIZE):
+            batch_end = min(batch_start + REVIEW_BATCH_SIZE, total)
+            batch_theses = extracted[batch_start:batch_end]
+            batch_num = batch_start // REVIEW_BATCH_SIZE
+            batch_label = f"b{batch_num}"
 
-            # Build group text (what would be sent to verification)
-            member_statements = [sp_theses[idx]["thesis_statement"] for idx in group.member_indices]
-            group_text = "\n".join(member_statements)
+            # Build groups summary for context
+            groups_summary = {}
+            for gid, g in groups.items():
+                groups_summary[gid] = {
+                    "topic": g["topic"],
+                    "member_count": len(g["member_indices"]),
+                    "representative_statement": g["representative_statement"],
+                }
+            existing_group_ids = list(groups.keys())
 
-            # Collect all refs
-            all_refs = set()
-            for idx in group.member_indices:
-                for ref in sp_theses[idx].get("supporting_references", []):
-                    all_refs.add(ref["segment_index"])
+            print(f"\n  Batch {batch_num+1}/{batch_count}: "
+                  f"claims [{batch_start}:{batch_end}], "
+                  f"{len(existing_group_ids)} existing groups")
 
-            all_groups.append({
-                "speaker": speaker,
-                "topic": group.topic,
-                "checkable": group.checkable,
-                "member_count": len(group.member_indices),
-                "group_text": group_text,
-                "ref_segments": sorted(all_refs),
-                "group_rationale": group.group_rationale,
-            })
+            result = await review_batch(
+                theses=batch_theses,
+                speaker=speaker,
+                current_date=current_date,
+                existing_groups=groups_summary,
+                existing_group_ids=existing_group_ids,
+                batch_label=batch_label,
+            )
 
-        all_classifications.extend([
-            {"speaker": speaker, **cls.model_dump()}
-            for cls in review.classifications
-        ])
+            # Process dispositions — remap local to global indices
+            action_counts: Counter = Counter()
+
+            for disp in result.dispositions:
+                global_index = disp.claim_index + batch_start
+                global_disp = {
+                    "claim_index": global_index,
+                    "classification": disp.classification,
+                    "action": disp.action,
+                    "group_id": disp.group_id,
+                    "rationale": disp.rationale,
+                }
+                all_dispositions.append(global_disp)
+                action_counts[disp.action] += 1
+
+                if disp.action == "new_group":
+                    ng_def = next(
+                        ng for ng in result.new_groups
+                        if ng.group_id == disp.group_id
+                    )
+                    groups[disp.group_id] = {
+                        "topic": ng_def.topic,
+                        "checkable": ng_def.checkable,
+                        "checkability_rationale": ng_def.checkability_rationale,
+                        "member_indices": [global_index],
+                        "representative_statement": sp_theses[global_index][
+                            "thesis_statement"
+                        ],
+                    }
+                elif disp.action == "add_to_group":
+                    groups[disp.group_id]["member_indices"].append(global_index)
+
+            print(f"    → {dict(action_counts)}, total groups: {len(groups)}")
+
+        # Print final groups for this speaker
+        checkable = sum(1 for g in groups.values() if g.get("checkable"))
+        print(f"\n  {speaker} DONE: {len(groups)} groups ({checkable} checkable)")
+
+        for gid, group in groups.items():
+            tag = "CHECKABLE" if group.get("checkable") else "NOT CHECKABLE"
+            members = group["member_indices"]
+            print(f"    {gid} ({tag}) | {group['topic']} | {len(members)} members")
+            for idx in members:
+                print(f"      [{idx}] \"{sp_theses[idx]['thesis_statement'][:90]}\"")
+
+        all_speaker_results[speaker] = {
+            "dispositions": all_dispositions,
+            "groups": groups,
+        }
+
+    # Save Phase 2 output
+    with open(PHASE2_OUTPUT, "w") as f:
+        json.dump(all_speaker_results, f, indent=2)
+    print(f"\nPhase 2 output saved to {PHASE2_OUTPUT}")
 
     # Final summary
-    checkable_groups = [g for g in all_groups if g["checkable"]]
+    total_groups = sum(
+        len(r["groups"]) for r in all_speaker_results.values()
+        if isinstance(r.get("groups"), dict)
+    )
+    total_checkable = sum(
+        sum(1 for g in r["groups"].values() if g.get("checkable"))
+        for r in all_speaker_results.values()
+        if isinstance(r.get("groups"), dict)
+    )
+    total_dispositions = sum(
+        len(r["dispositions"]) for r in all_speaker_results.values()
+        if isinstance(r.get("dispositions"), list)
+    )
+
     print(f"\n{'='*80}")
     print(f"PHASE 2 COMPLETE")
     print(f"{'='*80}")
-    print(f"Total groups: {len(all_groups)}")
-    print(f"Checkable groups (→ verification): {len(checkable_groups)}")
-    print(f"Not checkable: {len(all_groups) - len(checkable_groups)}")
+    print(f"Total dispositions: {total_dispositions}")
+    print(f"Total groups: {total_groups}")
+    print(f"Checkable groups (→ verification): {total_checkable}")
 
-    # Classification breakdown
-    class_counts: dict[str, int] = {}
-    dup_count = 0
-    for c in all_classifications:
-        class_counts[c["classification"]] = class_counts.get(c["classification"], 0) + 1
-        if c["is_duplicate"]:
-            dup_count += 1
-    print(f"\nClassification breakdown:")
-    for cls, count in sorted(class_counts.items(), key=lambda x: -x[1]):
-        print(f"  {cls}: {count}")
-    print(f"  duplicates: {dup_count}")
-
-    print(f"\n{'='*80}")
-    print(f"CLAIMS SUBMITTED TO VERIFICATION PIPELINE ({len(checkable_groups)}):")
-    print(f"{'='*80}")
-    for i, g in enumerate(checkable_groups, 1):
-        print(f"\n--- Verification Claim {i} | {g['speaker']} | {g['topic']} | "
-              f"{g['member_count']} member(s) | refs: {g['ref_segments']}")
-        print(f"    Rationale: {g['group_rationale'][:120]}")
-        print(f"    Text sent to decompose:")
-        for line in g["group_text"].split("\n"):
-            print(f"      > {line}")
-
-    return all_groups
+    return all_speaker_results
 
 
 async def main():
     args = sys.argv[1:]
 
+    # --limit N: only process first N claims in phase2
+    limit = None
+    for i, a in enumerate(args):
+        if a == "--limit" and i + 1 < len(args):
+            limit = int(args[i + 1])
+
     if "--phase1" in args:
         await run_phase1()
     elif "--phase2" in args:
-        await run_phase2()
+        phase1_data = None
+        if limit:
+            with open(PHASE1_OUTPUT) as f:
+                phase1_data = json.load(f)[:limit]
+            print(f"(Limited to first {limit} claims)")
+        await run_phase2(phase1_data)
     else:
         # Run both
         phase1_data = await run_phase1()

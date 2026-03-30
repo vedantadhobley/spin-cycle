@@ -24,7 +24,7 @@ import json
 import re
 import asyncio
 
-from src.transcript.parsers import TranscriptData, NumberedSegment
+from src.transcript.parsers import TranscriptData, SpeakerTurn, normalize_turns
 from src.utils.logging import log, get_logger
 
 MODULE = "cspan"
@@ -232,39 +232,6 @@ def _clean_caption_text(text: str) -> str:
     return collapsed
 
 
-def _parse_offset(offset) -> str | None:
-    """Parse C-SPAN offset field (HH:MM:SS or seconds) into timestamp string."""
-    if not offset:
-        return None
-    offset_str = str(offset)
-    # Format: "HH:MM:SS" or "-1:-1:-35" (pre-show)
-    if ":" in offset_str:
-        parts = offset_str.split(":")
-        if len(parts) == 3:
-            try:
-                h, m, s = int(parts[0]), int(parts[1]), int(parts[2])
-                if h < 0 or m < 0 or s < 0:
-                    return None
-                if h > 0:
-                    return f"{h}:{m:02d}:{s:02d}"
-                return f"{m}:{s:02d}"
-            except ValueError:
-                return None
-    # Numeric offset in seconds
-    try:
-        total_secs = int(float(offset_str))
-        if total_secs < 0:
-            return None
-        hours = total_secs // 3600
-        minutes = (total_secs % 3600) // 60
-        secs = total_secs % 60
-        if hours:
-            return f"{hours}:{minutes:02d}:{secs:02d}"
-        return f"{minutes}:{secs:02d}"
-    except (ValueError, TypeError):
-        return None
-
-
 # ---------------------------------------------------------------------------
 # Speaker attribution
 # ---------------------------------------------------------------------------
@@ -321,30 +288,30 @@ def _build_cc_name_map(cc_names: list[str], person_names: list[str]) -> dict[str
     return mapping
 
 
-def _attribute_unnamed_segments(
-    segments: list,
+def _attribute_unnamed_turns(
+    turns: list[SpeakerTurn],
     person_names: list[str],
     cc_name_map: dict[str, str],
 ) -> None:
-    """Attribute unnamed (>>) segments using the primary speaker heuristic.
+    """Attribute unnamed (>>) turns using the primary speaker heuristic.
 
     If there's one dominant speaker (from person links or cc_name labels),
-    assign long unnamed segments to them and short question segments to
+    assign long unnamed turns to them and short question turns to
     "Reporter".
 
-    Modifies segments in place.
+    Modifies turns in place.
     """
     if not person_names:
         return
 
     # Determine the primary speaker: if only one person is listed, use them.
-    # If multiple, check if one dominates the named segments.
+    # If multiple, check if one dominates the named turns.
     named_counts: dict[str, int] = {}
-    for seg in segments:
-        if seg.speaker not in ("Unknown", "Reporter"):
-            named_counts[seg.speaker] = named_counts.get(seg.speaker, 0) + 1
+    for turn in turns:
+        if turn.speaker not in ("Unknown", "Reporter"):
+            named_counts[turn.speaker] = named_counts.get(turn.speaker, 0) + 1
 
-    # Candidates: person link names + anyone who already has named segments
+    # Candidates: person link names + anyone who already has named turns
     primary = None
     if len(person_names) == 1:
         primary = person_names[0]
@@ -352,30 +319,30 @@ def _attribute_unnamed_segments(
         # Use the most frequently named speaker
         top_speaker = max(named_counts, key=named_counts.get)
         total_named = sum(named_counts.values())
-        # Only use as primary if they dominate (>60% of named segments)
+        # Only use as primary if they dominate (>60% of named turns)
         if named_counts[top_speaker] / total_named > 0.6:
             primary = top_speaker
 
     if not primary:
         return
 
-    unknown_count = sum(1 for s in segments if s.speaker == "Unknown")
+    unknown_count = sum(1 for t in turns if t.speaker == "Unknown")
     if unknown_count == 0:
         return
 
     log.info(logger, MODULE, "speaker_attribution",
-             "Attributing unnamed segments",
+             "Attributing unnamed turns",
              primary_speaker=primary, unnamed_count=unknown_count)
 
-    for seg in segments:
-        if seg.speaker != "Unknown":
+    for turn in turns:
+        if turn.speaker != "Unknown":
             continue
-        words = len(seg.text.split())
-        has_question = "?" in seg.text
+        words = len(turn.text.split())
+        has_question = "?" in turn.text
         if words <= _REPORTER_MAX_WORDS and has_question:
-            seg.speaker = "Reporter"
+            turn.speaker = "Reporter"
         else:
-            seg.speaker = primary
+            turn.speaker = primary
 
 
 # ---------------------------------------------------------------------------
@@ -463,7 +430,7 @@ async def fetch_cspan_transcript(url_or_id: str) -> TranscriptData:
 
     # Parse transcript parts
     parts = transcript_json["parts"]
-    segments: list[NumberedSegment] = []
+    raw_turns: list[SpeakerTurn] = []
     raw_speakers: list[str] = []
 
     # Collect unique cc_names for mapping
@@ -500,23 +467,19 @@ async def fetch_cspan_transcript(url_or_id: str) -> TranscriptData:
         if not text:
             continue
 
-        timestamp = _parse_offset(part.get("offset"))
+        raw_turns.append(SpeakerTurn(speaker=speaker, text=text))
 
-        segments.append(NumberedSegment(
-            index=len(segments),
-            speaker=speaker,
-            text=text,
-            timestamp=timestamp,
-        ))
+    if not raw_turns:
+        raise ValueError(f"No transcript turns parsed for program {program_id}")
 
-    if not segments:
-        raise ValueError(f"No transcript segments parsed for program {program_id}")
+    # Attribute unnamed turns using primary speaker heuristic
+    _attribute_unnamed_turns(raw_turns, person_names, cc_name_map)
 
-    # Attribute unnamed segments using primary speaker heuristic
-    _attribute_unnamed_segments(segments, person_names, cc_name_map)
+    # Merge consecutive same-speaker caption fragments
+    turns = normalize_turns(raw_turns)
 
-    # Build speaker list from what's actually in the segments now
-    segment_speakers = list(dict.fromkeys(s.speaker for s in segments))
+    # Build speaker list from what's actually in the turns now
+    turn_speakers = list(dict.fromkeys(t.speaker for t in turns))
 
     # Build aliases: cc_name → proper name (or honorific-stripped)
     aliases: dict[str, list[str]] = {}
@@ -530,7 +493,7 @@ async def fetch_cspan_transcript(url_or_id: str) -> TranscriptData:
 
     log.info(logger, MODULE, "fetch_done", "C-SPAN transcript fetched",
              program_id=program_id, title=title,
-             segment_count=len(segments), speaker_count=len(segment_speakers),
+             turn_count=len(turns), speaker_count=len(turn_speakers),
              person_names=person_names,
              cc_name_mapping=cc_name_map)
 
@@ -538,8 +501,8 @@ async def fetch_cspan_transcript(url_or_id: str) -> TranscriptData:
         url=url,
         title=title,
         date=date,
-        speakers=segment_speakers,
-        segments=segments,
+        speakers=turn_speakers,
+        turns=turns,
         source_format="cspan",
         speaker_aliases=aliases if aliases else {},
     )

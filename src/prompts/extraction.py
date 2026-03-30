@@ -1,15 +1,13 @@
 """Prompts for transcript claim extraction (Phase 1).
 
-The extraction LLM receives a chunk of transcript with numbered segments and
-extracts EVERY verifiable factual claim, each with supporting segment
-references.
+The extraction LLM receives a chunk of transcript (screenplay-formatted
+speaker turns) and extracts EVERY verifiable factual claim with a verbatim
+original_quote from the speaker.
 
 Key design:
 - Extract exhaustively — every factual claim, no target count
-- Merge repetitions: same claim in segments 5, 23, 41 → one claim with
-  three supporting references
-- Segment numbers must match [N] labels in transcript
-- Excerpts must be actual words from the segment, not paraphrased
+- Merge repetitions: same claim said twice → one claim
+- original_quote must be verbatim words from the transcript
 - Checkability assessment is deferred to Phase 2 (claim review)
 """
 
@@ -25,14 +23,13 @@ Today's date: {current_date}
 
 ## Your Task
 
-You receive transcript segments numbered [0], [1], [2], etc. Extract every \
+You receive transcript text formatted as "Speaker: text". Extract every \
 distinct factual claim that speakers make. Be exhaustive — miss nothing.
 
 ## What Is a Claim?
 
 A claim is a factual assertion that could be checked against evidence. \
-If a speaker makes the same point across segments [5], [23], and [41], \
-that is ONE claim with THREE supporting references.
+If a speaker makes the same point multiple times, that is ONE claim.
 
 EXTRACT:
 - Quantitative claims (amounts, percentages, rankings)
@@ -50,22 +47,18 @@ SKIP:
 
 ## Step 1 — Extract Claims
 
-Read every segment carefully. For each factual assertion, write a \
+Read every speaker turn carefully. For each factual assertion, write a \
 thesis_statement that:
 - Is NEUTRAL and DECONTEXTUALIZED (no pronouns, no "we", no "they")
 - Replaces ALL pronouns with specific entities
 - Could be understood by someone who hasn't read the transcript
 - Captures the FULL claim, not just one sentence of it
 
-## Step 2 — Attach Supporting References
+## Step 2 — Copy Original Quote
 
-For each claim, list ALL segments where it appears. Each reference has:
-- segment_index: the [N] number from the transcript
-- excerpt: the ACTUAL first 15-20 words from that passage (copy directly, \
-do not paraphrase)
-
-CRITICAL: segment_index must be an actual [N] label from the transcript. \
-Excerpts must be real words from that segment — the system verifies them.
+For each claim, copy the VERBATIM words from the speaker that express \
+the claim. This must be an exact substring of the transcript text — \
+the system verifies this programmatically.
 
 ## Step 3 — Classify Topic
 
@@ -76,9 +69,10 @@ diplomatic, technological, environmental, health, or other.
 
 1. [Section: ...] headers in the transcript are editorial context, NOT spoken words
 2. Extract EVERY factual claim — do not skip or summarize
-3. Merge repetitions — same point in multiple segments = ONE claim with multiple references
-4. Every claim needs at least 1 supporting reference
-5. Excerpts must be copied from the transcript, not invented\
+3. Merge repetitions — same point said multiple times = ONE claim
+4. Every claim needs a verbatim original_quote from the transcript
+5. If sections are marked "Context (do not extract claims from this section)", \
+only extract from the section marked for extraction\
 """
 
 # ---------------------------------------------------------------------------
@@ -87,9 +81,9 @@ diplomatic, technological, environmental, health, or other.
 
 THESIS_EXTRACTION_USER = """\
 Extract every factual claim from this transcript.
-{chunk_boundary}
+
 ## Transcript
-{numbered_transcript}
+{transcript_text}
 
 ## Context
 {context_note}
@@ -103,25 +97,11 @@ Return JSON:
     {{
       "thesis_statement": "Neutral, decontextualized claim statement",
       "speakers": ["Speaker Name"],
-      "supporting_references": [
-        {{"segment_index": 0, "excerpt": "First 15-20 words from segment..."}},
-        {{"segment_index": 5, "excerpt": "First 15-20 words from segment..."}}
-      ],
+      "original_quote": "Exact verbatim words from the speaker in the transcript",
       "topic": "military"
     }}
   ]
 }}\
-"""
-
-
-# ---------------------------------------------------------------------------
-# Chunk boundary instruction (inserted into user prompt when processing chunks)
-# ---------------------------------------------------------------------------
-
-CHUNK_BOUNDARY_INSTRUCTION = """
-## Extraction Scope
-Extract claims ONLY from segments [{target_start}] through [{target_end}]. \
-Surrounding segments are provided as context only — do NOT extract claims from them.
 """
 
 

@@ -48,13 +48,8 @@ with workflow.unsafe.imports_passed_through():
 
 MODULE = "workflow"
 
-# Maximum atomic facts to process. If decomposition returns more, we cap it.
-# 10 facts × ~4 min each ÷ 2 concurrent = ~20 min total.
-MAX_FACTS = 10
-
-# Maximum concurrent research+judge pipelines. Matched to --parallel 2 on
-# the LLM server — 2 slots × 65K context each (131K total ctx-size).
-MAX_CONCURRENT = 2
+with workflow.unsafe.imports_passed_through():
+    from src.config import MAX_FACTS, MAX_CONCURRENT, MAX_ALL_PARTIES
 
 # Search attribute keys for Temporal UI visibility
 SA_PHASE = SearchAttributeKey.for_keyword("Phase")
@@ -314,7 +309,6 @@ class VerifyClaimWorkflow:
                     merged_affiliated_media.update(enriched.get("affiliated_media", []))
 
         # Build merged interested parties for the judge phase
-        MAX_ALL_PARTIES = 40
         merged_parties_list = list(merged_all_parties)
         if len(merged_parties_list) > MAX_ALL_PARTIES:
             log.warning(workflow.logger, MODULE, "parties_capped",

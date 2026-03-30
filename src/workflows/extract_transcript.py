@@ -46,7 +46,7 @@ with workflow.unsafe.imports_passed_through():
     from src.workflows.synthesize_claims import SynthesizeClaimsWorkflow
     from src.utils.logging import log
     from src.transcript.thesis_extractor import build_chunks
-    from src.transcript.parsers import NumberedSegment
+    from src.transcript.parsers import SpeakerTurn
     from src.transcript.claim_reviewer import make_trivial_review
 
 MODULE = "transcript_workflow"
@@ -76,7 +76,7 @@ class ExtractTranscriptWorkflow:
         self._url = ""
         self._title = ""
         self._word_count = 0
-        self._segment_count = 0
+        self._turn_count = 0
         self._speakers: list[str] = []
         self._thesis_count = 0
         self._claim_count = 0
@@ -93,7 +93,7 @@ class ExtractTranscriptWorkflow:
             "url": self._url,
             "title": self._title,
             "word_count": self._word_count,
-            "segment_count": self._segment_count,
+            "turn_count": self._turn_count,
             "speakers": self._speakers,
             "thesis_count": self._thesis_count,
             "claim_count": self._claim_count,
@@ -156,13 +156,10 @@ class ExtractTranscriptWorkflow:
             )
             if "source_format" not in transcript_data:
                 transcript_data["source_format"] = "revcom"
-                for i, seg in enumerate(transcript_data["segments"]):
-                    if "index" not in seg:
-                        seg["index"] = i
 
         self._title = transcript_data["title"]
         self._word_count = transcript_data["word_count"]
-        self._segment_count = len(transcript_data["segments"])
+        self._turn_count = len(transcript_data["turns"])
         self._speakers = transcript_data["speakers"]
 
         workflow.upsert_search_attributes([
@@ -173,7 +170,7 @@ class ExtractTranscriptWorkflow:
                  "Transcript fetched",
                  title=self._title,
                  word_count=self._word_count,
-                 segment_count=self._segment_count,
+                 turn_count=self._turn_count,
                  speakers=self._speakers)
 
         if stop_after == "fetch":
@@ -181,7 +178,7 @@ class ExtractTranscriptWorkflow:
             return {
                 "url": url, "title": self._title,
                 "word_count": self._word_count,
-                "segment_count": self._segment_count,
+                "turn_count": self._turn_count,
                 "speakers": self._speakers,
                 "transcript_data": transcript_data,
                 "stopped_after": "fetch",
@@ -209,7 +206,7 @@ class ExtractTranscriptWorkflow:
             return {
                 "url": url, "title": self._title,
                 "word_count": self._word_count,
-                "segment_count": self._segment_count,
+                "turn_count": self._turn_count,
                 "speakers": self._speakers,
                 "transcript_id": self._transcript_id,
                 "enriched_speakers": enriched_speakers,
@@ -220,14 +217,14 @@ class ExtractTranscriptWorkflow:
         self._set_phase("extracting_claims")
 
         # Build chunks (deterministic, pure function — safe in workflow)
-        segments = [
-            NumberedSegment(
-                index=s["index"], speaker=s["speaker"], text=s["text"],
-                timestamp=s.get("timestamp"), section_header=s.get("section_header"),
+        turns = [
+            SpeakerTurn(
+                speaker=t["speaker"], text=t["text"],
+                section_header=t.get("section_header"),
             )
-            for s in transcript_data["segments"]
+            for t in transcript_data["turns"]
         ]
-        chunks = build_chunks(segments)
+        chunks = build_chunks(turns)
 
         log.info(workflow.logger, MODULE, "chunks_planned",
                  f"Planned {len(chunks)} chunks for extraction",
@@ -240,10 +237,12 @@ class ExtractTranscriptWorkflow:
             chunk_futures = []
             for chunk in batch:
                 chunk_dict = {
-                    "target_start": chunk.target_start,
-                    "target_end": chunk.target_end,
-                    "context_start": chunk.context_start,
-                    "context_end": chunk.context_end,
+                    "target_text": chunk.target_text,
+                    "context_before": chunk.context_before,
+                    "context_after": chunk.context_after,
+                    "full_text": chunk.full_text,
+                    "chunk_index": chunk.chunk_index,
+                    "total_chunks": chunk.total_chunks,
                 }
                 chunk_futures.append(
                     workflow.execute_activity(
@@ -293,7 +292,7 @@ class ExtractTranscriptWorkflow:
             return {
                 "url": url, "title": self._title,
                 "word_count": self._word_count,
-                "segment_count": self._segment_count,
+                "turn_count": self._turn_count,
                 "speakers": self._speakers,
                 "transcript_id": self._transcript_id,
                 "thesis_count": self._thesis_count,
@@ -417,7 +416,7 @@ class ExtractTranscriptWorkflow:
             return {
                 "url": url, "title": self._title,
                 "word_count": self._word_count,
-                "segment_count": self._segment_count,
+                "turn_count": self._turn_count,
                 "speakers": self._speakers,
                 "transcript_id": self._transcript_id,
                 "thesis_count": self._thesis_count,
@@ -519,7 +518,7 @@ class ExtractTranscriptWorkflow:
             return {
                 "url": url, "title": self._title,
                 "word_count": self._word_count,
-                "segment_count": self._segment_count,
+                "turn_count": self._turn_count,
                 "speakers": self._speakers,
                 "transcript_id": self._transcript_id,
                 "thesis_count": self._thesis_count,
@@ -598,16 +597,8 @@ class ExtractTranscriptWorkflow:
                     speaker_name = group["speaker"]
                     speaker_desc = speaker_descriptions.get(speaker_name, "")
 
-                    # Collect supporting quote texts from ALL member refs
-                    supporting_quotes = []
-                    for ref in group.get("supporting_references", []):
-                        seg_idx = ref.get("segment_index")
-                        if seg_idx is not None:
-                            for seg in transcript_data["segments"]:
-                                if seg.get("index") == seg_idx:
-                                    if seg["text"] not in supporting_quotes:
-                                        supporting_quotes.append(seg["text"])
-                                    break
+                    # Collect original quotes from all member theses
+                    supporting_quotes = group.get("original_quotes", [])
 
                     await workflow.execute_child_workflow(
                         VerifyClaimWorkflow.run,
@@ -675,7 +666,7 @@ class ExtractTranscriptWorkflow:
             "url": url,
             "title": self._title,
             "word_count": self._word_count,
-            "segment_count": self._segment_count,
+            "turn_count": self._turn_count,
             "speakers": self._speakers,
             "thesis_count": self._thesis_count,
             "claim_count": self._claim_count,
@@ -769,17 +760,15 @@ def _collect_all_groups(
         for gid, g in result["groups"].items():
             member_indices = g["member_indices"]
 
-            # Collect supporting references from all members
-            member_refs = []
+            # Collect original quotes from all member theses (deduped)
+            original_quotes = []
+            seen_quotes: set[str] = set()
             for gi in member_indices:
                 t = all_theses[gi]
-                for ref in t.get("supporting_references", []):
-                    seg_idx = ref.get("segment_index")
-                    if seg_idx is not None and not any(
-                        r.get("segment_index") == seg_idx for r in member_refs
-                    ):
-                        member_refs.append(ref)
-            member_refs.sort(key=lambda r: r.get("segment_index", 0))
+                quote = t.get("original_quote", "")
+                if quote and quote not in seen_quotes:
+                    original_quotes.append(quote)
+                    seen_quotes.add(quote)
 
             # Default claim_text is concatenation (replaced by synthesis later)
             member_stmts = [
@@ -795,7 +784,7 @@ def _collect_all_groups(
                 "checkability_rationale": g.get("checkability_rationale", ""),
                 "member_global_indices": member_indices,
                 "claim_text": "\n".join(member_stmts),
-                "supporting_references": member_refs,
+                "original_quotes": original_quotes,
             })
 
     return all_groups

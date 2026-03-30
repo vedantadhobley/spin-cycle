@@ -353,9 +353,12 @@ spin-cycle/
 │   │   ├── wikipedia.py            # Wikipedia API
 │   │   └── page_fetcher.py         # URL → text extraction + SpaCy entity metadata
 │   │
+│   ├── config.py                   # Centralized constants (timeouts, batch sizes, thresholds)
+│   │
 │   ├── prompts/                    # LLM prompts (heavily documented)
 │   │   ├── verification.py         # Normalize, Decompose, Research, Judge, Synthesize
-│   │   └── extraction.py           # Transcript claim extraction
+│   │   ├── extraction.py           # Thesis extraction (Phase 1)
+│   │   └── claim_review.py         # Claim review + synthesis (Phase 2/2b)
 │   │
 │   ├── schemas/                    # Data schemas
 │   │   ├── api.py                  # Pydantic API request/response models
@@ -364,15 +367,23 @@ spin-cycle/
 │   │
 │   ├── workflows/
 │   │   ├── verify.py               # VerifyClaimWorkflow (7 activities)
-│   │   └── extract_transcript.py   # ExtractTranscriptWorkflow (8 activities)
+│   │   ├── extract_transcript.py   # ExtractTranscriptWorkflow (8 phases)
+│   │   ├── review_claims.py        # ReviewClaimsWorkflow (sequential batch review)
+│   │   └── synthesize_claims.py    # SynthesizeClaimsWorkflow (parallel pair synthesis)
 │   │
 │   ├── activities/
 │   │   ├── verify_activities.py    # Verification activities (decompose, research, judge, synthesize, store)
-│   │   └── transcript_activities.py # Transcript activities (fetch, extract, finalize, store)
+│   │   └── transcript_activities.py # Transcript activities (fetch, extract, review, synthesize, store)
 │   │
 │   ├── transcript/                 # Transcript processing
-│   │   ├── fetcher.py              # Rev.com transcript fetcher + parser
-│   │   └── extractor.py            # Segment-batched claim extraction (programmatic filtering)
+│   │   ├── parsers/                # Transcript parsers (SpeakerTurn, normalize_turns)
+│   │   │   ├── __init__.py         # SpeakerTurn, TranscriptData, normalize_turns()
+│   │   │   └── raw_text.py         # Raw text parser
+│   │   ├── cspan.py                # C-SPAN Playwright fetcher + parser
+│   │   ├── thesis_extractor.py     # Word-based chunking + extraction (Phase 1)
+│   │   ├── claim_reviewer.py       # Sequential batch review (Phase 2)
+│   │   ├── claim_synthesizer.py    # Per-group overarching claim (Phase 2b)
+│   │   └── speakers.py             # Wikidata speaker enrichment
 │   │
 │   └── db/
 │       ├── models.py               # SQLAlchemy models (9 tables)
@@ -401,8 +412,9 @@ Data flows via structured JSON logs → Promtail → Loki → Grafana.
 
 ## What's Next
 
-1. **Alembic migrations** — proper database schema versioning (currently using `_migrate()` with raw SQL ALTER TABLE)
-2. **Calibration test suite** — benchmark against known claims to measure accuracy
-3. **LangFuse** — self-hosted LLM observability for prompt debugging
+1. **Embedding-based dedup** — Replace LLM-based claim grouping with embedding similarity clustering. The current sequential batch review doesn't scale (see ARCHITECTURE.md § Deduplication Strategy). Local embedding model (Qwen3-Embedding-8B) already configured.
+2. **Alembic migrations** — proper database schema versioning (currently using `_migrate()` with raw SQL ALTER TABLE)
+3. **Calibration test suite** — benchmark against known claims to measure accuracy
+4. **LangFuse** — self-hosted LLM observability for prompt debugging
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full technical deep dive.

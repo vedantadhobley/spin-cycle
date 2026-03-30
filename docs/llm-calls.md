@@ -10,8 +10,11 @@ behavior. Updated 2026-03-25 (calibration rules restoration, relay detection, Wi
 
 ```mermaid
 flowchart TD
-    T[Transcript] --> EXT["EXTRACT — 1 LLM call (extraction)"]
-    EXT --> RAW[Raw Claim]
+    T[Transcript] --> CHUNK["CHUNK — word-based splits (~2500w, ~500w overlap)"]
+    CHUNK --> EXT["EXTRACT — 1 LLM call per chunk (thesis extraction)"]
+    EXT --> REVIEW["REVIEW — classify + group per speaker (batches of ~25)"]
+    REVIEW --> SYNTH_C["SYNTHESIZE CLAIMS — 1 LLM call per group"]
+    SYNTH_C --> RAW[Checkable Claim]
     RAW --> NORM["NORMALIZE — 1 LLM call"]
     NORM --> DEC["DECOMPOSE — 1 LLM call\n+ programmatic dedup + Wikidata expansion + aliases"]
     DEC --> RES["RESEARCH — LangGraph ReAct agent (8-12 tool calls)\n+ programmatic seed pipeline\n+ relevance filter (programmatic)"]
@@ -31,70 +34,83 @@ Server: `--parallel 2 --ctx-size 131072` (2 slots x 65K context each, ~3 GB KV c
 
 ---
 
-## Call 1: Extract Claims from Transcript
+## Call 1: Extract Theses from Transcript (Phase 1)
 
-**When**: Processing a transcript (not used for direct claim submissions).
+**When**: Processing a transcript (not used for direct claim submissions). One LLM call per chunk.
 
 **Files**:
-- Prompts: `src/prompts/extraction.py` — `EXTRACTION_SYSTEM` (L18), `EXTRACTION_USER` (L93)
-- Invoker: `src/transcript/extractor.py`
-- Schema: `src/transcript/extractor.py` — `ExtractionOutput` (L70), `SegmentExtraction` (L63), `ExtractedClaim` (L50)
-- Validator: `src/llm/validators.py` — `validate_extraction()`
+- Prompts: `src/prompts/extraction.py` — `THESIS_EXTRACTION_SYSTEM`, `THESIS_EXTRACTION_USER`
+- Invoker: `src/transcript/thesis_extractor.py` — `extract_chunk()`
+- Schema: `src/schemas/llm_outputs.py` — `ThesisExtractionOutput`, `ExtractedThesis`
+- Validator: `src/llm/validators.py` — `validate_thesis_extraction()`
 
-**Temperature**: 0.0 initial, 0.3 on retry. **Retries**: 1 (only if <50% segment coverage).
+**Temperature**: 0.0. **Retries**: 2. **Max tokens**: 16384.
 
-**Placeholders**: `{current_date}`, `{transcript_text}`, `{segment_manifest}`, `{context_note}`
+**Placeholders**: `{current_date}`, `{transcript_text}`, `{context_note}`, `{speaker_descriptions}`
 
 ### What it does
 
-Processes transcript segments, identifying every factual assertion. For each,
-assesses checkability (could independent data confirm/deny this?) and resolves
-pronouns/ambiguous references via square bracket insertion. No editorial
-judgment at extraction time — filtering is entirely programmatic.
+Extracts every verifiable factual thesis from a transcript chunk. The transcript is
+split into overlapping word-based chunks (~2500 words target, ~500 words overlap each side)
+by `build_chunks()`. Each chunk is sent to the LLM with text section markers (`## Extract claims
+from this section` / `## Context (do not extract)`). The LLM returns thesis statements with
+verbatim `original_quote` attribution.
 
 ### Structured output
 
 ```
-ExtractionOutput
-  segments: list[SegmentExtraction]
-    speaker: str
-    segment_gist: str          ← FORCING: 1-sentence segment purpose
-    assertion_count: int       ← FORCING: count before listing
-    claims: list[ExtractedClaim]
-      claim_text: str          ← decontextualized — pronouns resolved, stands alone
-      original_quote: str      ← speaker's exact words
-      speaker: str             ← propagated from segment level
-      checkable: bool
-      checkability_rationale: str
-      is_restatement: bool
-      worth_checking: bool     ← computed: checkable AND NOT restatement
-      skip_reason: str?        ← set programmatically if not worth checking
+ThesisExtractionOutput
+  theses: list[ExtractedThesis]
+    thesis_statement: str      ← decontextualized verifiable claim
+    speakers: list[str]        ← who made this claim
+    original_quote: str        ← verbatim speaker words (for frontend highlighting)
+    topic: str                 ← topic area (military, economic, political, etc.)
 ```
-
-Fields computed programmatically (not in LLM output):
-- `worth_checking: bool` — checkable AND NOT is_restatement AND NOT future_prediction
-- `skip_reason: str?` — "not_checkable", "restatement", or "future_prediction"
-
-### Key rules
-
-- **5-step process**: segment_gist → identify assertions → checkability →
-  bracket insertion → restatement detection
-- **Bracket insertion**: Resolve pronouns (he/she/they/their/it/we/our/I),
-  ambiguous noun phrases ("the company", "the bill"). Do NOT bracket
-  temporal references or already-explicit terms.
-- **Bracket examples**: "Their naval building was destroyed" → "[Iran's]
-  naval building was destroyed". "We will defend our allies" →
-  "[The United States] will defend [its] allies"
-- **worth_checking**: Computed programmatically — `checkable AND NOT
-  is_restatement AND NOT future_prediction`. No editorial judgment.
-- **Future predictions**: Regex-detected post-LLM → forced to
-  checkable=False, worth_checking=False
 
 ### Post-LLM enforcement
 
-- Future prediction regex → checkable=False, worth_checking=False, skip_reason="future_prediction"
-- is_restatement → worth_checking=False, skip_reason="restatement"
-- not checkable → worth_checking=False, skip_reason="not_checkable"
+- `_validate_quotes_in_target()`: Drops claims whose `original_quote` doesn't appear
+  (case-insensitive substring) in `chunk.target_text`. Catches claims hallucinated from
+  context sections or with fabricated quotes.
+- Drops quotes shorter than 10 characters.
+
+## Call 1b: Claim Review (Phase 2)
+
+**When**: After all chunks are extracted. Per-speaker sequential batches of ~25 claims.
+
+**Files**:
+- Prompts: `src/prompts/claim_review.py` — `REVIEW_BATCH_SYSTEM`, `REVIEW_BATCH_USER`
+- Invoker: `src/transcript/claim_reviewer.py` — `review_batch()`
+- Schema: `src/schemas/llm_outputs.py` — `ReviewBatchOutput`, `ClaimDisposition`, `NewGroup`
+- Validator: `src/llm/validators.py` — `validate_review_batch()`
+
+**Temperature**: 0.0. **Retries**: 2. **Max tokens**: 16384.
+
+### What it does
+
+Classifies each claim (verifiable_fact / future_prediction / subjective_opinion / procedural /
+vague_rhetoric) and assigns to groups. Sequential batches with accumulating group context.
+
+**Known issue**: The LLM does not effectively use `add_to_group` — it creates a new group per claim,
+causing context to grow unboundedly until validation failures crash the pipeline. Planned replacement
+with embedding-based dedup (see ARCHITECTURE.md § Deduplication Strategy).
+
+## Call 1c: Claim Synthesis (Phase 2b)
+
+**When**: After review, for each multi-member group.
+
+**Files**:
+- Prompts: `src/prompts/claim_review.py` — `SYNTHESIZE_CLAIM_SYSTEM`, `SYNTHESIZE_CLAIM_USER`
+- Invoker: `src/transcript/claim_synthesizer.py` — `synthesize_claim()`
+- Schema: `src/schemas/llm_outputs.py` — `SynthesizedClaimOutput`
+- Validator: `src/llm/validators.py` — `validate_synthesized_claim()`
+
+**Temperature**: 0.0. **Retries**: 2. **Max tokens**: 4096.
+
+### What it does
+
+Produces a single clean verifiable statement for groups with multiple member claims.
+Resolves pronouns, adds necessary context. Parallel execution (2 at a time).
 
 ---
 

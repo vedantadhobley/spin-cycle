@@ -1181,8 +1181,7 @@ async def _enrich_parties_from_evidence_content(
 
     await asyncio.gather(*[_expand_entity(e) for e in new_entities[:8]])
 
-    # Hard cap to prevent party explosion
-    MAX_ALL_PARTIES = 40
+    from src.config import MAX_ALL_PARTIES
     if len(enriched_parties) > MAX_ALL_PARTIES:
         log.warning(logger, MODULE, "parties_capped",
                     "Capping all_parties to prevent explosion",

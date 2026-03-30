@@ -4,8 +4,8 @@ All transcript parsers produce the same TranscriptData structure regardless of
 source format (C-SPAN JSON, raw text, etc.).  The registry dispatches URL or
 content to the appropriate parser.
 
-TranscriptData carries numbered segments with stable integer indices used as
-reference keys throughout the thesis extraction pipeline.
+Parsers produce SpeakerTurn lists which are normalized via normalize_turns(),
+then chunked by the thesis_extractor for LLM consumption.
 """
 
 from __future__ import annotations
@@ -20,13 +20,11 @@ from typing import Callable, Awaitable
 # ---------------------------------------------------------------------------
 
 @dataclass
-class NumberedSegment:
-    """A single speaker segment with a stable integer index."""
-    index: int              # 0-based, stable across pipeline
+class SpeakerTurn:
+    """A single speaker turn — one contiguous block of speech by one person."""
     speaker: str            # normalized canonical name
     text: str
-    timestamp: str | None = None
-    section_header: str | None = None  # editorial header preceding this segment
+    section_header: str | None = None  # editorial header preceding this turn
 
 
 @dataclass
@@ -36,55 +34,60 @@ class TranscriptData:
     title: str
     date: str | None
     speakers: list[str]                         # normalized, deduplicated
-    segments: list[NumberedSegment]
+    turns: list[SpeakerTurn]
     source_format: str                          # "raw_text", "revcom", "cspan"
     speaker_aliases: dict[str, list[str]] = field(default_factory=dict)  # canonical → variants
     editors_note: str | None = None
 
     @property
     def word_count(self) -> int:
-        return sum(len(seg.text.split()) for seg in self.segments)
+        return sum(len(t.text.split()) for t in self.turns)
 
     @property
-    def segment_count(self) -> int:
-        return len(self.segments)
-
-    @property
-    def numbered_text(self) -> str:
-        """Format for LLM consumption: [0] SPEAKER: text"""
-        parts = []
-        for seg in self.segments:
-            header = ""
-            if seg.section_header:
-                header = f"[Section: {seg.section_header}]\n"
-            parts.append(f"{header}[{seg.index}] {seg.speaker}: {seg.text}")
-        return "\n\n".join(parts)
+    def turn_count(self) -> int:
+        return len(self.turns)
 
     @property
     def display_text(self) -> str:
-        """Merged same-speaker consecutive segments for frontend display."""
-        if not self.segments:
+        """Screenplay-formatted text for frontend display."""
+        if not self.turns:
             return ""
         blocks: list[str] = []
-        current_speaker = self.segments[0].speaker
-        current_paragraphs: list[str] = [self.segments[0].text]
-
-        for seg in self.segments[1:]:
-            if seg.speaker == current_speaker:
-                current_paragraphs.append(seg.text)
-            else:
-                blocks.append(
-                    f"{current_speaker}:\n"
-                    + "\n\n".join(current_paragraphs)
-                )
-                current_speaker = seg.speaker
-                current_paragraphs = [seg.text]
-
-        blocks.append(
-            f"{current_speaker}:\n"
-            + "\n\n".join(current_paragraphs)
-        )
+        for turn in self.turns:
+            blocks.append(f"{turn.speaker}: {turn.text}")
         return "\n\n".join(blocks)
+
+
+def normalize_turns(turns: list[SpeakerTurn]) -> list[SpeakerTurn]:
+    """Merge consecutive same-speaker turns (e.g. C-SPAN caption fragments).
+
+    Does NOT merge across section_header boundaries — a new header starts a
+    new turn even if the speaker is the same.
+    """
+    if not turns:
+        return []
+
+    merged: list[SpeakerTurn] = [
+        SpeakerTurn(
+            speaker=turns[0].speaker,
+            text=turns[0].text,
+            section_header=turns[0].section_header,
+        )
+    ]
+
+    for turn in turns[1:]:
+        prev = merged[-1]
+        # Merge if same speaker AND no new section header
+        if turn.speaker == prev.speaker and turn.section_header is None:
+            prev.text = prev.text + "\n\n" + turn.text
+        else:
+            merged.append(SpeakerTurn(
+                speaker=turn.speaker,
+                text=turn.text,
+                section_header=turn.section_header,
+            ))
+
+    return merged
 
 
 # ---------------------------------------------------------------------------

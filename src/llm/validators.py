@@ -273,11 +273,11 @@ def validate_thesis_extraction(output: ThesisExtractionOutput) -> tuple[bool, st
                         "Dropped thesis with short/empty statement",
                         statement=thesis.thesis_statement[:60] if thesis.thesis_statement else "")
             continue
-        # Must have at least one supporting reference
-        if not thesis.supporting_references:
+        # Must have a non-empty original_quote
+        if not thesis.original_quote or len(thesis.original_quote.strip()) < 10:
             dropped += 1
             log.warning(logger, MODULE, "thesis_dropped",
-                        "Dropped thesis with no supporting references",
+                        "Dropped thesis with short/empty original_quote",
                         statement=thesis.thesis_statement[:60])
             continue
         # Must have at least one speaker

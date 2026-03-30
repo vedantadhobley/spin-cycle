@@ -1,9 +1,19 @@
 # Transcript Pipeline — Project Plan
 
+> **Note (March 2026):** This document was the original design plan. Significant parts have been superseded by the SpeakerTurn-based architecture (v5). Key changes:
+> - **Rev.com → C-SPAN** — transcript source changed to C-SPAN (Playwright-based) + raw text parser
+> - **Segments → SpeakerTurns** — `NumberedSegment` replaced by `SpeakerTurn(speaker, text, section_header?)`
+> - **Segment batching → word-based chunking** — ~2500 words/chunk with ~500 words overlap
+> - **Timestamps dropped** — never used downstream
+> - **Two-phase extraction** — Phase 1 (thesis extraction per chunk) → Phase 2 (review/classify per speaker) → Phase 2b (synthesis per group)
+> - **Dedup: LLM grouping → embeddings (planned)** — LLM-based batch grouping doesn't scale; embedding-based dedup planned
+>
+> See `ARCHITECTURE.md § The Transcript Extraction Pipeline` for the current architecture.
+
 ## Overview
 
 Spin Cycle's transcript pipeline extracts verifiable claims from political
-transcripts (Rev.com), verifies them through the existing fact-checking pipeline,
+transcripts (C-SPAN and raw text), verifies them through the existing fact-checking pipeline,
 and presents the results in a frontend where users can explore both the full
 transcript text and individual claims.
 
@@ -191,23 +201,26 @@ claim processing. For transcript extraction, we need similar queue management:
   at a time
 - The cron job only adds to the queue; the queue manager decides when to start
 
-## What Exists Today
+## What Exists Today (March 2026)
 
-- [x] Transcript fetcher + parser (`src/transcript/fetcher.py`)
-- [x] Claim extraction with segment batching (`src/transcript/extractor.py`)
-- [x] Simplified extraction (checkable, checkability_rationale, context_insertions, is_restatement, segment_gist)
-- [x] Temporal workflow with per-batch activities (`src/workflows/extract_transcript.py`)
+- [x] C-SPAN Playwright fetcher (`src/transcript/cspan.py`) — WAF solving, caption API
+- [x] Raw text parser (`src/transcript/parsers/raw_text.py`) — editorial headers, speaker detection
+- [x] SpeakerTurn data model with `normalize_turns()` (`src/transcript/parsers/__init__.py`)
+- [x] Word-based chunking with overlap (`src/transcript/thesis_extractor.py`) — ~2500w/chunk, ~500w overlap
+- [x] Thesis extraction per chunk (`extract_chunk()`) — original_quote attribution
+- [x] Quote validation (`_validate_quotes_in_target()`) — substring check against target text
+- [x] Claim review: sequential batch classification + grouping (`src/transcript/claim_reviewer.py`)
+- [x] Claim synthesis: per-group overarching claim (`src/transcript/claim_synthesizer.py`)
+- [x] Temporal workflows: `ExtractTranscriptWorkflow`, `ReviewClaimsWorkflow`, `SynthesizeClaimsWorkflow`
 - [x] API endpoint `POST /transcripts` (`src/api/routes/transcripts.py`)
-- [x] Transcript storage with cleaned display text (`store_transcript` activity)
-- [x] Transcript claims storage — ALL claims with extraction metadata (`store_transcript_claims`)
+- [x] Transcript storage with SpeakerTurn serialization (`store_transcript` activity)
+- [x] Transcript claims storage — ALL claims with extraction metadata (`store_transcript_claims`, `thesis_version=3`)
 - [x] DB models: `TranscriptRecord`, `TranscriptClaim`
-- [x] Semaphore-based concurrency (2 parallel batches)
-- [x] Overlap context at batch boundaries (3 segments)
-- [x] Coverage retry (temperature=0.3 on <50% segment coverage)
-- [x] Programmatic worth_checking: checkable AND NOT restatement AND NOT future_prediction
-- [x] Wire `claim_id` FK when submitting transcript claims to verification
+- [x] Speaker enrichment via Wikidata (`src/transcript/speakers.py`)
 - [x] Transcript status tracking (`queued` → `extracting` → `verifying` → `complete`)
 - [x] One-pipeline-at-a-time constraint via `finish_transcript_and_start_next`
+- [ ] Embedding-based dedup (replaces LLM batch grouping — current approach doesn't scale)
+- [ ] C-SPAN auto-discovery cron (`src/transcript/cspan_discovery.py` — stub exists)
 
 ## Current Usage: Manual Submission
 

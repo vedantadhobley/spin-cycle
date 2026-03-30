@@ -16,14 +16,14 @@ from src.prompts.claim_review import (
     format_existing_groups,
 )
 from src.schemas.llm_outputs import (
-    ReviewBatchOutput, ExtractedThesis, SupportingReference,
+    ReviewBatchOutput, ExtractedThesis,
 )
 from src.utils.logging import log, get_logger
 
 MODULE = "claim_reviewer"
 logger = get_logger()
 
-REVIEW_BATCH_SIZE = 10
+from src.config import REVIEW_BATCH_SIZE
 
 
 async def review_batch(
@@ -108,17 +108,3 @@ def make_trivial_review(thesis_dict: dict) -> dict:
             },
         },
     }
-
-
-def build_group_references(
-    group_claims: list[ExtractedThesis],
-) -> list[SupportingReference]:
-    """Union of all supporting references across group members, deduped by segment_index."""
-    seen: set[int] = set()
-    refs: list[SupportingReference] = []
-    for c in group_claims:
-        for ref in c.supporting_references:
-            if ref.segment_index not in seen:
-                refs.append(ref)
-                seen.add(ref.segment_index)
-    return sorted(refs, key=lambda r: r.segment_index)

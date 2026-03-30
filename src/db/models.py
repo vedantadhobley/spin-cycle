@@ -133,7 +133,7 @@ class TranscriptRecord(Base):
     display_text = Column(Text, nullable=False)  # cleaned, merged same-speaker segments
     status = Column(String(32), default="queued", nullable=False)  # queued → extracting → verifying → complete → failed
     # Thesis extraction v2 fields
-    segments_data = Column(JSONB, nullable=True)  # list of NumberedSegment dicts
+    segments_data = Column(JSONB, nullable=True)  # list of SpeakerTurn dicts
     source_format = Column(String(32), default="revcom", nullable=True)  # "revcom", "raw_text", "cspan"
     speaker_aliases = Column(JSONB, nullable=True)  # canonical → variants
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

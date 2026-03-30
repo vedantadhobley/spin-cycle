@@ -144,27 +144,24 @@ def format_claims_for_review(theses: list, speaker: str) -> str:
     """Format extracted theses as a numbered list for the review prompt.
 
     Args:
-        theses: List of ExtractedThesis (or dicts with thesis_statement/topic/supporting_references).
+        theses: List of ExtractedThesis (or dicts with thesis_statement/topic).
         speaker: Speaker name for the header.
 
     Returns:
         Formatted string like:
-        [0] "thesis statement" (topic: military, refs: [1], [5])
-        [1] "thesis statement" (topic: economic, refs: [2])
+        [0] "thesis statement" (topic: military)
+        [1] "thesis statement" (topic: economic)
     """
     lines = []
     for i, t in enumerate(theses):
         if hasattr(t, "thesis_statement"):
             statement = t.thesis_statement
             topic = t.topic
-            refs = [str(r.segment_index) for r in t.supporting_references]
         else:
             statement = t.get("thesis_statement", t.get("claim_text", ""))
             topic = t.get("topic", "")
-            refs = [str(r["segment_index"]) for r in t.get("supporting_references", [])]
 
-        ref_str = ", ".join(f"[{r}]" for r in refs) if refs else "none"
-        lines.append(f'[{i}] "{statement}" (topic: {topic}, refs: {ref_str})')
+        lines.append(f'[{i}] "{statement}" (topic: {topic})')
 
     return "\n".join(lines)
 

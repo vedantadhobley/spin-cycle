@@ -18,16 +18,8 @@ import re
 from difflib import SequenceMatcher
 
 from src.transcript.parsers import (
-    NumberedSegment, TranscriptData, register_parser,
+    SpeakerTurn, TranscriptData, normalize_turns, register_parser,
 )
-
-
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
-# Maximum words per segment before splitting at paragraph breaks
-MAX_SEGMENT_WORDS = 300
 
 # Honorifics to strip for canonical name matching
 _HONORIFICS = re.compile(
@@ -219,43 +211,6 @@ def _is_section_header(line: str, next_line: str | None = None) -> bool:
 # Core parser
 # ---------------------------------------------------------------------------
 
-def _split_long_segment(text: str, max_words: int = MAX_SEGMENT_WORDS) -> list[str]:
-    """Split a long monologue at paragraph breaks.
-
-    If the text exceeds max_words, split at double-newline paragraph
-    boundaries. Each chunk aims to be ≤ max_words.
-    """
-    if len(text.split()) <= max_words:
-        return [text]
-
-    paragraphs = re.split(r"\n\s*\n", text)
-    if len(paragraphs) <= 1:
-        return [text]  # Can't split further
-
-    chunks = []
-    current = []
-    current_words = 0
-
-    for para in paragraphs:
-        para = para.strip()
-        if not para:
-            continue
-        para_words = len(para.split())
-
-        if current_words + para_words > max_words and current:
-            chunks.append("\n\n".join(current))
-            current = [para]
-            current_words = para_words
-        else:
-            current.append(para)
-            current_words += para_words
-
-    if current:
-        chunks.append("\n\n".join(current))
-
-    return chunks
-
-
 @register_parser("raw_text")
 def parse_raw_text(
     content: str,
@@ -378,21 +333,18 @@ def parse_raw_text(
     speaker_map = _build_speaker_map(raw_speaker_names)
     alias_map = _build_alias_map(speaker_map)
 
-    # Normalize speakers and build numbered segments
-    # Split long monologues at paragraph breaks
-    segments: list[NumberedSegment] = []
-    idx = 0
+    # Build speaker turns from raw segments
+    turns: list[SpeakerTurn] = []
     for raw_seg in raw_segments:
         canonical = speaker_map.get(raw_seg["speaker"], raw_seg["speaker"])
-        chunks = _split_long_segment(raw_seg["text"])
-        for ci, chunk in enumerate(chunks):
-            segments.append(NumberedSegment(
-                index=idx,
-                speaker=canonical,
-                text=chunk,
-                section_header=raw_seg["section_header"] if ci == 0 else None,
-            ))
-            idx += 1
+        turns.append(SpeakerTurn(
+            speaker=canonical,
+            text=raw_seg["text"],
+            section_header=raw_seg["section_header"],
+        ))
+
+    # Merge consecutive same-speaker turns (no-op for raw_text usually)
+    turns = normalize_turns(turns)
 
     # Deduplicated canonical speaker list (preserving order)
     speakers = list(dict.fromkeys(
@@ -404,7 +356,7 @@ def parse_raw_text(
         title=title,
         date=date,
         speakers=speakers,
-        segments=segments,
+        turns=turns,
         source_format="raw_text",
         speaker_aliases=alias_map,
         editors_note=editors_note,
