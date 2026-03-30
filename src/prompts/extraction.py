@@ -8,7 +8,7 @@ Key design:
 - Extract exhaustively — every factual claim, no target count
 - Merge repetitions: same claim said twice → one claim
 - original_quote must be verbatim words from the transcript
-- Checkability assessment is deferred to Phase 2 (claim review)
+- Classification is deferred to a separate batch LLM phase (claim_classifier)
 """
 
 # ---------------------------------------------------------------------------

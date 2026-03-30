@@ -38,7 +38,7 @@ from src.transcript.speakers import _enrich_speakers  # noqa: F401
 # Chunking
 # ---------------------------------------------------------------------------
 
-from src.config import TARGET_WORDS_PER_CHUNK, OVERLAP_WORDS, MIN_QUOTE_LENGTH
+from src.config import TARGET_WORDS_PER_CHUNK, OVERLAP_WORDS
 
 
 @dataclass
@@ -285,45 +285,6 @@ def build_chunks(turns: list[SpeakerTurn]) -> list[Chunk]:
     return chunks
 
 
-# ---------------------------------------------------------------------------
-# Quote validation (replaces segment-index reference verification)
-# ---------------------------------------------------------------------------
-
-def _validate_quotes_in_target(
-    theses: list[ExtractedThesis],
-    chunk: Chunk,
-) -> list[ExtractedThesis]:
-    """Validate that original_quote appears in the chunk's target text.
-
-    Drops claims whose quotes:
-    - Are empty or too short (<10 chars)
-    - Only appear in context sections (not in target_text)
-    """
-    target_lower = chunk.target_text.lower()
-    valid = []
-
-    for thesis in theses:
-        quote = thesis.original_quote.strip()
-
-        # Drop empty/short quotes
-        if len(quote) < MIN_QUOTE_LENGTH:
-            log.warning(logger, MODULE, "quote_too_short",
-                        f"Dropped thesis with short quote ({len(quote)} chars)",
-                        thesis=thesis.thesis_statement[:60],
-                        quote=quote[:40])
-            continue
-
-        # Check quote appears in target text (case-insensitive)
-        if quote.lower() in target_lower:
-            valid.append(thesis)
-        else:
-            log.info(logger, MODULE, "quote_not_in_target",
-                     "Dropped thesis — quote not found in target section",
-                     thesis=thesis.thesis_statement[:60],
-                     quote=quote[:50])
-
-    return valid
-
 
 # ---------------------------------------------------------------------------
 # Chunk-level extraction (Phase 1)
@@ -390,9 +351,6 @@ async def extract_chunk(
     )
 
     theses = output.theses
-
-    # Post-processing: validate quotes against target text
-    theses = _validate_quotes_in_target(theses, chunk)
 
     log.info(logger, MODULE, "chunk_extracted",
              f"Extracted {len(theses)} theses from {chunk_label}",

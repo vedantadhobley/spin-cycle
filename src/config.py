@@ -46,13 +46,22 @@ LLM_RETRY_DELAY = 1
 
 TARGET_WORDS_PER_CHUNK = 2500
 OVERLAP_WORDS = 500
-MIN_QUOTE_LENGTH = 10  # chars — minimum original_quote length to keep a claim
 
 # ---------------------------------------------------------------------------
-# Claim review (Phase 2)
+# Batch classification (between extraction and dedup)
 # ---------------------------------------------------------------------------
 
-REVIEW_BATCH_SIZE = 25
+CLASSIFY_BATCH_SIZE = 50       # claims per classification LLM call
+CLASSIFY_MAX_TOKENS = 4096    # generous for ~50 claims × 25 tokens each
+
+# ---------------------------------------------------------------------------
+# Embedding-based dedup (Phase 2)
+# ---------------------------------------------------------------------------
+
+EMBEDDING_SIMILARITY_THRESHOLD = 0.85  # cosine sim; above this = same claim
+EMBEDDING_BATCH_SIZE = 32              # texts per embedding API call
+EMBEDDING_TIMEOUT = 60.0               # seconds per embedding batch
+NUMERIC_SKELETON_JACCARD_THRESHOLD = 0.7  # word overlap to consider "structurally same"
 
 # ---------------------------------------------------------------------------
 # Verification pipeline
@@ -98,7 +107,8 @@ TIMEOUT_NOTIFY_FRONTEND = 10
 # Extraction workflow
 TIMEOUT_FETCH_TRANSCRIPT = 60
 TIMEOUT_EXTRACT_CHUNK = 2700  # 45 min — large chunks on slow model
-TIMEOUT_REVIEW_BATCH = 600
+TIMEOUT_CLASSIFY_CLAIMS = 120
+TIMEOUT_DEDUP_CLAIMS = 120
 TIMEOUT_SYNTHESIZE_CLAIM = 300
 TIMEOUT_STORE_CLAIMS = 30
 TIMEOUT_UPDATE_STATUS = 15

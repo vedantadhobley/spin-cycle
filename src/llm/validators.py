@@ -21,7 +21,6 @@ from src.schemas.llm_outputs import (
     JudgeOutput,
     SynthesizeOutput,
     ThesisExtractionOutput,
-    ReviewBatchOutput,
     SynthesizedClaim,
 )
 from src.utils.logging import log, get_logger
@@ -299,105 +298,35 @@ def validate_thesis_extraction(output: ThesisExtractionOutput) -> tuple[bool, st
     return True, ""
 
 
-def validate_review_batch(
-    output: ReviewBatchOutput,
-    claim_count: int,
-    existing_group_ids: list[str],
-) -> tuple[bool, str]:
-    """Validate review batch output semantically.
-
-    Checks:
-    1. Every input index (0 to claim_count-1) has exactly one disposition
-    2. new_group/add_to_group → must be verifiable_fact
-    3. add_to_group/duplicate → group_id must exist in existing_group_ids
-    4. drop → classification must NOT be verifiable_fact
-    5. New group IDs match those referenced by new_group dispositions
-    6. No duplicate new group IDs, no collision with existing
-    7. Rationale min length (10 chars)
-    """
-    # Check 1: Every claim index has a disposition
-    disp_indices = {d.claim_index for d in output.dispositions}
-    expected = set(range(claim_count))
-    missing = expected - disp_indices
-    if missing:
-        return False, f"Missing dispositions for claim indices: {sorted(missing)}"
-
-    extra = disp_indices - expected
-    if extra:
-        return False, f"Dispositions reference invalid indices: {sorted(extra)}"
-
-    # Collect new group IDs defined in this batch
-    new_group_ids_defined = {ng.group_id for ng in output.new_groups}
-    all_known = set(existing_group_ids) | new_group_ids_defined
-
-    for d in output.dispositions:
-        # Check 2: grouped actions require verifiable_fact
-        if d.action in ("new_group", "add_to_group"):
-            if d.classification != "verifiable_fact":
-                return False, (
-                    f"Claim {d.claim_index}: action '{d.action}' requires "
-                    f"verifiable_fact, got '{d.classification}'"
-                )
-
-        # Check 3: new_group/add_to_group/duplicate must have group_id
-        if d.action in ("new_group", "add_to_group", "duplicate"):
-            if not d.group_id:
-                return False, f"Claim {d.claim_index}: action '{d.action}' requires group_id"
-
-        if d.action in ("add_to_group", "duplicate"):
-            if d.group_id not in all_known:
-                return False, (
-                    f"Claim {d.claim_index}: group_id '{d.group_id}' not in "
-                    f"existing or newly created groups"
-                )
-
-        # Check 4: drop must NOT be verifiable_fact
-        if d.action == "drop" and d.classification == "verifiable_fact":
-            return False, (
-                f"Claim {d.claim_index}: cannot drop a verifiable_fact — "
-                f"use new_group or add_to_group instead"
-            )
-
-        # Check 7: Rationale min length
-        if len(d.rationale.strip()) < 10:
-            return False, f"Claim {d.claim_index}: rationale too short"
-
-    # Check 5: new_group dispositions must have matching new_groups entry
-    new_group_refs = {
-        d.group_id for d in output.dispositions if d.action == "new_group"
-    }
-    if new_group_refs != new_group_ids_defined:
-        missing_defs = new_group_refs - new_group_ids_defined
-        extra_defs = new_group_ids_defined - new_group_refs
-        parts = []
-        if missing_defs:
-            parts.append(f"referenced but not defined: {missing_defs}")
-        if extra_defs:
-            parts.append(f"defined but not referenced: {extra_defs}")
-        return False, f"new_groups mismatch: {'; '.join(parts)}"
-
-    # Check 6: No collision with existing group IDs
-    collisions = new_group_ids_defined & set(existing_group_ids)
-    if collisions:
-        return False, f"New group IDs collide with existing: {collisions}"
-
-    # Validate new group fields
-    for ng in output.new_groups:
-        if len(ng.checkability_rationale.strip()) < 10:
-            return False, f"Group {ng.group_id}: checkability_rationale too short"
-
-    return True, ""
-
-
 def validate_synthesized_claim(output: SynthesizedClaim) -> tuple[bool, str]:
     """Validate synthesized claim output.
 
-    Checks:
-    1. overarching_claim min length (20 chars)
-    2. rationale min length (10 chars)
+    Checks rubric completeness + field quality.
     """
+    # Step 1: member_contributions must exist
+    if not output.member_contributions:
+        return False, "member_contributions is empty — must analyze each member claim"
+
+    # Step 1: each contribution must be substantive
+    for mc in output.member_contributions:
+        if len(mc.unique_specifics.strip()) < 10:
+            return False, (
+                f"member_contributions[{mc.index}].unique_specifics too short "
+                f"(<10 chars) — identify what this member adds"
+            )
+
+    # Step 2: if distinct specifics flagged, reasoning must explain
+    if output.distinct_specifics_exist:
+        if len(output.distinction_reasoning.strip()) < 15:
+            return False, (
+                "distinct_specifics_exist=true but distinction_reasoning "
+                "is too short (<15 chars)"
+            )
+
+    # Step 3: overarching_claim and rationale
     if len(output.overarching_claim.strip()) < 20:
         return False, "overarching_claim too short (<20 chars)"
     if len(output.rationale.strip()) < 10:
         return False, "rationale too short (<10 chars)"
+
     return True, ""

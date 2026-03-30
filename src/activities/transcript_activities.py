@@ -4,13 +4,14 @@ Activities:
   1. fetch_transcript              — fetch + parse a C-SPAN transcript (Playwright WAF)
   2. fetch_raw_transcript          — parse raw text into TranscriptData
   3. extract_chunk_activity        — extract claims from one chunk of transcript
-  4. review_batch_activity         — review batch of claims (Phase 2)
-  5. synthesize_claim_activity     — synthesize overarching claim per group
-  6. store_transcript              — persist cleaned transcript to DB
-  7. store_transcript_claims       — persist extracted claims linked to transcript
-  8. create_claims_for_transcript  — batch-create Claim records + link FKs
-  9. update_transcript_status      — set transcript status field
- 10. finish_transcript_and_start_next — mark transcript complete, start next queued
+  4. classify_claims_activity      — batch LLM classification (checkability)
+  5. dedup_claims_activity         — embedding-based dedup per speaker (Phase 2)
+  6. synthesize_claim_activity     — synthesize overarching claim per group
+  7. store_transcript              — persist cleaned transcript to DB
+  8. store_transcript_claims       — persist extracted claims linked to transcript
+  9. create_claims_for_transcript  — batch-create Claim records + link FKs
+ 10. update_transcript_status      — set transcript status field
+ 11. finish_transcript_and_start_next — mark transcript complete, start next queued
 
 Each chunk is a separate activity so it's visible in Temporal UI.
 The workflow orchestrates chunks — Temporal's max_concurrent_activities
@@ -156,50 +157,51 @@ async def extract_chunk_activity(
 
 
 @activity.defn
-async def review_batch_activity(
+async def dedup_claims_activity(
     claims: list[dict],
     speaker: str,
-    current_date: str,
-    existing_groups: dict,
-    existing_group_ids: list[str],
-    batch_label: str,
 ) -> dict:
-    """Review a batch of ~10 claims with accumulated group context.
+    """Deduplicate claims for one speaker using embedding similarity.
 
-    Each batch is a separate activity for Temporal UI visibility.
-    Returns serialized ReviewBatchOutput dict.
+    Returns dict with "clusters" list — each cluster has a representative,
+    member_indices, checkable flag, and topic.
     """
-    from src.schemas.llm_outputs import ExtractedThesis
-    from src.transcript.claim_reviewer import review_batch
+    from src.transcript.claim_dedup import dedup_speaker_claims
 
-    # Reconstruct ExtractedThesis objects
-    extracted = []
-    for t in claims:
-        extracted.append(ExtractedThesis(
-            thesis_statement=t["thesis_statement"],
-            speakers=t.get("speakers", [speaker]),
-            original_quote=t.get("original_quote", ""),
-            topic=t.get("topic", ""),
-        ))
+    log.info(activity.logger, "transcript", "dedup_start",
+             "Starting embedding dedup",
+             speaker=speaker, claim_count=len(claims))
 
-    log.info(activity.logger, "transcript", "review_batch_start",
-             "Starting review batch",
-             speaker=speaker, batch=batch_label,
-             claim_count=len(extracted),
-             existing_groups=len(existing_groups))
+    result = await dedup_speaker_claims(claims, speaker)
 
-    output = await review_batch(
-        extracted, speaker, current_date,
-        existing_groups, existing_group_ids, batch_label,
-    )
+    cluster_count = len(result["clusters"])
+    multi = sum(1 for c in result["clusters"] if len(c["member_indices"]) > 1)
 
-    log.info(activity.logger, "transcript", "review_batch_done",
-             "Review batch complete",
-             speaker=speaker, batch=batch_label,
-             dispositions=len(output.dispositions),
-             new_groups=len(output.new_groups))
+    log.info(activity.logger, "transcript", "dedup_done",
+             "Embedding dedup complete",
+             speaker=speaker,
+             cluster_count=cluster_count,
+             multi_member=multi)
 
-    return output.model_dump()
+    return result
+
+
+@activity.defn
+async def classify_claims_activity(claims: list[dict]) -> list[dict]:
+    """Classify a batch of claims. Returns claims with classification fields added."""
+    from src.transcript.claim_classifier import classify_claims_batch
+
+    log.info(activity.logger, "transcript", "classify_start",
+             "Starting claim classification",
+             claim_count=len(claims))
+
+    result = await classify_claims_batch(claims)
+
+    log.info(activity.logger, "transcript", "classify_done",
+             "Claim classification complete",
+             claim_count=len(result))
+
+    return result
 
 
 @activity.defn

@@ -46,6 +46,12 @@ class ExtractedThesis(BaseModel):
     topic: str = Field(
         default="", description="Topic area: economic, military, political, legal, social, etc."
     )
+    classification: Literal[
+        "verifiable_fact", "future_prediction",
+        "subjective_opinion", "procedural", "vague_rhetoric"
+    ] = Field(default="verifiable_fact")
+    checkable: bool = Field(default=True)
+    check_rationale: str = Field(default="")
 
 
 class ThesisExtractionOutput(BaseModel):
@@ -54,51 +60,71 @@ class ThesisExtractionOutput(BaseModel):
 
 
 # =============================================================================
-# REVIEW BATCH OUTPUT (Phase 2: sequential accumulating review)
+# CLAIM CLASSIFICATION OUTPUT (batch classification of extracted claims)
 # =============================================================================
 
-class ClaimDisposition(BaseModel):
-    """Classification + action for a single claim in a review batch."""
-    claim_index: int = Field(..., description="Local index within this batch (0-based)")
+class ClaimClassification(BaseModel):
+    """Classification result for a single claim."""
+    index: int
+    factual_anchor: str = Field(
+        default="",
+        description="The specific fact, number, or event that makes this "
+        "checkable — or 'none' if no factual anchor exists. "
+        "Identify this BEFORE classifying."
+    )
     classification: Literal[
         "verifiable_fact", "future_prediction",
         "subjective_opinion", "procedural", "vague_rhetoric"
-    ] = Field(..., description="Claim type classification")
-    action: Literal["new_group", "add_to_group", "duplicate", "drop"] = Field(
-        ..., description="What to do with this claim"
-    )
-    group_id: Optional[str] = Field(
-        default=None, description="Group ID for add_to_group/duplicate actions"
-    )
-    rationale: str = Field(default="", description="Why this classification and action")
+    ] = Field(default="verifiable_fact")
+    checkable: bool = Field(default=True)
+    check_rationale: str = Field(default="")
 
 
-class NewGroup(BaseModel):
-    """A new group created in a review batch."""
-    group_id: str = Field(..., description="LLM-assigned group ID (e.g. G1, G2)")
-    topic: str = Field(default="", description="Topic area for the group")
-    checkable: bool = Field(..., description="Could independent evidence confirm or deny this?")
-    checkability_rationale: str = Field(default="", description="Why checkable or not")
-
-
-class ReviewBatchOutput(BaseModel):
-    """Output from a single review batch (~10 claims)."""
-    dispositions: list[ClaimDisposition] = Field(
-        default_factory=list, description="Disposition for each claim in the batch"
-    )
-    new_groups: list[NewGroup] = Field(
-        default_factory=list, description="New groups created in this batch"
-    )
+class ClassifyClaimsOutput(BaseModel):
+    """Output from batch claim classification."""
+    classifications: list[ClaimClassification] = Field(default_factory=list)
 
 
 # =============================================================================
 # SYNTHESIZE CLAIM OUTPUT (Phase 2b: per-group overarching claim)
 # =============================================================================
 
+class MemberContribution(BaseModel):
+    """What a single member claim contributes to the group (Step 1)."""
+    index: int = Field(..., description="1-indexed member claim number")
+    unique_specifics: str = Field(
+        ..., description="What specific facts/numbers/dates does this member add "
+        "that others don't?"
+    )
+
+
 class SynthesizedClaim(BaseModel):
-    """Output from synthesizing a group's member claims into one statement."""
+    """Rubric-based synthesis of grouped claims into one verifiable statement.
+
+    Three-step rubric:
+      1. Identify what each member contributes (unique specifics)
+      2. Check if members have distinct verifiable specifics
+      3. Synthesize — preserve specifics, don't generalize
+    """
+    # Step 1 — Member contributions
+    member_contributions: list[MemberContribution] = Field(
+        default_factory=list,
+        description="For each member claim, what unique information does it add?"
+    )
+    # Step 2 — Distinct specifics check
+    distinct_specifics_exist: bool = Field(
+        default=False,
+        description="Do members contain distinct verifiable specifics "
+        "(different numbers, dates, names) that should NOT be collapsed?"
+    )
+    distinction_reasoning: str = Field(
+        default="",
+        description="If distinct specifics exist, what are they?"
+    )
+    # Step 3 — Final synthesis
     overarching_claim: str = Field(
-        ..., description="Single clean verifiable claim combining all group members"
+        ..., description="Single clean verifiable claim. If members have distinct "
+        "specifics, preserve the most specific version."
     )
     rationale: str = Field(
         default="", description="Why this formulation was chosen"
