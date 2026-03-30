@@ -52,17 +52,56 @@ class ExtractedThesis(BaseModel):
     topic: str = Field(
         default="", description="Topic area: economic, military, political, legal, social, etc."
     )
-    checkable: bool = Field(
-        ..., description="Could independent data confirm or deny this argument?"
-    )
-    checkability_rationale: str = Field(
-        default="", description="Why checkable or not (1 sentence)"
-    )
 
 
 class ThesisExtractionOutput(BaseModel):
     """Output from thesis-level transcript extraction."""
     theses: list[ExtractedThesis] = Field(default_factory=list)
+
+
+# =============================================================================
+# CLAIM REVIEW OUTPUT (Phase 2: classify, dedup, group, assess checkability)
+# =============================================================================
+
+class ClaimClassification(BaseModel):
+    """Classification of a single extracted claim."""
+    claim_index: int = Field(..., description="Index of the claim in the input list")
+    classification: Literal[
+        "verifiable_fact", "future_prediction",
+        "subjective_opinion", "procedural", "vague_rhetoric"
+    ] = Field(..., description="Claim type classification")
+    is_duplicate: bool = Field(default=False, description="Whether this is a duplicate of another claim")
+    duplicate_of: Optional[int] = Field(default=None, description="Index of the claim this duplicates")
+    rationale: str = Field(default="", description="Why this classification was chosen")
+
+
+class ClaimGroup(BaseModel):
+    """A group of related verifiable claims forming an argument."""
+    member_indices: list[int] = Field(
+        ..., description="Indices of claims in this group (verifiable + non-duplicate only)"
+    )
+    group_rationale: str = Field(
+        default="", description="Why these claims are related, or 'standalone claim'"
+    )
+    checkable: bool = Field(
+        ..., description="Could independent evidence confirm or deny the core assertion?"
+    )
+    checkability_rationale: str = Field(
+        default="", description="Why checkable or not"
+    )
+    topic: str = Field(
+        default="", description="Topic area for the group"
+    )
+
+
+class ClaimReviewOutput(BaseModel):
+    """Output from Phase 2 claim review: classify, dedup, group, assess."""
+    classifications: list[ClaimClassification] = Field(
+        default_factory=list, description="Classification for every input claim (Steps 1+2)"
+    )
+    groups: list[ClaimGroup] = Field(
+        default_factory=list, description="Groups of related verifiable claims (Steps 3+4)"
+    )
 
 
 # =============================================================================

@@ -41,6 +41,8 @@ from src.activities.transcript_activities import (  # noqa: E402
     fetch_transcript,
     fetch_raw_transcript,
     extract_theses_activity,
+    extract_chunk_activity,
+    review_claims_activity,
     extract_transcript_batch,
     finalize_extraction,
     store_transcript,
@@ -87,6 +89,8 @@ async def main():
             fetch_transcript,
             fetch_raw_transcript,
             extract_theses_activity,
+            extract_chunk_activity,
+            review_claims_activity,
             extract_transcript_batch,
             finalize_extraction,
             store_transcript,
@@ -104,7 +108,11 @@ async def main():
 
     log.info(logger, MODULE, "ready", "Worker listening",
              task_queue=TASK_QUEUE, activity_count=15, workflow_count=2)
-    await worker.run()
+    try:
+        await worker.run()
+    finally:
+        from src.transcript.cspan import cleanup
+        await cleanup()
 
 
 if __name__ == "__main__":

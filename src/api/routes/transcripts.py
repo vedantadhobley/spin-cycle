@@ -1,7 +1,8 @@
 """Transcript extraction endpoints.
 
-Submit a transcript URL for claim extraction.  The extraction runs as a
-Temporal workflow with full activity visibility in Temporal UI.
+Submit a C-SPAN transcript URL (or raw text) for claim extraction.  The
+extraction runs as a Temporal workflow with full activity visibility in
+Temporal UI.
 
 Queuing: Only one pipeline (extract or verify) runs at a time.  If a
 pipeline is active, new submissions are queued and processed in order.
@@ -29,14 +30,20 @@ router = APIRouter()
 class TranscriptSubmit(BaseModel):
     """Request body for submitting a transcript.
 
-    Exactly one of `url` or `raw_text` is required:
-    - url: Fetch and parse from a Rev.com transcript page
+    Exactly one of `url`, `program_id`, or `raw_text` is required:
+    - url: C-SPAN program URL
+    - program_id: C-SPAN program ID (constructs URL automatically)
     - raw_text: Parse raw transcript text directly (requires title)
     """
-    url: str | None = Field(None, description="Rev.com transcript URL")
+    url: str | None = Field(None, description="C-SPAN program URL")
+    program_id: str | None = Field(None, description="C-SPAN program ID")
     raw_text: str | None = Field(None, description="Raw transcript text (alternative to URL)")
     title: str | None = Field(None, description="Transcript title (required with raw_text)")
-    date: str | None = Field(None, description="ISO date string (optional, used with raw_text)")
+    date: str | None = Field(None, description="ISO date string (optional)")
+    stop_after: str | None = Field(
+        None,
+        description="Early exit: 'fetch' (parse only), 'store' (+ DB), 'extract' (+ theses, skip verify)",
+    )
 
 
 class TranscriptResponse(BaseModel):
@@ -63,10 +70,11 @@ async def submit_transcript(
     body: TranscriptSubmit,
     request: Request,
 ):
-    """Submit a transcript URL or raw text for claim extraction.
+    """Submit a transcript URL, program ID, or raw text for claim extraction.
 
-    Accepts either:
-    - url: Fetch and parse from Rev.com
+    Accepts exactly one of:
+    - url: C-SPAN program URL
+    - program_id: C-SPAN program ID (constructs URL automatically)
     - raw_text + title: Parse raw transcript text directly
 
     Idempotent: re-submitting a URL that is queued/extracting/verifying returns
@@ -74,23 +82,61 @@ async def submit_transcript(
     """
     from fastapi import HTTPException
 
-    # Validate: exactly one of url or raw_text
-    if not body.url and not body.raw_text:
-        raise HTTPException(400, "Either 'url' or 'raw_text' is required")
-    if body.url and body.raw_text:
-        raise HTTPException(400, "Provide either 'url' or 'raw_text', not both")
+    # Validate: exactly one of url, program_id, or raw_text
+    sources = sum(1 for s in [body.url, body.program_id, body.raw_text] if s)
+    if sources == 0:
+        raise HTTPException(400, "One of 'url', 'program_id', or 'raw_text' is required")
+    if sources > 1:
+        raise HTTPException(400, "Provide exactly one of 'url', 'program_id', or 'raw_text'")
     if body.raw_text and not body.title:
         raise HTTPException(400, "'title' is required when using 'raw_text'")
 
     temporal = request.app.state.temporal
 
-    # For raw text, generate a stable URL-like identifier from the title
-    if body.raw_text:
+    # Resolve effective URL
+    if body.program_id:
+        effective_url = f"https://www.c-span.org/program/{body.program_id}"
+    elif body.raw_text:
         import hashlib
         content_hash = hashlib.sha256(body.raw_text.encode()).hexdigest()[:12]
         effective_url = f"raw://{content_hash}/{body.title}"
     else:
         effective_url = body.url
+
+    # Build workflow args: (url, raw_text, title, date, stop_after)
+    workflow_args = [effective_url]
+    if body.raw_text or body.stop_after:
+        workflow_args.extend([
+            body.raw_text,  # None if not raw_text
+            body.title,
+            body.date,
+            body.stop_after,
+        ])
+
+    # When stop_after is set, skip queuing/DB — just fire the workflow.
+    # The workflow handles early exit; no DB record avoids stuck state.
+    if body.stop_after:
+        workflow_id = f"test-extract-{uuid.uuid4().hex[:8]}"
+
+        await temporal.start_workflow(
+            ExtractTranscriptWorkflow.run,
+            args=workflow_args,
+            id=workflow_id,
+            task_queue=TASK_QUEUE,
+        )
+
+        log.info(logger, MODULE, "test_started",
+                 "Test workflow started",
+                 workflow_id=workflow_id, url=effective_url,
+                 stop_after=body.stop_after)
+
+        return TranscriptResponse(
+            workflow_id=workflow_id,
+            url=effective_url,
+            status="started",
+        )
+
+    # --- Production path: idempotency check + queuing ---
 
     # Check if this URL already exists
     async with async_session() as session:
@@ -172,11 +218,6 @@ async def submit_transcript(
 
     workflow_id = f"extract-{transcript_id}"
 
-    # Build workflow args
-    workflow_args = [effective_url]
-    if body.raw_text:
-        workflow_args.extend([body.raw_text, body.title, body.date])
-
     await temporal.start_workflow(
         ExtractTranscriptWorkflow.run,
         args=workflow_args,
@@ -188,7 +229,7 @@ async def submit_transcript(
              "Transcript extraction started",
              workflow_id=workflow_id, url=effective_url,
              transcript_id=transcript_id,
-             mode="raw_text" if body.raw_text else "url")
+             mode="raw_text" if body.raw_text else "program_id" if body.program_id else "url")
 
     return TranscriptResponse(
         transcript_id=transcript_id,
@@ -196,3 +237,14 @@ async def submit_transcript(
         url=effective_url,
         status="started",
     )
+
+
+@router.get("/discover")
+async def discover_transcripts(limit: int = 50):
+    """Discover available C-SPAN programs from the JW Player feed.
+
+    Returns up to `limit` trending/recent programs with metadata.
+    Results are cached for 5 minutes.
+    """
+    from src.transcript.cspan_discovery import fetch_available
+    return await fetch_available(limit=limit)

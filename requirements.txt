@@ -31,3 +31,6 @@ lxml>=5.0.0
 
 # NER (Named Entity Recognition) for entity extraction from evidence
 spacy>=3.7.0
+
+# Headless browser (C-SPAN WAF solving)
+playwright>=1.50.0

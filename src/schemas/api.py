@@ -105,3 +105,16 @@ class ClaimListResponse(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+class CSpanProgram(BaseModel):
+    """A C-SPAN program from the JW Player discovery feed."""
+    program_id: str
+    title: str
+    category: str
+    format: str
+    speakers: list[str]
+    date: str          # ISO date
+    duration: int      # seconds
+    url: str           # full c-span.org URL
+    description: str = ""

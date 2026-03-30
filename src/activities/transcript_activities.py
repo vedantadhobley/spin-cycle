@@ -1,7 +1,7 @@
 """Temporal activities for transcript extraction.
 
 Activities:
-  1. fetch_transcript              — fetch + parse a Rev.com transcript
+  1. fetch_transcript              — fetch + parse a C-SPAN transcript (Playwright WAF)
   2. extract_transcript_batch      — extract claims from one batch of segments (v1, archived)
   3. finalize_extraction           — filter + deduplicate claims across all batches (v1, archived)
   4. store_transcript              — persist cleaned transcript to DB
@@ -26,40 +26,49 @@ from src.utils.logging import log
 
 @activity.defn
 async def fetch_transcript(url: str) -> dict:
-    """Fetch and parse a transcript from Rev.com.
+    """Fetch and parse a transcript from C-SPAN.
 
-    Returns a serialized transcript dict with segments, metadata, and word count.
+    Uses Playwright to solve the CloudFront WAF JS challenge, then fetches
+    program metadata and structured transcript JSON.
+
+    Returns a serialized TranscriptData-shaped dict with numbered segments.
     """
+    from src.transcript.cspan import fetch_cspan_transcript, is_cspan_url
+
     log.info(activity.logger, "transcript", "fetch_start", "Fetching transcript",
              url=url)
 
-    from src.transcript.fetcher import fetch_transcript as _fetch
-
-    transcript = await _fetch(url)
+    if is_cspan_url(url):
+        td = await fetch_cspan_transcript(url)
+    else:
+        raise ValueError(f"Unsupported transcript URL: {url}")
 
     result = {
-        "url": transcript.url,
-        "title": transcript.title,
-        "date": transcript.date,
-        "speakers": transcript.speakers,
-        "word_count": transcript.word_count,
-        "display_text": transcript.display_text,
+        "url": td.url,
+        "title": td.title,
+        "date": td.date,
+        "speakers": td.speakers,
+        "word_count": td.word_count,
+        "display_text": td.display_text,
+        "source_format": td.source_format,
+        "speaker_aliases": td.speaker_aliases,
         "segments": [
             {
+                "index": s.index,
                 "speaker": s.speaker,
-                "timestamp": s.timestamp,
-                "timestamp_secs": s.timestamp_secs,
                 "text": s.text,
+                "timestamp": s.timestamp,
+                "section_header": s.section_header,
             }
-            for s in transcript.segments
+            for s in td.segments
         ],
     }
 
     log.info(activity.logger, "transcript", "fetch_done", "Transcript fetched",
-             url=url, title=transcript.title,
-             word_count=transcript.word_count,
-             segment_count=len(transcript.segments),
-             speaker_count=len(transcript.speakers))
+             url=url, title=td.title,
+             word_count=td.word_count,
+             segment_count=td.segment_count,
+             speaker_count=len(td.speakers))
 
     return result
 
@@ -115,20 +124,95 @@ async def fetch_raw_transcript(
 
 
 @activity.defn
-async def extract_theses_activity(
+async def extract_chunk_activity(
     transcript_data: dict,
-    enriched_speakers: list[dict] | None = None,
+    chunk_spec: dict,
+    enriched_speakers: list[dict],
 ) -> list[dict]:
-    """Extract theses from a transcript via single LLM call.
+    """Extract claims from a single chunk of a transcript.
 
-    Takes serialized TranscriptData + optional enriched speakers.
+    Takes serialized TranscriptData, ChunkSpec dict, and enriched speakers.
     Returns list of thesis dicts with supporting references.
     """
     from src.transcript.parsers import TranscriptData, NumberedSegment
-    from src.transcript.thesis_extractor import extract_theses
+    from src.transcript.thesis_extractor import ChunkSpec, extract_chunk
     from src.utils.reference_matcher import resolve_all_references
 
     # Reconstruct TranscriptData
+    td = _reconstruct_transcript_data(transcript_data)
+    chunk = ChunkSpec(**chunk_spec)
+
+    log.info(activity.logger, "transcript", "chunk_extraction_start",
+             "Starting chunk extraction",
+             title=td.title,
+             target_start=chunk.target_start,
+             target_end=chunk.target_end)
+
+    theses = await extract_chunk(td, chunk, enriched_speakers)
+
+    # Programmatic reference verification
+    theses, ref_stats = resolve_all_references(theses, td.segments)
+
+    # Serialize for Temporal transport
+    result = _serialize_theses(theses)
+
+    log.info(activity.logger, "transcript", "chunk_extraction_done",
+             "Chunk extraction complete",
+             target_start=chunk.target_start,
+             target_end=chunk.target_end,
+             thesis_count=len(result),
+             ref_stats=ref_stats)
+
+    return result
+
+
+@activity.defn
+async def review_claims_activity(
+    theses: list[dict],
+    speaker: str,
+    current_date: str,
+) -> dict:
+    """Review and group claims for a single speaker via LLM.
+
+    Takes serialized theses, speaker name, and current date.
+    Returns serialized ClaimReviewOutput dict.
+    """
+    from src.schemas.llm_outputs import ExtractedThesis, SupportingReference
+    from src.transcript.claim_reviewer import review_claims
+
+    # Reconstruct ExtractedThesis objects
+    extracted = []
+    for t in theses:
+        refs = [
+            SupportingReference(segment_index=r["segment_index"], excerpt=r["excerpt"])
+            for r in t.get("supporting_references", [])
+        ]
+        extracted.append(ExtractedThesis(
+            thesis_statement=t["thesis_statement"],
+            speakers=t.get("speakers", [speaker]),
+            supporting_references=refs,
+            topic=t.get("topic", ""),
+        ))
+
+    log.info(activity.logger, "transcript", "review_start",
+             "Starting claim review",
+             speaker=speaker, claim_count=len(extracted))
+
+    output = await review_claims(extracted, speaker, current_date)
+
+    log.info(activity.logger, "transcript", "review_done",
+             "Claim review complete",
+             speaker=speaker,
+             classifications=len(output.classifications),
+             groups=len(output.groups))
+
+    return output.model_dump()
+
+
+def _reconstruct_transcript_data(transcript_data: dict):
+    """Reconstruct TranscriptData from a serialized dict."""
+    from src.transcript.parsers import TranscriptData, NumberedSegment
+
     segments = [
         NumberedSegment(
             index=s["index"],
@@ -139,7 +223,7 @@ async def extract_theses_activity(
         )
         for s in transcript_data["segments"]
     ]
-    td = TranscriptData(
+    return TranscriptData(
         url=transcript_data["url"],
         title=transcript_data["title"],
         date=transcript_data.get("date"),
@@ -149,17 +233,9 @@ async def extract_theses_activity(
         speaker_aliases=transcript_data.get("speaker_aliases", {}),
     )
 
-    log.info(activity.logger, "transcript", "thesis_extraction_start",
-             "Starting thesis extraction",
-             title=td.title, word_count=td.word_count,
-             segment_count=td.segment_count)
 
-    theses = await extract_theses(td, enriched_speakers=enriched_speakers)
-
-    # Programmatic reference verification
-    theses, ref_stats = resolve_all_references(theses, td.segments)
-
-    # Serialize for Temporal transport
+def _serialize_theses(theses) -> list[dict]:
+    """Serialize ExtractedThesis objects for Temporal transport."""
     result = []
     for t in theses:
         result.append({
@@ -170,16 +246,49 @@ async def extract_theses_activity(
                 for r in t.supporting_references
             ],
             "topic": t.topic,
-            "checkable": t.checkable,
-            "checkability_rationale": t.checkability_rationale,
-            "worth_checking": t.checkable,  # checkable = worth_checking for theses
         })
+    return result
 
-    checkable = sum(1 for t in result if t["checkable"])
+
+@activity.defn
+async def extract_theses_activity(
+    transcript_data: dict,
+    enriched_speakers: list[dict] | None = None,
+) -> list[dict]:
+    """Legacy: Extract theses via single LLM call (kept for backward compat).
+
+    Prefer extract_chunk_activity for new code.
+    """
+    from src.transcript.parsers import TranscriptData, NumberedSegment
+    from src.transcript.thesis_extractor import ChunkSpec, extract_chunk
+    from src.utils.reference_matcher import resolve_all_references
+
+    td = _reconstruct_transcript_data(transcript_data)
+
+    if enriched_speakers is None:
+        from src.transcript.speakers import _enrich_speakers
+        enriched_speakers = await _enrich_speakers(td.speakers)
+
+    log.info(activity.logger, "transcript", "thesis_extraction_start",
+             "Starting thesis extraction (legacy single-pass)",
+             title=td.title, word_count=td.word_count,
+             segment_count=td.segment_count)
+
+    # Use a single chunk covering the full transcript
+    chunk = ChunkSpec(
+        target_start=0, target_end=len(td.segments),
+        context_start=0, context_end=len(td.segments),
+    )
+    theses = await extract_chunk(td, chunk, enriched_speakers)
+
+    # Programmatic reference verification
+    theses, ref_stats = resolve_all_references(theses, td.segments)
+
+    result = _serialize_theses(theses)
+
     log.info(activity.logger, "transcript", "thesis_extraction_done",
              "Thesis extraction complete",
              thesis_count=len(result),
-             checkable=checkable,
              ref_stats=ref_stats)
 
     return result
@@ -202,7 +311,7 @@ async def extract_transcript_batch(
 
     Each batch is a separate Temporal activity for UI visibility.
     """
-    from src.transcript.fetcher import TranscriptSegment
+    from src.transcript._archive_fetcher import TranscriptSegment
     from src.transcript.extractor import extract_batch
 
     # Reconstruct segment objects
@@ -265,7 +374,7 @@ async def finalize_extraction(
         - worth_checking: list of dicts for verification pipeline
         - all_claims: list of ALL claims (including skipped) with full metadata for DB storage
     """
-    from src.transcript.fetcher import Transcript, TranscriptSegment
+    from src.transcript._archive_fetcher import Transcript, TranscriptSegment
     from src.transcript.extractor import (
         ExtractedClaim, finalize_claims,
     )
@@ -370,7 +479,7 @@ async def store_transcript(transcript_data: dict) -> dict:
     from sqlalchemy import select
     from src.db.session import async_session
     from src.db.models import TranscriptRecord
-    from src.transcript.extractor import _enrich_speakers
+    from src.transcript.speakers import _enrich_speakers
 
     url = transcript_data["url"]
     log.info(activity.logger, "transcript", "store_start", "Storing transcript",
@@ -494,17 +603,28 @@ async def store_transcript_claims(
 async def create_claims_for_transcript(
     transcript_id: str,
     transcript_claim_ids: list[str],
-    claims: list[dict],
+    groups: list[dict],
     transcript_date: str | None = None,
     transcript_title: str | None = None,
     speaker_descriptions: dict | None = None,
+    source_url: str | None = None,
 ) -> list[str]:
-    """Batch-create Claim records and link them to TranscriptClaims via FK.
+    """Create one Claim record per group, linking member TranscriptClaims.
 
-    Single transaction: creates all Claim records with status="queued",
-    sets speaker/source_url/claim_date/speaker_description/transcript_title,
-    and writes claim_id back to each TranscriptClaim.
-    Returns list of claim_id strings (insertion order).
+    Each group maps to one Claim. All member TranscriptClaims point to
+    that Claim via claim_id FK (many-to-one).
+
+    Args:
+        transcript_id: UUID of the transcript.
+        transcript_claim_ids: All TC IDs (indexed by thesis position).
+        groups: List of group dicts with member_tc_ids, claim_text, speaker, topic.
+        transcript_date: When the transcript was recorded.
+        transcript_title: Title of the transcript.
+        speaker_descriptions: Speaker name → description mapping.
+        source_url: Transcript URL.
+
+    Returns:
+        List of Claim IDs (one per group, insertion order).
     """
     from sqlalchemy import select
     from src.db.session import async_session
@@ -513,19 +633,19 @@ async def create_claims_for_transcript(
     speaker_descriptions = speaker_descriptions or {}
     claim_ids: list[str] = []
     log.info(activity.logger, "transcript", "create_claims_start",
-             "Creating Claim records for verification",
-             transcript_id=transcript_id, claim_count=len(claims))
+             "Creating Claim records for verification (group-based)",
+             transcript_id=transcript_id, group_count=len(groups))
 
     async with async_session() as session:
         async with session.begin():
-            for tc_id_str, claim_data in zip(transcript_claim_ids, claims):
-                speaker_name = claim_data.get("speaker")
-                # Create the Claim record
+            for group in groups:
+                speaker_name = group.get("speaker")
+                # Create one Claim per group
                 claim = Claim(
-                    text=claim_data["claim_text"],
+                    text=group["claim_text"],
                     speaker=speaker_name,
                     speaker_description=speaker_descriptions.get(speaker_name, "") if speaker_name else None,
-                    source_url=claim_data.get("source_url"),
+                    source_url=source_url,
                     claim_date=transcript_date,
                     transcript_title=transcript_title,
                     status="queued",
@@ -534,16 +654,17 @@ async def create_claims_for_transcript(
                 await session.flush()
                 claim_ids.append(str(claim.id))
 
-                # Link TranscriptClaim → Claim
-                tc_id = _uuid_mod.UUID(tc_id_str)
-                result = await session.execute(
-                    select(TranscriptClaim).where(TranscriptClaim.id == tc_id)
-                )
-                tc = result.scalar_one()
-                tc.claim_id = claim.id
+                # Link all member TranscriptClaims to this Claim
+                for tc_id_str in group["member_tc_ids"]:
+                    tc_id = _uuid_mod.UUID(tc_id_str)
+                    result = await session.execute(
+                        select(TranscriptClaim).where(TranscriptClaim.id == tc_id)
+                    )
+                    tc = result.scalar_one()
+                    tc.claim_id = claim.id
 
     log.info(activity.logger, "transcript", "claims_created",
-             "Batch-created Claim records and linked FKs",
+             "Created Claim records (group-based) and linked FKs",
              transcript_id=transcript_id, claim_count=len(claim_ids))
 
     return claim_ids

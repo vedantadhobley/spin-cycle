@@ -1,7 +1,7 @@
 """Parser registry and unified transcript data models.
 
 All transcript parsers produce the same TranscriptData structure regardless of
-source format (Rev.com HTML, raw text, etc.).  The registry dispatches URL or
+source format (C-SPAN JSON, raw text, etc.).  The registry dispatches URL or
 content to the appropriate parser.
 
 TranscriptData carries numbered segments with stable integer indices used as
@@ -37,7 +37,7 @@ class TranscriptData:
     date: str | None
     speakers: list[str]                         # normalized, deduplicated
     segments: list[NumberedSegment]
-    source_format: str                          # "raw_text", "revcom"
+    source_format: str                          # "raw_text", "revcom", "cspan"
     speaker_aliases: dict[str, list[str]] = field(default_factory=dict)  # canonical → variants
     editors_note: str | None = None
 
@@ -118,7 +118,8 @@ def available_parsers() -> list[str]:
 
 def detect_format(url: str) -> str:
     """Auto-detect parser format from URL."""
+    if "c-span.org" in url:
+        return "cspan"
     if "rev.com" in url:
         return "revcom"
-    # Default to revcom for URLs (most transcript sources are HTML)
     return "revcom"

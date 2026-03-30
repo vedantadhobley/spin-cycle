@@ -28,7 +28,7 @@ from pydantic import BaseModel, Field
 
 from src.llm import invoke_llm, validate_extraction
 from src.prompts.extraction import EXTRACTION_SYSTEM, EXTRACTION_USER
-from src.transcript.fetcher import Transcript, TranscriptSegment
+from src.transcript._archive_fetcher import Transcript, TranscriptSegment
 from src.utils.logging import log, get_logger
 
 MODULE = "transcript.extractor"

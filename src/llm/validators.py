@@ -21,6 +21,7 @@ from src.schemas.llm_outputs import (
     JudgeOutput,
     SynthesizeOutput,
     ThesisExtractionOutput,
+    ClaimReviewOutput,
 )
 from src.utils.logging import log, get_logger
 
@@ -293,5 +294,76 @@ def validate_thesis_extraction(output: ThesisExtractionOutput) -> tuple[bool, st
         log.info(logger, MODULE, "thesis_extraction_filtered",
                  f"Filtered {dropped} malformed theses",
                  dropped=dropped)
+
+    return True, ""
+
+
+def validate_claim_review(output: ClaimReviewOutput, claim_count: int) -> tuple[bool, str]:
+    """Validate claim review output semantically.
+
+    Checks:
+    1. Every input claim index has exactly one classification
+    2. No claim index appears in more than one group
+    3. Group members are all verifiable_fact and non-duplicate
+    4. At least one group exists (warn if zero verifiable)
+    5. Rationale fields meet minimum length
+    """
+    # Check 1: Every claim index has a classification
+    classified_indices = {c.claim_index for c in output.classifications}
+    expected = set(range(claim_count))
+    missing = expected - classified_indices
+    if missing:
+        return False, f"Missing classifications for claim indices: {sorted(missing)}"
+
+    extra = classified_indices - expected
+    if extra:
+        return False, f"Classifications reference invalid indices: {sorted(extra)}"
+
+    # Build lookup for quick access
+    class_by_idx = {c.claim_index: c for c in output.classifications}
+
+    # Check 2: No claim index in more than one group
+    seen_in_groups: set[int] = set()
+    for group in output.groups:
+        for idx in group.member_indices:
+            if idx in seen_in_groups:
+                return False, f"Claim index {idx} appears in multiple groups"
+            seen_in_groups.add(idx)
+
+    # Check 3: Group members must be verifiable_fact and non-duplicate
+    for gi, group in enumerate(output.groups):
+        for idx in group.member_indices:
+            if idx not in class_by_idx:
+                return False, f"Group {gi} references unclassified index {idx}"
+            cls = class_by_idx[idx]
+            if cls.classification != "verifiable_fact":
+                return False, (
+                    f"Group {gi} includes index {idx} classified as "
+                    f"'{cls.classification}', not 'verifiable_fact'"
+                )
+            if cls.is_duplicate:
+                return False, f"Group {gi} includes duplicate index {idx}"
+
+    # Check 4: At least one group if there are verifiable claims
+    verifiable_non_dup = [
+        c for c in output.classifications
+        if c.classification == "verifiable_fact" and not c.is_duplicate
+    ]
+    if verifiable_non_dup and not output.groups:
+        return False, (
+            f"Found {len(verifiable_non_dup)} verifiable non-duplicate claims "
+            f"but no groups were created"
+        )
+
+    if not verifiable_non_dup and not output.groups:
+        log.warning(logger, MODULE, "no_verifiable_claims",
+                    "No verifiable non-duplicate claims found — zero groups")
+
+    # Check 5: Rationale fields
+    for group in output.groups:
+        if len(group.group_rationale.strip()) < 10:
+            return False, f"group_rationale too short: '{group.group_rationale}'"
+        if len(group.checkability_rationale.strip()) < 10:
+            return False, f"checkability_rationale too short: '{group.checkability_rationale}'"
 
     return True, ""

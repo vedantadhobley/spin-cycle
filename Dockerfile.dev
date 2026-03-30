@@ -9,7 +9,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
-    && python -m spacy download en_core_web_sm
+    && python -m spacy download en_core_web_sm \
+    && playwright install --with-deps chromium
 
 # Dev: mount source code as volume, install in editable mode at runtime
 EXPOSE 4500
