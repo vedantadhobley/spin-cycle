@@ -107,12 +107,16 @@ TIMEOUT_NOTIFY_FRONTEND = 10
 # Extraction workflow
 TIMEOUT_FETCH_TRANSCRIPT = 60
 TIMEOUT_EXTRACT_CHUNK = 2700  # 45 min — large chunks on slow model
-TIMEOUT_CLASSIFY_CLAIMS = 120
-TIMEOUT_DEDUP_CLAIMS = 120
+TIMEOUT_CLASSIFY_CLAIMS = 600  # 10 min — 50-claim batches on local model
+TIMEOUT_DEDUP_CLAIMS = 600    # 10 min — per-speaker embedding dedup
 TIMEOUT_SYNTHESIZE_CLAIM = 300
 TIMEOUT_STORE_CLAIMS = 30
 TIMEOUT_UPDATE_STATUS = 15
 TIMEOUT_FINISH_TRANSCRIPT = 30
+
+# LLM streaming
+LLM_IDLE_TIMEOUT = 90          # seconds — abort if no tokens for this long
+LLM_NO_JSON_TOKEN_LIMIT = 4000  # abort if this many tokens produced with no '{' seen
 
 # ---------------------------------------------------------------------------
 # Research agent

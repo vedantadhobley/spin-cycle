@@ -4,6 +4,7 @@ Phase 1: Batch classification → UPDATE classification fields on transcript_cla
 Phase 2: Per-speaker embedding dedup → UPDATE dedup flags on transcript_claims.
 """
 
+import asyncio
 from datetime import timedelta
 from temporalio import workflow
 from temporalio.common import RetryPolicy
@@ -17,6 +18,7 @@ with workflow.unsafe.imports_passed_through():
     )
     from src.utils.logging import log
     from src.config import (
+        MAX_CONCURRENT,
         TIMEOUT_CLASSIFY_CLAIMS,
         TIMEOUT_DEDUP_CLAIMS,
         CLASSIFY_BATCH_SIZE,
@@ -41,29 +43,39 @@ class ClassifyAndDedupWorkflow:
                  f"Classifying {len(all_theses)} claims",
                  transcript_id=transcript_id)
 
-        # --- Phase 1: Batch classification ---
-        for batch_start in range(0, len(all_theses), CLASSIFY_BATCH_SIZE):
-            batch = all_theses[batch_start:batch_start + CLASSIFY_BATCH_SIZE]
-            classified = await workflow.execute_activity(
-                classify_claims_activity,
-                args=[batch],
-                start_to_close_timeout=timedelta(
-                    seconds=TIMEOUT_CLASSIFY_CLAIMS
-                ),
-                retry_policy=RetryPolicy(maximum_attempts=2),
-            )
-            # Merge classification fields back
-            for i, c in enumerate(classified):
-                idx = batch_start + i
-                all_theses[idx]["classification"] = c.get(
-                    "classification", "verifiable_fact"
+        # --- Phase 1: Batch classification (parallel pairs) ---
+        sem = asyncio.Semaphore(MAX_CONCURRENT)
+        batches = [
+            (batch_start, all_theses[batch_start:batch_start + CLASSIFY_BATCH_SIZE])
+            for batch_start in range(0, len(all_theses), CLASSIFY_BATCH_SIZE)
+        ]
+
+        async def classify_batch(batch_start: int, batch: list[dict]):
+            async with sem:
+                classified = await workflow.execute_activity(
+                    classify_claims_activity,
+                    args=[batch],
+                    start_to_close_timeout=timedelta(
+                        seconds=TIMEOUT_CLASSIFY_CLAIMS
+                    ),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
                 )
-                all_theses[idx]["checkable"] = c.get("checkable", True)
-                all_theses[idx]["check_rationale"] = c.get(
-                    "check_rationale", ""
-                )
-                if "factual_anchor" in c:
-                    all_theses[idx]["factual_anchor"] = c["factual_anchor"]
+                # Merge classification fields back
+                for i, c in enumerate(classified):
+                    idx = batch_start + i
+                    all_theses[idx]["classification"] = c.get(
+                        "classification", "verifiable_fact"
+                    )
+                    all_theses[idx]["checkable"] = c.get("checkable", True)
+                    all_theses[idx]["check_rationale"] = c.get(
+                        "check_rationale", ""
+                    )
+                    if "factual_anchor" in c:
+                        all_theses[idx]["factual_anchor"] = c["factual_anchor"]
+
+        await asyncio.gather(*(
+            classify_batch(bs, b) for bs, b in batches
+        ))
 
         # UPDATE classification in DB
         if tc_ids:
@@ -94,7 +106,8 @@ class ClassifyAndDedupWorkflow:
             speaker_theses.setdefault(speaker, []).append((global_i, t))
 
         dedup_results: dict[str, dict] = {}
-        for speaker, indexed_theses in speaker_theses.items():
+
+        async def dedup_speaker(speaker: str, indexed_theses: list):
             sp_theses = [t for _, t in indexed_theses]
             sp_global_indices = [gi for gi, _ in indexed_theses]
 
@@ -109,16 +122,22 @@ class ClassifyAndDedupWorkflow:
                     "global_indices": sp_global_indices,
                 }
             else:
-                result = await workflow.execute_activity(
-                    dedup_claims_activity,
-                    args=[sp_theses, speaker],
-                    start_to_close_timeout=timedelta(
-                        seconds=TIMEOUT_DEDUP_CLAIMS
-                    ),
-                    retry_policy=RetryPolicy(maximum_attempts=2),
-                )
-                result["global_indices"] = sp_global_indices
-                dedup_results[speaker] = result
+                async with sem:
+                    result = await workflow.execute_activity(
+                        dedup_claims_activity,
+                        args=[sp_theses, speaker],
+                        start_to_close_timeout=timedelta(
+                            seconds=TIMEOUT_DEDUP_CLAIMS
+                        ),
+                        retry_policy=RetryPolicy(maximum_attempts=2),
+                    )
+                    result["global_indices"] = sp_global_indices
+                    dedup_results[speaker] = result
+
+        await asyncio.gather(*(
+            dedup_speaker(spk, itheses)
+            for spk, itheses in speaker_theses.items()
+        ))
 
         # Build group structures
         all_groups = _collect_groups_from_dedup(dedup_results, all_theses)

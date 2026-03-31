@@ -16,6 +16,7 @@ with workflow.unsafe.imports_passed_through():
         create_claims_for_transcript,
     )
     from src.utils.logging import log
+    from src.config import MAX_CONCURRENT
 
 MODULE = "synthesize_claims_workflow"
 
@@ -85,26 +86,28 @@ class SynthesizeClaimsWorkflow:
                      f"({len(single_member)} single-member skipped)",
                      multi=len(synth_groups), single=len(single_member))
 
+            sem = asyncio.Semaphore(MAX_CONCURRENT)
             synth_results: dict[str, dict] = {}
-            for i in range(0, len(synth_groups), 2):
-                batch = synth_groups[i:i + 2]
-                futures = []
-                for sg in batch:
-                    futures.append(
-                        workflow.execute_activity(
-                            synthesize_claim_activity,
-                            args=[
-                                sg["member_statements"],
-                                sg["topic"],
-                                sg["speaker"],
-                            ],
-                            start_to_close_timeout=timedelta(seconds=300),
-                            retry_policy=RetryPolicy(maximum_attempts=2),
-                        )
+
+            async def synth_with_sem(sg: dict) -> tuple[str, dict]:
+                async with sem:
+                    result = await workflow.execute_activity(
+                        synthesize_claim_activity,
+                        args=[
+                            sg["member_statements"],
+                            sg["topic"],
+                            sg["speaker"],
+                        ],
+                        start_to_close_timeout=timedelta(seconds=300),
+                        retry_policy=RetryPolicy(maximum_attempts=2),
                     )
-                batch_results = await asyncio.gather(*futures)
-                for sg, result in zip(batch, batch_results):
-                    synth_results[sg["group_id"]] = result
+                    return sg["group_id"], result
+
+            results = await asyncio.gather(*(
+                synth_with_sem(sg) for sg in synth_groups
+            ))
+            for group_id, result in results:
+                synth_results[group_id] = result
 
             for g in multi_member:
                 synth = synth_results.get(g["local_group_id"])

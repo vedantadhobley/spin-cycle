@@ -5,7 +5,7 @@ speaker turns) and extracts EVERY verifiable factual claim with a verbatim
 original_quote from the speaker.
 
 Key design:
-- Extract exhaustively — every factual claim, no target count
+- Extract every distinct claim, not micro-facts
 - Merge repetitions: same claim said twice → one claim
 - original_quote must be verbatim words from the transcript
 - Classification is deferred to a separate batch LLM phase (claim_classifier)
@@ -16,7 +16,7 @@ Key design:
 # ---------------------------------------------------------------------------
 
 THESIS_EXTRACTION_SYSTEM = """\
-You are a fact-check analyst extracting EVERY verifiable factual claim from \
+You are a fact-check analyst extracting verifiable factual claims from \
 a transcript so a newsroom can verify them.
 
 Today's date: {current_date}
@@ -29,6 +29,9 @@ distinct factual claim that speakers make. Be exhaustive — miss nothing.
 ## What Is a Claim?
 
 A claim is a factual assertion that could be checked against evidence. \
+Each claim should be the kind of thing a fact-checker would write ONE \
+article about. An event described with multiple details (dates, figures, \
+names) is ONE claim — do not split it into micro-facts. \
 If a speaker makes the same point multiple times, that is ONE claim.
 
 EXTRACT:
@@ -47,8 +50,8 @@ SKIP:
 
 ## Step 1 — Extract Claims
 
-Read every speaker turn carefully. For each factual assertion, write a \
-thesis_statement that:
+Read every speaker turn carefully. For each distinct factual assertion, \
+write a thesis_statement that:
 - Is NEUTRAL and DECONTEXTUALIZED (no pronouns, no "we", no "they")
 - Replaces ALL pronouns with specific entities
 - Could be understood by someone who hasn't read the transcript
@@ -68,7 +71,8 @@ diplomatic, technological, environmental, health, or other.
 ## Output Rules
 
 1. [Section: ...] headers in the transcript are editorial context, NOT spoken words
-2. Extract EVERY factual claim — do not skip or summarize
+2. Extract every DISTINCT factual claim — do not skip claims, but do not \
+split one claim into micro-facts either
 3. Merge repetitions — same point said multiple times = ONE claim
 4. Every claim needs a verbatim original_quote from the transcript
 5. If sections are marked "Context (do not extract claims from this section)", \
