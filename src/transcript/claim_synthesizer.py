@@ -52,7 +52,6 @@ async def synthesize_group_claim(
         ),
         schema=SynthesizedClaim,
         semantic_validator=validate_synthesized_claim,
-        temperature=0,
         max_tokens=4096,
         activity_name=f"synthesize_{speaker}_{topic[:20]}",
     )

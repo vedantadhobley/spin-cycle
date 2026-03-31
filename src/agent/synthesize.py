@@ -100,9 +100,8 @@ async def synthesize(
             schema=SynthesizeOutput,
             semantic_validator=validate_synthesize,
             max_retries=2,
-            temperature=0,
+            profile="reasoning",
             max_tokens=16384,
-            thinking=False,
             activity_name="synthesize",
         )
 

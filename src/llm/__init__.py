@@ -27,7 +27,7 @@ The invoker implements defense-in-depth:
   2. PARSE: Extract JSON, handling markdown wrappers
   3. SCHEMA: Validate against Pydantic model
   4. SEMANTIC: Domain-specific validation
-  5. RETRY: On failure, retry with higher temperature
+  5. RETRY: On failure, retry
 """
 
 # Client access

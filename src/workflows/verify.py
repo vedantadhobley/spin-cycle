@@ -245,7 +245,7 @@ class VerifyClaimWorkflow:
         # that skip synthesis entirely).
         key_test = thesis_info.get("key_test", "")
 
-        # Step 2: Research all facts (thinking=off, fast)
+        # Step 2: Research all facts
         self._set_phase("researching")
 
         async def _research(fact: dict) -> tuple[str, list, dict]:
@@ -335,7 +335,7 @@ class VerifyClaimWorkflow:
                  merged_parties=len(merged_all_parties),
                  merged_media=len(merged_affiliated_media))
 
-        # Step 3: Judge all facts (thinking=on, slow)
+        # Step 3: Judge all facts
         self._set_phase("judging")
 
         async def _judge(fact_text: str, evidence: list,

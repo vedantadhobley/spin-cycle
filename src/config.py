@@ -23,9 +23,23 @@ MAX_CONCURRENT = 2
 # LLM invocation defaults
 # ---------------------------------------------------------------------------
 
-# Default temperatures (overridden per-call where needed)
-LLM_TEMPERATURE = 0.0
-LLM_TEMPERATURE_ON_RETRY = 0.3
+# Qwen3.5-122B-A10B recommended instruct sampling profiles (from model card).
+# Two profiles: "general" for structured extraction/classification/routing,
+# "reasoning" for evaluation/judgment/analysis.
+# DO NOT use greedy decoding (temp=0) — causes degeneration and repetitions.
+
+# General profile — extraction, classification, summarization, tool routing
+LLM_GENERAL_TEMPERATURE = 0.7
+LLM_GENERAL_TOP_P = 0.8
+LLM_GENERAL_TOP_K = 20
+LLM_GENERAL_PRESENCE_PENALTY = 1.5
+
+# Reasoning profile — decompose, judge, synthesize verdict
+LLM_REASONING_TEMPERATURE = 1.0
+LLM_REASONING_TOP_P = 1.0
+LLM_REASONING_TOP_K = 40
+LLM_REASONING_PRESENCE_PENALTY = 2.0
+
 LLM_MAX_RETRIES = 2
 
 # Per-step max_tokens (extraction/review/judge need large output windows)
@@ -33,13 +47,6 @@ EXTRACTION_MAX_TOKENS = 16384
 DECOMPOSE_MAX_TOKENS = 16384
 JUDGE_MAX_TOKENS = 16384
 SYNTHESIZE_MAX_TOKENS = 16384
-
-# Thinking mode (judge + synthesize)
-LLM_THINKING_TEMPERATURE = 0.6
-LLM_THINKING_MIN_TOKENS = 32768
-LLM_THINKING_TOP_K = 20
-LLM_THINKING_TOP_P = 0.95
-LLM_THINKING_PRESENCE_PENALTY = 1.5
 
 # Retry pause between LLM attempts (seconds)
 LLM_RETRY_DELAY = 1

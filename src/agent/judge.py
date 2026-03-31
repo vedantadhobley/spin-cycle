@@ -260,9 +260,8 @@ async def judge(
             schema=JudgeOutput,
             semantic_validator=validate_judge,
             max_retries=2,
-            temperature=0,
+            profile="reasoning",
             max_tokens=16384,
-            thinking=False,
             activity_name="judge",
         )
 

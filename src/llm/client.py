@@ -4,80 +4,83 @@ This module provides configured LLM clients for the verification pipeline.
 All clients hit the same Qwen3.5-122B-A10B instance via llama.cpp's
 OpenAI-compatible API.
 
-  get_llm()                → Instruct mode (all production use)
-  get_llm(thinking=True)   → Thinking mode (tested and reverted, see ARCHITECTURE.md)
+Two sampling profiles from the Qwen3.5 model card:
+  - "general": extraction, classification, summarization, tool routing
+  - "reasoning": decompose, judge, synthesize verdict
+
+Thinking mode was tested and reverted — see ARCHITECTURE.md.
 """
 
 import os
+from typing import Literal
 
 from langchain_openai import ChatOpenAI
 
 from src.config import (
-    LLM_TEMPERATURE,
-    LLM_THINKING_TEMPERATURE,
-    LLM_THINKING_MIN_TOKENS,
-    LLM_THINKING_TOP_K,
-    LLM_THINKING_TOP_P,
-    LLM_THINKING_PRESENCE_PENALTY,
+    LLM_GENERAL_TEMPERATURE,
+    LLM_GENERAL_TOP_P,
+    LLM_GENERAL_TOP_K,
+    LLM_GENERAL_PRESENCE_PENALTY,
+    LLM_REASONING_TEMPERATURE,
+    LLM_REASONING_TOP_P,
+    LLM_REASONING_TOP_K,
+    LLM_REASONING_PRESENCE_PENALTY,
 )
 from src.utils.logging import log, get_logger
 
 MODULE = "llm"
 logger = get_logger()
 
-# Single model instance — thinking disabled for structured output
 LLAMA_URL = os.getenv("LLAMA_URL")
 if not LLAMA_URL:
     raise RuntimeError("LLAMA_URL environment variable is required")
 MODEL = os.getenv("LLAMA_MODEL", "Qwen3.5-122B-A10B")
 
+# Profiles map to Qwen3.5 model card recommended sampling parameters.
+_PROFILES = {
+    "general": {
+        "temperature": LLM_GENERAL_TEMPERATURE,
+        "top_p": LLM_GENERAL_TOP_P,
+        "top_k": LLM_GENERAL_TOP_K,
+        "presence_penalty": LLM_GENERAL_PRESENCE_PENALTY,
+    },
+    "reasoning": {
+        "temperature": LLM_REASONING_TEMPERATURE,
+        "top_p": LLM_REASONING_TOP_P,
+        "top_k": LLM_REASONING_TOP_K,
+        "presence_penalty": LLM_REASONING_PRESENCE_PENALTY,
+    },
+}
+
+LLMProfile = Literal["general", "reasoning"]
+
 
 def get_llm(
-    temperature: float = LLM_TEMPERATURE,
+    profile: LLMProfile = "general",
     max_tokens: int = 8192,
-    thinking: bool = False,
 ) -> ChatOpenAI:
-    """Get the LLM client.
+    """Get the LLM client with Qwen3.5 recommended sampling.
 
     Args:
-        temperature: 0.0 = deterministic, 1.0 = creative.
-            Default LLM_TEMPERATURE for fact-checking — consistent,
-            conservative. Overridden to LLM_THINKING_TEMPERATURE when
-            thinking=True (Qwen3.5 recommended minimum for thinking mode).
-        max_tokens: Maximum output tokens. Default 8192, sufficient for
-            non-thinking verification calls. When thinking=True, forced
-            to at least LLM_THINKING_MIN_TOKENS — thinking tokens count
-            against the limit and can easily consume 10-15K before the
-            actual output.
-        thinking: Enable thinking/reasoning mode. The model gets an
-            internal scratchpad before producing structured output.
-            Significantly slower (5-10 min per call vs 1-3 min) but
-            better at cross-referencing evidence and catching contradictions.
-            Sets Qwen-recommended sampling from config constants.
+        profile: "general" for extraction/classification/routing,
+            "reasoning" for decompose/judge/synthesize.
+        max_tokens: Maximum output tokens. Default 8192.
     """
-    extra_body: dict = {
-        "chat_template_kwargs": {"enable_thinking": thinking},
-    }
-
-    if thinking:
-        temperature = LLM_THINKING_TEMPERATURE
-        max_tokens = max(max_tokens, LLM_THINKING_MIN_TOKENS)
-        extra_body["top_k"] = LLM_THINKING_TOP_K
-
+    params = _PROFILES[profile]
     client = ChatOpenAI(
         base_url=f"{LLAMA_URL}/v1",
         api_key="not-needed",
         model=MODEL,
-        temperature=temperature,
+        temperature=params["temperature"],
         max_tokens=max_tokens,
-        top_p=LLM_THINKING_TOP_P if thinking else None,
-        presence_penalty=LLM_THINKING_PRESENCE_PENALTY if thinking else None,
-        extra_body=extra_body,
+        top_p=params["top_p"],
+        presence_penalty=params["presence_penalty"],
+        extra_body={
+            "chat_template_kwargs": {"enable_thinking": False},
+            "top_k": params["top_k"],
+        },
     )
-    mode = "thinking" if thinking else "instruct"
-    log.debug(logger, MODULE, "llm_init", f"LLM client created ({mode})",
-              base_url=LLAMA_URL, model=MODEL, temperature=temperature,
-              max_tokens=max_tokens, thinking=thinking)
+    log.debug(logger, MODULE, "llm_init", f"LLM client created ({profile})",
+              base_url=LLAMA_URL, model=MODEL,
+              temperature=params["temperature"], max_tokens=max_tokens)
     return client
-
-

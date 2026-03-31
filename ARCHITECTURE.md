@@ -127,14 +127,7 @@ A claim enters the system (via API or extraction) and is processed as a **flat p
 
 All steps use the same **Qwen3.5-122B-A10B** (MoE, 10B active) instance on the LLM server, running on **ROCm** for AMD GPU acceleration. Quantized to Q4_K_M (~76.5GB).
 
-All steps use **instruct mode** (`enable_thinking=False`). Thinking mode was tested for judge and synthesize but reverted — see [Thinking Mode Experiment](#thinking-mode-experiment) below for details.
-
-| Step | Mode | Why |
-|------|------|-----|
-| decompose_claim | instruct (temp=0) | Structured JSON output, no reasoning needed |
-| research_subclaim | instruct (temp=0) | ReAct tool-routing — picking search queries |
-| judge_subclaim | instruct (temp=0) | Structured rubric evaluation. Calibration rules in the prompt guide reasoning |
-| synthesize_verdict | instruct (temp=0) | Thesis evaluation and subclaim weighting |
+All steps use **instruct mode** (`enable_thinking=False`) with **Qwen3.5 recommended sampling**: temp=0.7, top_p=0.8, top_k=20, presence_penalty=1.5. Greedy decoding (temp=0) causes degeneration and repetitions per the model card. Thinking mode was tested and reverted — see [Thinking Mode Experiment](#thinking-mode-experiment).
 
 **Why instruct over thinking:** Thinking mode (Qwen3.5's `enable_thinking=True`) was tested but produced worse outcomes overall — 5-10 min per call (vs 1-2 min instruct), schema validation failures from creative enum values, and silent activity crashes. The prompt's calibration rules (outlet-vs-claim reliability, contested classifications, rhetorical trap detection patterns) achieve the same reasoning quality improvements at zero latency cost. See [Thinking Mode Experiment](#thinking-mode-experiment).
 
@@ -275,7 +268,7 @@ This is where the LangGraph ReAct agent runs. For each **atomic fact**:
 
 **Streaming evidence collection:** The agent uses `astream()` with `stream_mode="updates"` instead of `ainvoke()`. Messages are collected incrementally as the agent works. If the agent hits its step limit (`GraphRecursionError`) or times out, we keep ALL evidence gathered up to that point instead of losing everything. This replaced a direct `ainvoke()` call that would return nothing on interruption.
 
-The research agent uses **thinking=off** (`enable_thinking=False`). The ReAct loop is pure tool-routing — picking search queries and deciding when to stop. Thinking mode wastes tokens per iteration generating `<think>` blocks that nobody reads, just to produce an 8-token tool call. With thinking off, the same search queries are produced in ~3s per iteration.
+The research agent uses default instruct sampling (same as all other steps). Thinking mode was tested but wastes tokens per iteration generating `<think>` blocks for 8-token tool calls.
 
 **Tools available to the agent (dynamically loaded based on API keys):**
 - `serper_search` — Google search via Serper API (primary). Requires `SERPER_API_KEY`.

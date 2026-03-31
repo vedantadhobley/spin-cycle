@@ -352,17 +352,10 @@ def build_research_agent(interested_parties_context: str = "",
             prompt so the agent knows who the players are without
             burning tool calls on lookups.
     """
-    # thinking=off — the ReAct loop is pure tool-routing: pick a search
-    # query, call the tool, repeat.  Thinking mode wastes ~25-45s per
-    # iteration generating <think> blocks nobody reads, which eats the
-    # entire timeout budget.  With thinking off, the same search queries
-    # are produced in ~3s per iteration.
-    #
-    # temperature=0 for deterministic search queries.  The agent's job is
-    # routing — "search for X", "fetch Y" — not creative writing.  temp=0
-    # ensures the same sub-claim always generates the same queries, which
-    # means the same evidence, which means consistent verdicts.
-    llm = get_llm(temperature=0)
+    # Uses default instruct sampling (temp=0.7, top_p=0.8, top_k=20,
+    # presence_penalty=1.5) per Qwen3.5 model card. Greedy decoding
+    # (temp=0) causes degeneration even for tool-routing.
+    llm = get_llm()
     tools = _build_tool_list()
 
     prompt = RESEARCH_SYSTEM.format(

@@ -6,7 +6,7 @@ It handles the full lifecycle:
   1. INVOKE: Stream tokens from the LLM with idle timeout
   2. PARSE: Extract JSON from raw response
   3. VALIDATE: Check against Pydantic schema
-  4. RETRY: On failure, retry with adjusted parameters
+  4. RETRY: On failure, retry
 
 Streaming detects two failure modes early:
   - Server goes silent (no tokens for LLM_IDLE_TIMEOUT seconds)
@@ -21,11 +21,9 @@ from typing import Any, Callable, Optional, Type, TypeVar
 from langchain_core.messages import SystemMessage, HumanMessage
 from pydantic import BaseModel, ValidationError
 
-from src.llm.client import get_llm
+from src.llm.client import get_llm, LLMProfile
 from src.llm.parser import extract_json, JSONExtractionError
 from src.config import (
-    LLM_TEMPERATURE,
-    LLM_TEMPERATURE_ON_RETRY,
     LLM_MAX_RETRIES,
     LLM_RETRY_DELAY,
 )
@@ -157,10 +155,8 @@ async def invoke_llm(
     schema: Type[T],
     *,
     max_retries: int = LLM_MAX_RETRIES,
-    temperature: float = LLM_TEMPERATURE,
-    temperature_on_retry: float = LLM_TEMPERATURE_ON_RETRY,
+    profile: LLMProfile = "general",
     max_tokens: int = 8192,
-    thinking: bool = False,
     semantic_validator: Optional[Callable[[T], tuple[bool, str]]] = None,
     activity_name: str = "invoke",
 ) -> T:
@@ -171,15 +167,14 @@ async def invoke_llm(
     2. Extracts JSON from the response
     3. Validates against the Pydantic schema
     4. Optionally runs semantic validation
-    5. Retries on failure with higher temperature
+    5. Retries on failure
 
     Args:
         system_prompt: System message content
         user_prompt: User message content
         schema: Pydantic model class to validate against
         max_retries: Number of retry attempts (default: 2)
-        temperature: Initial temperature (default: LLM_TEMPERATURE)
-        temperature_on_retry: Temperature for retry attempts (default: 0.3)
+        profile: "general" or "reasoning" (default: "general")
         semantic_validator: Optional function (model) -> (is_valid, error_msg)
         activity_name: Name for logging context
 
@@ -195,14 +190,9 @@ async def invoke_llm(
     last_validation_error: Optional[str] = None
 
     for attempt in range(max_retries + 1):
-        current_temp = temperature if attempt == 0 else temperature_on_retry
-
         try:
             # Step 1: INVOKE (streaming with idle timeout)
-            llm = get_llm(
-                temperature=current_temp, max_tokens=max_tokens,
-                thinking=thinking,
-            )
+            llm = get_llm(profile=profile, max_tokens=max_tokens)
             _t0 = time.monotonic()
             messages = [
                 SystemMessage(content=system_prompt),
@@ -292,7 +282,7 @@ async def invoke_llm_raw(
     system_prompt: str,
     user_prompt: str,
     *,
-    temperature: float = LLM_TEMPERATURE,
+    profile: LLMProfile = "general",
     activity_name: str = "invoke",
 ) -> tuple[str, int]:
     """Invoke LLM and return raw output without parsing/validation.
@@ -304,13 +294,13 @@ async def invoke_llm_raw(
     Args:
         system_prompt: System message content
         user_prompt: User message content
-        temperature: Temperature setting
+        profile: "general" or "reasoning" (default: "general")
         activity_name: Name for logging context
 
     Returns:
         Tuple of (raw_output, latency_ms)
     """
-    llm = get_llm(temperature=temperature)
+    llm = get_llm(profile=profile)
     _t0 = time.monotonic()
     messages = [
         SystemMessage(content=system_prompt),

@@ -30,7 +30,7 @@ flowchart TD
 via llama.cpp ROCm on AMD Strix Halo (125GB unified memory).
 Server: `--parallel 2 --ctx-size 131072` (2 slots x 65K context each, ~3 GB KV cache thanks to hybrid architecture: 2 KV heads, 12 attention layers of 48 total — rest are recurrent/SSM). Embedding model (3103) disabled via Docker profiles.
 
-**All steps use instruct mode** (`enable_thinking=False`, temp=0.0, max_tokens=8192-16384). Thinking mode was tested for judge/synthesize and reverted due to 5-10x latency, schema validation failures, and silent activity crashes — the prompt's calibration rules achieve the same reasoning quality. See ARCHITECTURE.md § Thinking Mode Experiment.
+**All steps use instruct mode** with Qwen3.5 recommended sampling: temp=0.7, top_p=0.8, top_k=20, presence_penalty=1.5, max_tokens=8192-16384. Thinking mode was tested and reverted — see ARCHITECTURE.md § Thinking Mode Experiment.
 
 ---
 
@@ -377,7 +377,7 @@ fails both checks when researching a 2026 Iran claim → dropped.
 - Schema: `src/schemas/llm_outputs.py` — `JudgeOutput`
 - Validator: `src/llm/validators.py` — `validate_judge()` (L133)
 
-**Mode**: Instruct (`enable_thinking=False`, temp=0, max_tokens=16384). **Retries**: 2. **Activity timeout**: 300s.
+**Mode**: Instruct (temp=0.7, max_tokens=16384). **Retries**: 2. **Activity timeout**: 300s.
 
 **Placeholders**: `{current_date}`, `{claim_date_line}`, `{speaker_line}`, `{transcript_context}`, `{claim_text}`, `{sub_claim}`, `{verification_line}`, `{key_test_line}`, `{evidence_text}`
 
@@ -579,7 +579,7 @@ capture, letter vs spirit, precedent inconsistency.
 - Schema: `src/schemas/llm_outputs.py` — `SynthesizeOutput`
 - Validator: `src/llm/validators.py` — `validate_synthesize()` (L182)
 
-**Mode**: Instruct (`enable_thinking=False`, temp=0, max_tokens=16384). **Retries**: 2. **Activity timeout**: 300s.
+**Mode**: Instruct (temp=0.7, max_tokens=16384). **Retries**: 2. **Activity timeout**: 300s.
 
 **Placeholders**: `{current_date}`, `{claim_date_line}`, `{transcript_context}`, `{synthesis_framing}`, `{sub_verdicts_text}`, `{evidence_digest}`
 
