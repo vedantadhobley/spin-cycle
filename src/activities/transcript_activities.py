@@ -122,19 +122,30 @@ async def fetch_raw_transcript(
 
 @activity.defn
 async def extract_chunk_activity(
-    transcript_data: dict,
+    transcript_meta: dict,
     chunk_dict: dict,
     enriched_speakers: list[dict],
 ) -> list[dict]:
     """Extract claims from a single chunk of a transcript.
 
-    Takes serialized TranscriptData, Chunk dict, and enriched speakers.
+    Takes slim transcript_meta (7 fields), Chunk dict, and enriched speakers.
     Returns list of thesis dicts with original_quote.
     """
     from src.transcript.thesis_extractor import Chunk, extract_chunk
+    from src.transcript.parsers import TranscriptData
 
-    # Reconstruct TranscriptData
-    td = _reconstruct_transcript_data(transcript_data)
+    # Reconstruct minimal TranscriptData from slim meta
+    td = TranscriptData(
+        url=transcript_meta.get("url", ""),
+        title=transcript_meta["title"],
+        date=transcript_meta.get("date"),
+        speakers=transcript_meta["speakers"],
+        turns=[],  # not needed by extract_chunk — only metadata used
+        source_format=transcript_meta.get("source_format", "revcom"),
+        speaker_aliases=transcript_meta.get("speaker_aliases", {}),
+        _word_count_override=transcript_meta.get("word_count"),
+        _turn_count_override=transcript_meta.get("turn_count"),
+    )
     chunk = Chunk(**chunk_dict)
 
     log.info(activity.logger, "transcript", "chunk_extraction_start",
@@ -146,7 +157,14 @@ async def extract_chunk_activity(
     theses = await extract_chunk(td, chunk, enriched_speakers)
 
     # Serialize for Temporal transport
-    result = _serialize_theses(theses)
+    result = []
+    for t in theses:
+        result.append({
+            "thesis_statement": t.thesis_statement,
+            "speakers": t.speakers,
+            "original_quote": t.original_quote,
+            "topic": t.topic,
+        })
 
     log.info(activity.logger, "transcript", "chunk_extraction_done",
              "Chunk extraction complete",
@@ -231,40 +249,66 @@ async def synthesize_claim_activity(
     return output.model_dump()
 
 
-def _reconstruct_transcript_data(transcript_data: dict):
-    """Reconstruct TranscriptData from a serialized dict."""
-    from src.transcript.parsers import TranscriptData, SpeakerTurn
+@activity.defn
+async def update_transcript_claims_classification(
+    transcript_id: str,
+    updates: list[dict],
+) -> None:
+    """Update classification fields on existing transcript_claims.
 
-    turns = [
-        SpeakerTurn(
-            speaker=t["speaker"],
-            text=t["text"],
-            section_header=t.get("section_header"),
-        )
-        for t in transcript_data["turns"]
-    ]
-    return TranscriptData(
-        url=transcript_data["url"],
-        title=transcript_data["title"],
-        date=transcript_data.get("date"),
-        speakers=transcript_data["speakers"],
-        turns=turns,
-        source_format=transcript_data.get("source_format", "revcom"),
-        speaker_aliases=transcript_data.get("speaker_aliases", {}),
-    )
+    Each update dict has: tc_id, classification, checkable, checkability_rationale,
+    and optionally factual_anchor.
+    """
+    from sqlalchemy import select
+    from src.db.session import async_session
+    from src.db.models import TranscriptClaim
+
+    async with async_session() as session:
+        for u in updates:
+            tc_id = _uuid_mod.UUID(u["tc_id"])
+            result = await session.execute(
+                select(TranscriptClaim).where(TranscriptClaim.id == tc_id)
+            )
+            tc = result.scalar_one()
+            tc.classification = u.get("classification")
+            tc.checkable = u.get("checkable")
+            tc.checkability_rationale = u.get("checkability_rationale")
+            if "factual_anchor" in u:
+                tc.factual_anchor = u.get("factual_anchor")
+        await session.commit()
+
+    log.info(activity.logger, "transcript", "classification_updated",
+             "Classification updated on transcript_claims",
+             transcript_id=transcript_id, count=len(updates))
 
 
-def _serialize_theses(theses) -> list[dict]:
-    """Serialize ExtractedThesis objects for Temporal transport."""
-    result = []
-    for t in theses:
-        result.append({
-            "thesis_statement": t.thesis_statement,
-            "speakers": t.speakers,
-            "original_quote": t.original_quote,
-            "topic": t.topic,
-        })
-    return result
+@activity.defn
+async def update_transcript_claims_dedup(
+    transcript_id: str,
+    updates: list[dict],
+) -> None:
+    """Update dedup fields on existing transcript_claims.
+
+    Each update dict has: tc_id, is_duplicate, worth_checking.
+    """
+    from sqlalchemy import select
+    from src.db.session import async_session
+    from src.db.models import TranscriptClaim
+
+    async with async_session() as session:
+        for u in updates:
+            tc_id = _uuid_mod.UUID(u["tc_id"])
+            result = await session.execute(
+                select(TranscriptClaim).where(TranscriptClaim.id == tc_id)
+            )
+            tc = result.scalar_one()
+            tc.is_duplicate = u.get("is_duplicate", False)
+            tc.worth_checking = u.get("worth_checking", True)
+        await session.commit()
+
+    log.info(activity.logger, "transcript", "dedup_updated",
+             "Dedup flags updated on transcript_claims",
+             transcript_id=transcript_id, count=len(updates))
 
 
 @activity.defn
@@ -367,15 +411,13 @@ async def store_transcript_claims(
                 claim_text=c.get("claim_text") or c.get("thesis_statement", ""),
                 original_quote=c.get("original_quote", ""),
                 speaker=c.get("speaker", c.get("speakers", [""])[0] if c.get("speakers") else ""),
-                claim_type=c.get("claim_type"),
-                worth_checking=c.get("worth_checking", True),
-                skip_reason=c.get("skip_reason"),
+                classification=c.get("classification"),
+                topic=c.get("topic"),
                 checkable=c.get("checkable"),
                 checkability_rationale=c.get("checkability_rationale"),
-                is_restatement=c.get("is_restatement", False),
-                segment_gist=c.get("segment_gist"),
-                topic=c.get("topic"),
-                thesis_version=c.get("thesis_version", 3),
+                worth_checking=c.get("worth_checking", True),
+                is_duplicate=c.get("is_duplicate", False),
+                factual_anchor=c.get("factual_anchor"),
             )
             session.add(tc)
             await session.flush()
@@ -492,15 +534,13 @@ async def finish_transcript_and_start_next() -> str | None:
 
     1. Find transcripts with status='verifying' where ALL linked claims are verified
     2. Mark them 'complete'
-    3. Find oldest 'queued' transcript and start its ExtractTranscriptWorkflow
+    3. Find oldest 'queued' transcript and start its TranscriptPipelineWorkflow
     4. Return transcript_id if started, None if pipeline is idle
     """
-    import os
     from sqlalchemy import select, func
     from temporalio.client import Client as TemporalClient
     from src.db.session import async_session
     from src.db.models import TranscriptRecord, TranscriptClaim, Claim
-
     from src.config import TEMPORAL_HOST, TASK_QUEUE
 
     async with async_session() as session:
@@ -556,11 +596,11 @@ async def finish_transcript_and_start_next() -> str | None:
         await session.commit()
 
     # Step 3: Start extraction workflow
-    from src.workflows.extract_transcript import ExtractTranscriptWorkflow
+    from src.workflows.transcript_pipeline import TranscriptPipelineWorkflow
 
     temporal = await TemporalClient.connect(TEMPORAL_HOST)
     await temporal.start_workflow(
-        ExtractTranscriptWorkflow.run,
+        TranscriptPipelineWorkflow.run,
         args=[url],
         id=f"extract-{transcript_id}",
         task_queue=TASK_QUEUE,

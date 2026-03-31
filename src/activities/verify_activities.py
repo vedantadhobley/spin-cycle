@@ -361,11 +361,9 @@ async def start_next_queued_claim() -> str | None:
     Uses SELECT ... FOR UPDATE for race safety.
     Returns the claim_id if a workflow was started, None otherwise.
     """
-    import os
     from temporalio.client import Client as TemporalClient
 
-    TEMPORAL_HOST = os.getenv("TEMPORAL_HOST", "localhost:7233")
-    TASK_QUEUE = "spin-cycle-verify"
+    from src.config import TEMPORAL_HOST, TASK_QUEUE
 
     async with async_session() as session:
         # Find oldest queued claim (locked to prevent races)

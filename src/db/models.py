@@ -151,18 +151,13 @@ class TranscriptClaim(Base):
     claim_text = Column(Text, nullable=False)  # decontextualized — pronouns resolved
     original_quote = Column(Text, nullable=False)  # speaker's exact words — used for inline highlighting
     speaker = Column(String(256), nullable=False)
-    claim_type = Column(String(64), nullable=True)
-    # Extraction rubric fields
-    worth_checking = Column(Boolean, nullable=False, default=True)
-    skip_reason = Column(String(64), nullable=True)
+    classification = Column(String(64), nullable=True)
+    topic = Column(String(64), nullable=True)
     checkable = Column(Boolean, nullable=True)
     checkability_rationale = Column(Text, nullable=True)
-    is_restatement = Column(Boolean, nullable=True, default=False)
-    segment_gist = Column(Text, nullable=True)
-    # Thesis extraction v2 fields
-    supporting_references = Column(JSONB, nullable=True)  # list of {segment_index, excerpt}
-    topic = Column(String(64), nullable=True)
-    thesis_version = Column(Integer, default=1, nullable=True)  # 1=old batch, 2=thesis
+    worth_checking = Column(Boolean, nullable=False, default=True)
+    is_duplicate = Column(Boolean, nullable=False, default=False)
+    factual_anchor = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     transcript = relationship("TranscriptRecord", back_populates="transcript_claims")

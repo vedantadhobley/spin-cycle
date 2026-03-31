@@ -27,7 +27,10 @@ from temporalio.client import Client  # noqa: E402
 from temporalio.worker import Worker  # noqa: E402
 
 from src.workflows.verify import VerifyClaimWorkflow  # noqa: E402
-from src.workflows.extract_transcript import ExtractTranscriptWorkflow  # noqa: E402
+from src.workflows.transcript_pipeline import TranscriptPipelineWorkflow  # noqa: E402
+from src.workflows.fetch_and_store import FetchAndStoreWorkflow  # noqa: E402
+from src.workflows.extract_claims import ExtractClaimsWorkflow  # noqa: E402
+from src.workflows.classify_and_dedup import ClassifyAndDedupWorkflow  # noqa: E402
 from src.workflows.synthesize_claims import SynthesizeClaimsWorkflow  # noqa: E402
 from src.activities.verify_activities import (  # noqa: E402
     create_claim,
@@ -49,6 +52,8 @@ from src.activities.transcript_activities import (  # noqa: E402
     store_transcript_claims,
     create_claims_for_transcript,
     update_transcript_status,
+    update_transcript_claims_classification,
+    update_transcript_claims_dedup,
     finish_transcript_and_start_next,
     notify_frontend_refresh,
 )
@@ -76,7 +81,10 @@ async def main():
         task_queue=TASK_QUEUE,
         workflows=[
             VerifyClaimWorkflow,
-            ExtractTranscriptWorkflow,
+            TranscriptPipelineWorkflow,
+            FetchAndStoreWorkflow,
+            ExtractClaimsWorkflow,
+            ClassifyAndDedupWorkflow,
             SynthesizeClaimsWorkflow,
         ],
         activities=[
@@ -99,6 +107,8 @@ async def main():
             store_transcript_claims,
             create_claims_for_transcript,
             update_transcript_status,
+            update_transcript_claims_classification,
+            update_transcript_claims_dedup,
             finish_transcript_and_start_next,
             # Frontend notification
             notify_frontend_refresh,
@@ -109,7 +119,7 @@ async def main():
     )
 
     log.info(logger, MODULE, "ready", "Worker listening",
-             task_queue=TASK_QUEUE, activity_count=18, workflow_count=3)
+             task_queue=TASK_QUEUE, activity_count=20, workflow_count=6)
     try:
         await worker.run()
     finally:

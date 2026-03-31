@@ -1,7 +1,8 @@
-"""Temporal workflow for claim synthesis — parallel overarching claim generation.
+"""Synthesize claims and create Claim records — Phase 4 of the pipeline.
 
-Takes checkable groups for one speaker, runs synthesis activities in
-parallel pairs (matching 2 LLM slots), returns overarching claims.
+Takes ALL dedup groups (all speakers), synthesizes multi-member clusters
+in parallel pairs (2 LLM slots), passes through singletons. Then creates
+Claim records and links TranscriptClaim FKs.
 """
 
 import asyncio
@@ -10,7 +11,10 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
-    from src.activities.transcript_activities import synthesize_claim_activity
+    from src.activities.transcript_activities import (
+        synthesize_claim_activity,
+        create_claims_for_transcript,
+    )
     from src.utils.logging import log
 
 MODULE = "synthesize_claims_workflow"
@@ -18,70 +22,133 @@ MODULE = "synthesize_claims_workflow"
 
 @workflow.defn
 class SynthesizeClaimsWorkflow:
-    """Parallel synthesis of overarching claims per checkable group.
-
-    Input: checkable groups with member statements.
-    Output: dict of group_id → {overarching_claim, rationale}.
-    """
+    """Synthesize overarching claims for all speakers, create Claim records."""
 
     @workflow.run
-    async def run(self, groups: list[dict], speaker: str) -> dict:
-        """Synthesize overarching claims for all checkable groups.
+    async def run(
+        self,
+        transcript_id: str,
+        dedup_groups: list[dict],
+        classified_theses: list[dict],
+        enriched_speakers: list[dict],
+        tc_ids: list[str],
+        source_url: str | None = None,
+        transcript_date: str | None = None,
+        transcript_title: str | None = None,
+        speaker_descriptions: dict | None = None,
+    ) -> dict:
+        speaker_descriptions = speaker_descriptions or {}
+        checkable_groups = [g for g in dedup_groups if g["checkable"]]
 
-        Args:
-            groups: List of dicts with:
-                - group_id: str
-                - topic: str
-                - member_statements: list[str]
-            speaker: Speaker name.
-
-        Returns:
-            Dict of group_id → {overarching_claim, rationale}.
-        """
         log.info(workflow.logger, MODULE, "started",
-                 f"Synthesizing {len(groups)} groups for {speaker}",
-                 speaker=speaker, group_count=len(groups),
-                 group_ids=[g["group_id"] for g in groups])
+                 f"Synthesizing {len(checkable_groups)} checkable groups",
+                 transcript_id=transcript_id,
+                 total_groups=len(dedup_groups))
 
-        results: dict[str, dict] = {}
+        if not checkable_groups:
+            log.info(workflow.logger, MODULE, "no_checkable",
+                     "No checkable groups to synthesize")
+            return {"checkable_groups": [], "claim_ids": []}
 
-        # Process in parallel pairs (2 LLM slots)
-        pair_count = (len(groups) + 1) // 2
-        for i in range(0, len(groups), 2):
-            pair_num = i // 2 + 1
-            batch = groups[i:i + 2]
+        # Separate single-member (no LLM needed) from multi-member
+        single_member = [
+            g for g in checkable_groups
+            if len(g["member_global_indices"]) == 1
+        ]
+        multi_member = [
+            g for g in checkable_groups
+            if len(g["member_global_indices"]) > 1
+        ]
 
-            log.info(workflow.logger, MODULE, "pair_starting",
-                     f"Synthesis pair {pair_num}/{pair_count}: "
-                     f"{[g['group_id'] for g in batch]}",
-                     speaker=speaker, pair=pair_num,
-                     group_ids=[g["group_id"] for g in batch],
-                     member_counts=[len(g["member_statements"]) for g in batch])
+        # Single-member: use thesis_statement directly
+        for g in single_member:
+            gi = g["member_global_indices"][0]
+            g["claim_text"] = classified_theses[gi]["thesis_statement"]
 
-            futures = []
-            for g in batch:
-                futures.append(
-                    workflow.execute_activity(
-                        synthesize_claim_activity,
-                        args=[g["member_statements"], g["topic"], speaker],
-                        start_to_close_timeout=timedelta(seconds=300),
-                        retry_policy=RetryPolicy(maximum_attempts=2),
+        # Multi-member: synthesize in parallel pairs (2 LLM slots)
+        if multi_member:
+            synth_groups = []
+            for g in multi_member:
+                member_stmts = [
+                    classified_theses[gi]["thesis_statement"]
+                    for gi in g["member_global_indices"]
+                ]
+                synth_groups.append({
+                    "group_id": g["local_group_id"],
+                    "topic": g["topic"],
+                    "speaker": g["speaker"],
+                    "member_statements": member_stmts,
+                })
+
+            log.info(workflow.logger, MODULE, "synth_multi",
+                     f"Synthesizing {len(synth_groups)} multi-member groups "
+                     f"({len(single_member)} single-member skipped)",
+                     multi=len(synth_groups), single=len(single_member))
+
+            synth_results: dict[str, dict] = {}
+            for i in range(0, len(synth_groups), 2):
+                batch = synth_groups[i:i + 2]
+                futures = []
+                for sg in batch:
+                    futures.append(
+                        workflow.execute_activity(
+                            synthesize_claim_activity,
+                            args=[
+                                sg["member_statements"],
+                                sg["topic"],
+                                sg["speaker"],
+                            ],
+                            start_to_close_timeout=timedelta(seconds=300),
+                            retry_policy=RetryPolicy(maximum_attempts=2),
+                        )
                     )
-                )
-            batch_results = await asyncio.gather(*futures)
-            for g, result in zip(batch, batch_results):
-                results[g["group_id"]] = result
-                log.info(workflow.logger, MODULE, "group_synthesized",
-                         f"Group {g['group_id']}: "
-                         f"\"{result['overarching_claim'][:100]}\"",
-                         speaker=speaker, group_id=g["group_id"],
-                         topic=g["topic"],
-                         member_count=len(g["member_statements"]))
+                batch_results = await asyncio.gather(*futures)
+                for sg, result in zip(batch, batch_results):
+                    synth_results[sg["group_id"]] = result
 
-        log.info(workflow.logger, MODULE, "complete",
-                 f"Synthesis complete for {speaker}: "
-                 f"{len(results)}/{len(groups)} groups synthesized",
-                 speaker=speaker, synthesized=len(results),
-                 total=len(groups))
+            for g in multi_member:
+                synth = synth_results.get(g["local_group_id"])
+                if synth:
+                    g["claim_text"] = synth["overarching_claim"]
+                else:
+                    log.warning(workflow.logger, MODULE, "synthesis_missing",
+                                f"No synthesis for group {g['local_group_id']}",
+                                group_id=g["local_group_id"])
 
-        return results
+        log.info(workflow.logger, MODULE, "synthesis_done",
+                 f"Synthesis complete: {len(checkable_groups)} claims",
+                 checkable=len(checkable_groups))
+
+        # Create Claim records and link TranscriptClaim FKs
+        claim_ids: list[str] = []
+        if tc_ids and checkable_groups:
+            group_dicts = []
+            for g in checkable_groups:
+                member_tc_ids = [
+                    tc_ids[i] for i in g["member_global_indices"]
+                ]
+                group_dicts.append({
+                    "claim_text": g["claim_text"],
+                    "speaker": g["speaker"],
+                    "member_tc_ids": member_tc_ids,
+                })
+
+            claim_ids = await workflow.execute_activity(
+                create_claims_for_transcript,
+                args=[
+                    transcript_id, tc_ids, group_dicts,
+                    transcript_date, transcript_title,
+                    speaker_descriptions, source_url,
+                ],
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+
+            log.info(workflow.logger, MODULE, "claims_created",
+                     f"Created {len(claim_ids)} Claim records",
+                     claim_count=len(claim_ids))
+
+        return {
+            "checkable_groups": checkable_groups,
+            "claim_ids": claim_ids,
+        }

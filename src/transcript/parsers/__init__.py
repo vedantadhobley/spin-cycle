@@ -38,13 +38,20 @@ class TranscriptData:
     source_format: str                          # "raw_text", "revcom", "cspan"
     speaker_aliases: dict[str, list[str]] = field(default_factory=dict)  # canonical → variants
     editors_note: str | None = None
+    # Optional overrides — used when reconstructing from slim metadata (no turns)
+    _word_count_override: int | None = field(default=None, repr=False)
+    _turn_count_override: int | None = field(default=None, repr=False)
 
     @property
     def word_count(self) -> int:
+        if self._word_count_override is not None:
+            return self._word_count_override
         return sum(len(t.text.split()) for t in self.turns)
 
     @property
     def turn_count(self) -> int:
+        if self._turn_count_override is not None:
+            return self._turn_count_override
         return len(self.turns)
 
     @property

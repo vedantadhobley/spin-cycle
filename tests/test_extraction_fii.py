@@ -1,9 +1,9 @@
 """Test transcript extraction pipeline.
 
 Two modes:
-  1. Temporal workflows (--phase1, --classify, --review, --extract):
-     End-to-end tests through real Temporal. Each re-runs all prior stages.
-  2. Standalone (--classify-only, --dedup-only):
+  1. Temporal workflows (--extract, --classify, --synthesize, --full):
+     End-to-end tests through real Temporal child workflows.
+  2. Standalone (--classify-only, --dedup-only, --synthesize-only):
      Test individual stages using saved artifacts. Fast, no re-extraction.
 
 Artifacts are saved between runs so downstream stages can reuse them:
@@ -38,11 +38,11 @@ PHASE1_OUTPUT = "tests/artifacts/fii_phase1_output.json"
 PHASE2_OUTPUT = "tests/artifacts/fii_phase2_output.json"
 
 
-async def run_workflow(stop_after: str) -> dict:
-    """Start ExtractTranscriptWorkflow via Temporal and wait for result."""
+async def run_pipeline(stop_after: str) -> dict:
+    """Start TranscriptPipelineWorkflow via Temporal and wait for result."""
     from temporalio.client import Client
     from src.config import TEMPORAL_HOST, TASK_QUEUE
-    from src.workflows.extract_transcript import ExtractTranscriptWorkflow
+    from src.workflows.transcript_pipeline import TranscriptPipelineWorkflow
 
     with open(TRANSCRIPT_FILE, "r") as f:
         raw_text = f.read()
@@ -50,16 +50,16 @@ async def run_workflow(stop_after: str) -> dict:
     print(f"Connecting to Temporal at {TEMPORAL_HOST}...")
     client = await Client.connect(TEMPORAL_HOST)
 
-    workflow_id = f"test-extract-{stop_after}-{uuid.uuid4().hex[:8]}"
+    workflow_id = f"test-pipeline-{stop_after}-{uuid.uuid4().hex[:8]}"
 
-    print(f"Starting ExtractTranscriptWorkflow (stop_after={stop_after})")
+    print(f"Starting TranscriptPipelineWorkflow (stop_after={stop_after})")
     print(f"  workflow_id: {workflow_id}")
     print(f"  task_queue: {TASK_QUEUE}")
     print(f"  transcript: {TRANSCRIPT_TITLE}")
     print()
 
     result = await client.execute_workflow(
-        ExtractTranscriptWorkflow.run,
+        TranscriptPipelineWorkflow.run,
         args=[
             TRANSCRIPT_URL,      # url
             raw_text,            # raw_text
@@ -74,21 +74,62 @@ async def run_workflow(stop_after: str) -> dict:
     return result
 
 
-def print_phase1_results(result: dict):
-    """Print and save Phase 1 results."""
+async def run_extract_workflow() -> dict:
+    """Start ExtractClaimsWorkflow directly (requires fetch result)."""
+    from temporalio.client import Client
+    from src.config import TEMPORAL_HOST, TASK_QUEUE
+    from src.workflows.transcript_pipeline import TranscriptPipelineWorkflow
+
+    # Run pipeline stopping after extract
+    return await run_pipeline("extract")
+
+
+async def run_classify_workflow() -> dict:
+    """Run pipeline stopping after dedup."""
+    return await run_pipeline("dedup")
+
+
+async def run_synthesize_workflow() -> dict:
+    """Run pipeline stopping after synthesize."""
+    return await run_pipeline("synthesize")
+
+
+async def run_full_pipeline() -> dict:
+    """Run full pipeline (no stop_after)."""
+    from temporalio.client import Client
+    from src.config import TEMPORAL_HOST, TASK_QUEUE
+    from src.workflows.transcript_pipeline import TranscriptPipelineWorkflow
+
+    with open(TRANSCRIPT_FILE, "r") as f:
+        raw_text = f.read()
+
+    print(f"Connecting to Temporal...")
+    client = await Client.connect(TEMPORAL_HOST)
+
+    workflow_id = f"test-pipeline-full-{uuid.uuid4().hex[:8]}"
+
+    print(f"Starting TranscriptPipelineWorkflow (full pipeline)")
+    print(f"  workflow_id: {workflow_id}")
+
+    result = await client.execute_workflow(
+        TranscriptPipelineWorkflow.run,
+        args=[TRANSCRIPT_URL, raw_text, TRANSCRIPT_TITLE, TRANSCRIPT_DATE],
+        id=workflow_id,
+        task_queue=TASK_QUEUE,
+    )
+
+    return result
+
+
+def print_extract_results(result: dict):
+    """Print extraction results."""
     all_theses = result.get("all_theses", [])
 
     print(f"\n{'='*80}")
-    print(f"PHASE 1 COMPLETE: {result['thesis_count']} claims extracted")
+    print(f"EXTRACTION COMPLETE: {len(all_theses)} claims extracted")
     print(f"{'='*80}")
-    print(f"  Title: {result['title']}")
-    print(f"  Words: {result['word_count']}")
-    print(f"  Turns: {result['turn_count']}")
-    print(f"  Speakers: {result['speakers']}")
-    print(f"  Transcript ID: {result.get('transcript_id', 'N/A')}")
 
     if all_theses:
-        # Speaker breakdown
         by_speaker: dict[str, int] = {}
         for t in all_theses:
             speaker = t["speakers"][0] if t.get("speakers") else "Unknown"
@@ -97,11 +138,9 @@ def print_phase1_results(result: dict):
         for speaker, count in sorted(by_speaker.items(), key=lambda x: -x[1]):
             print(f"    {speaker}: {count} claims")
 
-        # Topic breakdown
         topic_counts = Counter(t.get("topic", "?") for t in all_theses)
         print(f"\n  Topics: {dict(topic_counts)}")
 
-        # Print each claim (no classification at phase1)
         print(f"\n  Claims:")
         for i, t in enumerate(all_theses):
             topic = t.get("topic", "?")
@@ -109,96 +148,68 @@ def print_phase1_results(result: dict):
             print(f"  [{i}] ({topic}) {speaker}: "
                   f"{t['thesis_statement'][:90]}")
 
-        # Save
-        with open(PHASE1_OUTPUT, "w") as f:
-            json.dump(all_theses, f, indent=2)
-        print(f"\n  Phase 1 output saved to {PHASE1_OUTPUT}")
-
-
-def print_classify_results(result: dict):
-    """Print and save classification results."""
-    all_theses = result.get("all_theses", [])
-
-    print(f"\n{'='*80}")
-    print(f"CLASSIFICATION COMPLETE: {result['thesis_count']} claims classified")
-    print(f"{'='*80}")
-    print(f"  Title: {result['title']}")
-    print(f"  Transcript ID: {result.get('transcript_id', 'N/A')}")
-
-    if all_theses:
-        # Classification breakdown
-        class_counts = Counter(t.get("classification", "?") for t in all_theses)
-        checkable_count = sum(1 for t in all_theses if t.get("checkable", True))
-        print(f"\n  Classifications: {dict(class_counts)}")
-        print(f"  Checkable: {checkable_count}/{len(all_theses)}")
-
-        # Print each claim with classification
-        print(f"\n  Claims:")
-        for i, t in enumerate(all_theses):
-            checkmark = "V" if t.get("checkable", True) else "X"
-            cls = t.get("classification", "?")
-            speaker = t["speakers"][0] if t.get("speakers") else "?"
-            print(f"  [{i}] [{checkmark}] ({cls}) {speaker}: "
-                  f"{t['thesis_statement'][:90]}")
-
-        # Save
         with open(PHASE1_OUTPUT, "w") as f:
             json.dump(all_theses, f, indent=2)
         print(f"\n  Output saved to {PHASE1_OUTPUT}")
 
 
 def print_dedup_results(result: dict):
-    """Print dedup/review stage results."""
-    groups = result.get("groups", [])
+    """Print classify+dedup results."""
+    theses = result.get("classified_theses", [])
+    groups = result.get("dedup_groups", [])
 
     print(f"\n{'='*80}")
-    print(f"DEDUP COMPLETE: {result.get('group_count', len(groups))} groups")
+    print(f"CLASSIFY+DEDUP COMPLETE")
     print(f"{'='*80}")
-    print(f"  Thesis count: {result['thesis_count']}")
-    print(f"  Group count: {result.get('group_count', '?')}")
+    print(f"  Theses: {len(theses)}")
+    print(f"  Groups: {len(groups)}")
+
+    if theses:
+        class_counts = Counter(t.get("classification", "?") for t in theses)
+        checkable_count = sum(1 for t in theses if t.get("checkable", True))
+        print(f"\n  Classifications: {dict(class_counts)}")
+        print(f"  Checkable: {checkable_count}/{len(theses)}")
 
     checkable = [g for g in groups if g.get("checkable")]
     multi = [g for g in groups if len(g.get("member_global_indices", [])) > 1]
-    print(f"  Checkable: {len(checkable)}")
+    print(f"  Checkable groups: {len(checkable)}")
     print(f"  Multi-member: {len(multi)}")
 
-    # Print groups
     for g in groups:
         members = g.get("member_global_indices", [])
         tag = "CHECKABLE" if g.get("checkable") else "SKIP"
         print(f"\n  {g['group_id']} ({tag}) | {g.get('topic', '?')} | "
               f"{len(members)} members")
         print(f"    claim_text: {g.get('claim_text', '')[:120]}")
-        if g.get("original_quotes"):
-            for q in g["original_quotes"][:2]:
-                print(f"    quote: \"{q[:100]}\"")
 
 
-def print_extract_results(result: dict):
-    """Print full extraction (dedup + synthesis) results."""
-    groups = result.get("groups", [])
+def print_synth_results(result: dict):
+    """Print synthesis results."""
+    groups = result.get("checkable_groups", [])
+    claim_ids = result.get("claim_ids", [])
 
     print(f"\n{'='*80}")
-    print(f"EXTRACTION COMPLETE")
+    print(f"SYNTHESIS COMPLETE")
     print(f"{'='*80}")
-    print(f"  Thesis count: {result['thesis_count']}")
-    print(f"  Claim count: {result.get('claim_count', '?')}")
-    print(f"  Group count: {result.get('group_count', '?')}")
+    print(f"  Checkable groups: {len(groups)}")
+    print(f"  Claim records created: {len(claim_ids)}")
 
-    checkable = [g for g in groups if g.get("checkable")]
-    multi = [g for g in groups if len(g.get("member_global_indices", [])) > 1]
-    single = [g for g in groups if len(g.get("member_global_indices", [])) == 1]
-    print(f"  Checkable: {len(checkable)}")
-    print(f"  Multi-member (synthesized): {len(multi)}")
-    print(f"  Single-member (no synthesis): {len(single)}")
-
-    # Print checkable groups with final claim text
-    print(f"\n  Checkable claims for verification:")
-    for i, g in enumerate(checkable):
+    for i, g in enumerate(groups):
         members = g.get("member_global_indices", [])
         print(f"\n  [{i}] {g['speaker']} | {g.get('topic', '?')} | "
               f"{len(members)} members")
         print(f"    {g.get('claim_text', '')[:150]}")
+
+
+def print_full_results(result: dict):
+    """Print full pipeline results."""
+    print(f"\n{'='*80}")
+    print(f"FULL PIPELINE COMPLETE")
+    print(f"{'='*80}")
+    print(f"  Transcript ID: {result.get('transcript_id', 'N/A')}")
+    print(f"  Title: {result.get('title', 'N/A')}")
+    print(f"  Theses: {result.get('thesis_count', '?')}")
+    print(f"  Claims: {result.get('claim_count', '?')}")
 
 
 CLASSIFY_OUTPUT = "tests/artifacts/fii_classify_output.json"
@@ -211,7 +222,7 @@ async def run_classify_only():
 
     if not os.path.exists(PHASE1_OUTPUT):
         print(f"ERROR: No Phase 1 output at {PHASE1_OUTPUT}")
-        print("Run --phase1 first.")
+        print("Run --extract first.")
         sys.exit(1)
 
     with open(PHASE1_OUTPUT) as f:
@@ -221,7 +232,6 @@ async def run_classify_only():
     print(f"STANDALONE CLASSIFY: {len(phase1_data)} claims")
     print(f"{'='*80}")
 
-    # Batch classify (same batching as the workflow)
     all_classified = []
     for batch_start in range(0, len(phase1_data), CLASSIFY_BATCH_SIZE):
         batch = phase1_data[batch_start:batch_start + CLASSIFY_BATCH_SIZE]
@@ -230,7 +240,6 @@ async def run_classify_only():
         classified = await classify_claims_batch(batch)
         all_classified.extend(classified)
 
-    # Print results
     class_counts = Counter(t.get("classification", "?") for t in all_classified)
     checkable_count = sum(1 for t in all_classified if t.get("checkable", True))
     print(f"\n  Classifications: {dict(class_counts)}")
@@ -247,7 +256,6 @@ async def run_classify_only():
         if not t.get("checkable", True):
             print(f"       reason: {rationale}")
 
-    # Save
     with open(CLASSIFY_OUTPUT, "w") as f:
         json.dump(all_classified, f, indent=2)
     print(f"\n  Output saved to {CLASSIFY_OUTPUT}")
@@ -257,11 +265,10 @@ async def run_dedup_only():
     """Standalone dedup test using saved phase1 data (no Temporal)."""
     from src.transcript.claim_dedup import dedup_speaker_claims
 
-    # Use classified data if available, fall back to raw phase1
     input_file = CLASSIFY_OUTPUT if os.path.exists(CLASSIFY_OUTPUT) else PHASE1_OUTPUT
     if not os.path.exists(input_file):
         print(f"ERROR: No input data at {input_file}")
-        print("Run --phase1 first.")
+        print("Run --extract first.")
         sys.exit(1)
 
     with open(input_file) as f:
@@ -271,7 +278,6 @@ async def run_dedup_only():
     print(f"STANDALONE DEDUP: {len(phase1_data)} claims")
     print(f"{'='*80}")
 
-    # Group by speaker
     speaker_theses: dict[str, list[dict]] = {}
     for t in phase1_data:
         speaker = t["speakers"][0] if t.get("speakers") else "Unknown"
@@ -288,7 +294,7 @@ async def run_dedup_only():
         clusters = result["clusters"]
         checkable = sum(1 for c in clusters if c["checkable"])
         multi = sum(1 for c in clusters if len(c["member_indices"]) > 1)
-        print(f"  → {len(clusters)} clusters "
+        print(f"  -> {len(clusters)} clusters "
               f"({checkable} checkable, {multi} multi-member)")
 
         for ci, cluster in enumerate(clusters):
@@ -310,11 +316,10 @@ async def run_synthesize_only():
     from src.transcript.claim_dedup import dedup_speaker_claims
     from src.transcript.claim_synthesizer import synthesize_group_claim
 
-    # Use classified data if available, fall back to raw phase1
     input_file = CLASSIFY_OUTPUT if os.path.exists(CLASSIFY_OUTPUT) else PHASE1_OUTPUT
     if not os.path.exists(input_file):
         print(f"ERROR: No input data at {input_file}")
-        print("Run --phase1 or --classify-only first.")
+        print("Run --extract or --classify-only first.")
         sys.exit(1)
 
     with open(input_file) as f:
@@ -325,13 +330,11 @@ async def run_synthesize_only():
     print(f"  Input: {input_file}")
     print(f"{'='*80}")
 
-    # Group by speaker
     speaker_theses: dict[str, list[dict]] = {}
     for t in claims:
         speaker = t["speakers"][0] if t.get("speakers") else "Unknown"
         speaker_theses.setdefault(speaker, []).append(t)
 
-    # Dedup per speaker, collect multi-member clusters for synthesis
     all_results = []
 
     for speaker, sp_theses in speaker_theses.items():
@@ -357,10 +360,9 @@ async def run_synthesize_only():
         multi = [c for c in checkable_clusters if len(c["member_indices"]) > 1]
         single = [c for c in checkable_clusters if len(c["member_indices"]) == 1]
 
-        print(f"  → {len(clusters)} clusters "
+        print(f"  -> {len(clusters)} clusters "
               f"({len(checkable_clusters)} checkable, {len(multi)} multi-member)")
 
-        # Single-member: use thesis_statement directly
         for cluster in single:
             idx = cluster["member_indices"][0]
             all_results.append({
@@ -371,7 +373,6 @@ async def run_synthesize_only():
                 "synthesized": False,
             })
 
-        # Multi-member: synthesize
         for ci, cluster in enumerate(multi):
             member_stmts = [
                 sp_theses[idx]["thesis_statement"]
@@ -385,7 +386,7 @@ async def run_synthesize_only():
                 print(f"    [{idx}] \"{sp_theses[idx]['thesis_statement'][:90]}\"")
 
             synth = await synthesize_group_claim(member_stmts, topic, speaker)
-            print(f"  → \"{synth.overarching_claim[:120]}\"")
+            print(f"  -> \"{synth.overarching_claim[:120]}\"")
 
             all_results.append({
                 "speaker": speaker,
@@ -395,7 +396,6 @@ async def run_synthesize_only():
                 "synthesized": True,
             })
 
-    # Summary
     checkable_count = len(all_results)
     synth_count = sum(1 for r in all_results if r["synthesized"])
     print(f"\n{'='*80}")
@@ -411,7 +411,6 @@ async def run_synthesize_only():
               f"{r['members']} members")
         print(f"    {r['claim_text'][:150]}")
 
-    # Save
     with open(PHASE2_OUTPUT, "w") as f:
         json.dump(all_results, f, indent=2)
     print(f"\n  Output saved to {PHASE2_OUTPUT}")
@@ -420,21 +419,21 @@ async def run_synthesize_only():
 async def main():
     args = sys.argv[1:]
 
-    if "--phase1" in args:
-        result = await run_workflow("phase1")
-        print_phase1_results(result)
+    if "--extract" in args:
+        result = await run_pipeline("extract")
+        print_extract_results(result)
 
     elif "--classify" in args:
-        result = await run_workflow("classify")
-        print_classify_results(result)
-
-    elif "--review" in args:
-        result = await run_workflow("review")
+        result = await run_pipeline("dedup")
         print_dedup_results(result)
 
-    elif "--extract" in args:
-        result = await run_workflow("extract")
-        print_extract_results(result)
+    elif "--synthesize" in args:
+        result = await run_pipeline("synthesize")
+        print_synth_results(result)
+
+    elif "--full" in args:
+        result = await run_full_pipeline()
+        print_full_results(result)
 
     elif "--classify-only" in args:
         await run_classify_only()
@@ -449,10 +448,10 @@ async def main():
         print("Usage: python tests/test_extraction_fii.py <stage>")
         print()
         print("Stages (run real Temporal workflows):")
-        print("  --phase1      Extract only (stop_after=phase1)")
-        print("  --classify    Extract + classify (stop_after=classify)")
-        print("  --review      Extract + classify + dedup (stop_after=review)")
-        print("  --extract     Full extraction + synthesis (stop_after=extract)")
+        print("  --extract     ExtractClaimsWorkflow (stop_after=extract)")
+        print("  --classify    ClassifyAndDedupWorkflow (stop_after=dedup)")
+        print("  --synthesize  SynthesizeClaimsWorkflow (stop_after=synthesize)")
+        print("  --full        TranscriptPipelineWorkflow (full pipeline)")
         print()
         print("Standalone (no Temporal, uses saved artifacts):")
         print("  --classify-only     Classify saved phase1 data")

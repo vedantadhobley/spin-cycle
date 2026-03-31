@@ -19,11 +19,10 @@ from src.db.models import Claim, SubClaim, Verdict
 from src.db.session import get_session
 from src.utils.logging import log, get_logger
 from src.workflows.verify import VerifyClaimWorkflow
+from src.config import TASK_QUEUE
 
 MODULE = "claims"
 logger = get_logger()
-
-TASK_QUEUE = "spin-cycle-verify"
 
 
 async def count_running_workflows(temporal: TemporalClient) -> int:

@@ -17,12 +17,11 @@ from sqlalchemy import select
 from src.db.session import async_session
 from src.db.models import TranscriptRecord
 from src.utils.logging import log, get_logger
-from src.workflows.extract_transcript import ExtractTranscriptWorkflow
+from src.workflows.transcript_pipeline import TranscriptPipelineWorkflow
+from src.config import TASK_QUEUE
 
 MODULE = "transcripts"
 logger = get_logger()
-
-TASK_QUEUE = "spin-cycle-verify"
 
 router = APIRouter()
 
@@ -57,7 +56,7 @@ class TranscriptResponse(BaseModel):
 async def _any_pipeline_running(temporal) -> bool:
     """Check if any extract or verify workflow is currently running."""
     for query in [
-        'WorkflowType="ExtractTranscriptWorkflow" AND ExecutionStatus="Running"',
+        'WorkflowType="TranscriptPipelineWorkflow" AND ExecutionStatus="Running"',
         'WorkflowType="VerifyClaimWorkflow" AND ExecutionStatus="Running"',
     ]:
         async for _ in temporal.list_workflows(query):
@@ -119,7 +118,7 @@ async def submit_transcript(
         workflow_id = f"test-extract-{uuid.uuid4().hex[:8]}"
 
         await temporal.start_workflow(
-            ExtractTranscriptWorkflow.run,
+            TranscriptPipelineWorkflow.run,
             args=workflow_args,
             id=workflow_id,
             task_queue=TASK_QUEUE,
@@ -219,7 +218,7 @@ async def submit_transcript(
     workflow_id = f"extract-{transcript_id}"
 
     await temporal.start_workflow(
-        ExtractTranscriptWorkflow.run,
+        TranscriptPipelineWorkflow.run,
         args=workflow_args,
         id=workflow_id,
         task_queue=TASK_QUEUE,

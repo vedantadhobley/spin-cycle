@@ -30,10 +30,10 @@ from src.api.routes.transcripts import router as transcripts_router  # noqa: E40
 from src.db.session import engine, async_session  # noqa: E402
 from src.db.models import Base, Claim, TranscriptRecord  # noqa: E402
 from src.workflows.verify import VerifyClaimWorkflow  # noqa: E402
-from src.workflows.extract_transcript import ExtractTranscriptWorkflow  # noqa: E402
+from src.workflows.transcript_pipeline import TranscriptPipelineWorkflow  # noqa: E402
+from src.config import TASK_QUEUE  # noqa: E402
 
 TEMPORAL_HOST = os.getenv("TEMPORAL_HOST", "localhost:7233")
-TASK_QUEUE = "spin-cycle-verify"
 
 
 async def _register_search_attributes(temporal: TemporalClient):
@@ -57,7 +57,7 @@ async def _register_search_attributes(temporal: TemporalClient):
         "JudgeProgress": IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD,
         "Verdict": IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD,
         "Confidence": IndexedValueType.INDEXED_VALUE_TYPE_DOUBLE,
-        # ExtractTranscriptWorkflow
+        # TranscriptPipelineWorkflow
         "ClaimCount": IndexedValueType.INDEXED_VALUE_TYPE_INT,
         "TranscriptTitle": IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD,
     }
@@ -95,7 +95,7 @@ async def _kickstart_queue(temporal: TemporalClient):
     # Check for any running workflows (verify OR extract)
     for query in [
         'WorkflowType="VerifyClaimWorkflow" AND ExecutionStatus="Running"',
-        'WorkflowType="ExtractTranscriptWorkflow" AND ExecutionStatus="Running"',
+        'WorkflowType="TranscriptPipelineWorkflow" AND ExecutionStatus="Running"',
     ]:
         async for _ in temporal.list_workflows(query):
             log.info(logger, MODULE, "queue_active",
@@ -153,7 +153,7 @@ async def _kickstart_queue(temporal: TemporalClient):
             await session.commit()
 
             await temporal.start_workflow(
-                ExtractTranscriptWorkflow.run,
+                TranscriptPipelineWorkflow.run,
                 args=[url],
                 id=f"extract-{transcript_id}",
                 task_queue=TASK_QUEUE,
@@ -262,15 +262,31 @@ async def lifespan(app: FastAPI):
                 tc_cols = {c["name"] for c in inspector.get_columns("transcript_claims")}
                 tc_migrations = {
                     "worth_checking": "BOOLEAN NOT NULL DEFAULT TRUE",
-                    "skip_reason": "VARCHAR(64)",
                     "checkable": "BOOLEAN",
                     "checkability_rationale": "TEXT",
-                    "segment_gist": "TEXT",
+                    "is_duplicate": "BOOLEAN DEFAULT FALSE",
+                    "factual_anchor": "TEXT",
                 }
                 for col, dtype in tc_migrations.items():
                     if col not in tc_cols:
                         sync_conn.execute(text(
                             f"ALTER TABLE transcript_claims ADD COLUMN {col} {dtype}"
+                        ))
+                # Rename claim_type → classification if needed
+                if "claim_type" in tc_cols and "classification" not in tc_cols:
+                    sync_conn.execute(text(
+                        "ALTER TABLE transcript_claims RENAME COLUMN claim_type TO classification"
+                    ))
+                elif "classification" not in tc_cols:
+                    sync_conn.execute(text(
+                        "ALTER TABLE transcript_claims ADD COLUMN classification VARCHAR(64)"
+                    ))
+                # Drop dead columns
+                for dead_col in ["segment_gist", "supporting_references",
+                                 "is_restatement", "thesis_version", "skip_reason"]:
+                    if dead_col in tc_cols:
+                        sync_conn.execute(text(
+                            f"ALTER TABLE transcript_claims DROP COLUMN {dead_col}"
                         ))
         await conn.run_sync(_migrate)
 
