@@ -366,10 +366,13 @@ spin-cycle/
 │   │   └── interested_parties.py   # InterestedPartiesDict TypedDict (pipeline contract)
 │   │
 │   ├── workflows/
-│   │   ├── verify.py               # VerifyClaimWorkflow (7 activities)
-│   │   ├── extract_transcript.py   # ExtractTranscriptWorkflow (8 phases)
-│   │   ├── review_claims.py        # ReviewClaimsWorkflow (sequential batch review)
-│   │   └── synthesize_claims.py    # SynthesizeClaimsWorkflow (parallel pair synthesis)
+│   │   ├── transcript_pipeline.py  # TranscriptPipelineWorkflow (orchestrator)
+│   │   ├── fetch_and_store.py      # FetchAndStoreWorkflow
+│   │   ├── extract_claims.py       # ExtractClaimsWorkflow (chunked extraction)
+│   │   ├── classify_and_dedup.py   # ClassifyAndDedupWorkflow
+│   │   ├── synthesize_claims.py    # SynthesizeClaimsWorkflow
+│   │   ├── verify_all_claims.py    # VerifyAllClaimsWorkflow
+│   │   └── verify.py               # VerifyClaimWorkflow (single claim)
 │   │
 │   ├── activities/
 │   │   ├── verify_activities.py    # Verification activities (decompose, research, judge, synthesize, store)
