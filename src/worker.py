@@ -32,6 +32,7 @@ from src.workflows.fetch_and_store import FetchAndStoreWorkflow  # noqa: E402
 from src.workflows.extract_claims import ExtractClaimsWorkflow  # noqa: E402
 from src.workflows.classify_and_dedup import ClassifyAndDedupWorkflow  # noqa: E402
 from src.workflows.synthesize_claims import SynthesizeClaimsWorkflow  # noqa: E402
+from src.workflows.verify_all_claims import VerifyAllClaimsWorkflow  # noqa: E402
 from src.activities.verify_activities import (  # noqa: E402
     create_claim,
     decompose_claim,
@@ -86,6 +87,7 @@ async def main():
             ExtractClaimsWorkflow,
             ClassifyAndDedupWorkflow,
             SynthesizeClaimsWorkflow,
+            VerifyAllClaimsWorkflow,
         ],
         activities=[
             # Verification pipeline
@@ -119,7 +121,7 @@ async def main():
     )
 
     log.info(logger, MODULE, "ready", "Worker listening",
-             task_queue=TASK_QUEUE, activity_count=20, workflow_count=6)
+             task_queue=TASK_QUEUE, activity_count=20, workflow_count=7)
     try:
         await worker.run()
     finally:

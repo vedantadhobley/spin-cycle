@@ -28,7 +28,7 @@ with workflow.unsafe.imports_passed_through():
     from src.workflows.extract_claims import ExtractClaimsWorkflow
     from src.workflows.classify_and_dedup import ClassifyAndDedupWorkflow
     from src.workflows.synthesize_claims import SynthesizeClaimsWorkflow
-    from src.workflows.verify import VerifyClaimWorkflow
+    from src.workflows.verify_all_claims import VerifyAllClaimsWorkflow
     from src.utils.logging import log
     from src.config import TASK_QUEUE
 
@@ -187,39 +187,36 @@ class TranscriptPipelineWorkflow:
             self._set_phase("verifying")
             transcript_date = fetch_result["transcript_meta"].get("date") or "unknown"
 
-            verified = 0
-            failed = 0
+            # Build claim dicts for VerifyAllClaimsWorkflow
+            verify_claims = []
             for claim_id_str, group in zip(
                 synth_result["claim_ids"],
                 synth_result["checkable_groups"],
             ):
-                try:
-                    speaker_name = group["speaker"]
-                    speaker_desc = speaker_descriptions.get(speaker_name, "")
-                    supporting_quotes = group.get("original_quotes", [])
+                speaker_name = group["speaker"]
+                verify_claims.append({
+                    "claim_id": claim_id_str,
+                    "claim_text": group["claim_text"],
+                    "speaker": speaker_name,
+                    "speaker_description": speaker_descriptions.get(
+                        speaker_name, ""
+                    ),
+                    "transcript_date": transcript_date,
+                    "transcript_title": self._title,
+                    "supporting_quotes": group.get("original_quotes", []),
+                })
 
-                    await workflow.execute_child_workflow(
-                        VerifyClaimWorkflow.run,
-                        args=[
-                            claim_id_str, group["claim_text"],
-                            speaker_name, transcript_date,
-                            True, self._title, speaker_desc,
-                            supporting_quotes,
-                        ],
-                        id=f"verify-{claim_id_str}",
-                        task_queue=TASK_QUEUE,
-                    )
-                    verified += 1
-                except Exception as e:
-                    failed += 1
-                    log.warning(workflow.logger, MODULE,
-                                "child_verify_failed",
-                                "Child verification failed",
-                                claim_id=claim_id_str, error=str(e))
+            verify_result = await workflow.execute_child_workflow(
+                VerifyAllClaimsWorkflow.run,
+                args=[verify_claims],
+                id=f"verify-all-{workflow.info().workflow_id}",
+                task_queue=TASK_QUEUE,
+            )
 
             log.info(workflow.logger, MODULE, "verification_done",
                      "All verifications complete",
-                     verified=verified, failed=failed)
+                     verified=verify_result["verified"],
+                     failed=verify_result["failed"])
 
         # --- Finish ---
         await self._mark_complete()
