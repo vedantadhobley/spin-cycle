@@ -12,18 +12,12 @@ import re
 import httpx
 from langchain_core.tools import tool
 
+from src.config import PAGE_FETCH_TIMEOUT, PAGE_FETCH_MAX_CONTENT
 from src.tools.source_filter import is_blocked
 from src.utils.logging import log, get_logger
 
 MODULE = "tools"
 logger = get_logger()
-
-# Max content length to return (characters). Pages can be huge — we truncate
-# to avoid blowing up the LLM context window.
-MAX_CONTENT_LENGTH = 8000
-
-# Timeout for fetching pages (seconds)
-FETCH_TIMEOUT = 15
 
 # User agent — identify ourselves honestly
 USER_AGENT = "SpinCycle/0.1 (claim verification research tool; +https://github.com/vedantadhobley/spin-cycle)"
@@ -76,7 +70,7 @@ async def fetch_page(url: str) -> dict:
     Returns a dict with:
       - url: the URL fetched
       - title: page title (from <title> tag)
-      - content: extracted text content (truncated to MAX_CONTENT_LENGTH)
+      - content: extracted text content (truncated to PAGE_FETCH_MAX_CONTENT)
       - error: error message if fetch failed (None on success)
     """
     import time as _time
@@ -86,7 +80,7 @@ async def fetch_page(url: str) -> dict:
 
     async with httpx.AsyncClient(
         follow_redirects=True,
-        timeout=FETCH_TIMEOUT,
+        timeout=PAGE_FETCH_TIMEOUT,
     ) as client:
         try:
             resp = await client.get(
@@ -117,8 +111,8 @@ async def fetch_page(url: str) -> dict:
             title = soup.title.string.strip() if soup.title and soup.title.string else ""
 
             # Truncate
-            if len(text) > MAX_CONTENT_LENGTH:
-                text = text[:MAX_CONTENT_LENGTH] + "\n\n[... content truncated ...]"
+            if len(text) > PAGE_FETCH_MAX_CONTENT:
+                text = text[:PAGE_FETCH_MAX_CONTENT] + "\n\n[... content truncated ...]"
 
             log.info(logger, MODULE, "fetch_done", "Page fetched",
                      url=url, status_code=resp.status_code,

@@ -28,6 +28,7 @@ from urllib.parse import quote
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 
+from src.config import WIKIDATA_CACHE_TTL_DAYS
 from src.db.session import get_sync_session
 from src.db.models import WikidataCache
 from src.utils.logging import log, get_logger
@@ -42,8 +43,6 @@ WIKIDATA_SPARQL = "https://query.wikidata.org/sparql"
 # User-Agent for Wikidata API (required, or you get 403)
 USER_AGENT = "SpinCycle/1.0 (https://github.com/spin-cycle; fact-checking research tool)"
 
-# Cache TTL — entities change less often than news bias
-CACHE_TTL_DAYS = 7
 
 # Relationship properties we care about
 # Split into corporate/political and family for transitive expansion control
@@ -102,7 +101,7 @@ def _is_cache_stale(scraped_at: datetime) -> bool:
     now = datetime.now(timezone.utc)
     if scraped_at.tzinfo is None:
         scraped_at = scraped_at.replace(tzinfo=timezone.utc)
-    return (now - scraped_at) > timedelta(days=CACHE_TTL_DAYS)
+    return (now - scraped_at) > timedelta(days=WIKIDATA_CACHE_TTL_DAYS)
 
 
 def _get_cached_entity(entity_name: str) -> Optional[dict]:

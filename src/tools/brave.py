@@ -120,7 +120,7 @@ def get_brave_tool():
         source diversity.
         """
         if _disabled:
-            return "Brave Search is unavailable. Use SearXNG or DuckDuckGo instead."
+            return "Brave Search is unavailable. Use DuckDuckGo instead."
 
         log.debug(logger, MODULE, "brave_query", "Brave search query",
                   query=query)
@@ -135,7 +135,7 @@ def get_brave_tool():
 
         if not results:
             if _disabled:
-                return "Brave Search is unavailable. Use SearXNG or DuckDuckGo instead."
+                return "Brave Search is unavailable. Use DuckDuckGo instead."
             return "No Brave search results found."
 
         parts = []

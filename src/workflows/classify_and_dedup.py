@@ -21,6 +21,7 @@ with workflow.unsafe.imports_passed_through():
         MAX_CONCURRENT,
         TIMEOUT_CLASSIFY_CLAIMS,
         TIMEOUT_DEDUP_CLAIMS,
+        TIMEOUT_STORE_CLAIMS,
         CLASSIFY_BATCH_SIZE,
     )
 
@@ -92,7 +93,7 @@ class ClassifyAndDedupWorkflow:
             await workflow.execute_activity(
                 update_transcript_claims_classification,
                 args=[transcript_id, class_updates],
-                start_to_close_timeout=timedelta(seconds=30),
+                start_to_close_timeout=timedelta(seconds=TIMEOUT_STORE_CLAIMS),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
 
@@ -151,7 +152,7 @@ class ClassifyAndDedupWorkflow:
             await workflow.execute_activity(
                 update_transcript_claims_dedup,
                 args=[transcript_id, dedup_updates],
-                start_to_close_timeout=timedelta(seconds=30),
+                start_to_close_timeout=timedelta(seconds=TIMEOUT_STORE_CLAIMS),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
 

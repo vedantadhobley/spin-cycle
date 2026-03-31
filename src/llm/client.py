@@ -12,6 +12,14 @@ import os
 
 from langchain_openai import ChatOpenAI
 
+from src.config import (
+    LLM_TEMPERATURE,
+    LLM_THINKING_TEMPERATURE,
+    LLM_THINKING_MIN_TOKENS,
+    LLM_THINKING_TOP_K,
+    LLM_THINKING_TOP_P,
+    LLM_THINKING_PRESENCE_PENALTY,
+)
 from src.utils.logging import log, get_logger
 
 MODULE = "llm"
@@ -25,7 +33,7 @@ MODEL = os.getenv("LLAMA_MODEL", "Qwen3.5-122B-A10B")
 
 
 def get_llm(
-    temperature: float = 0.1,
+    temperature: float = LLM_TEMPERATURE,
     max_tokens: int = 8192,
     thinking: bool = False,
 ) -> ChatOpenAI:
@@ -33,28 +41,28 @@ def get_llm(
 
     Args:
         temperature: 0.0 = deterministic, 1.0 = creative.
-            Default 0.1 for fact-checking — consistent, conservative.
-            Overridden to 0.6 when thinking=True (Qwen3.5 recommended
-            minimum for thinking mode).
+            Default LLM_TEMPERATURE for fact-checking — consistent,
+            conservative. Overridden to LLM_THINKING_TEMPERATURE when
+            thinking=True (Qwen3.5 recommended minimum for thinking mode).
         max_tokens: Maximum output tokens. Default 8192, sufficient for
             non-thinking verification calls. When thinking=True, forced
-            to at least 32768 — thinking tokens count against the limit
-            and can easily consume 10-15K before the actual output.
+            to at least LLM_THINKING_MIN_TOKENS — thinking tokens count
+            against the limit and can easily consume 10-15K before the
+            actual output.
         thinking: Enable thinking/reasoning mode. The model gets an
             internal scratchpad before producing structured output.
             Significantly slower (5-10 min per call vs 1-3 min) but
             better at cross-referencing evidence and catching contradictions.
-            Sets Qwen-recommended sampling: temp=0.6, top_p=0.95,
-            presence_penalty=1.5, top_k=20.
+            Sets Qwen-recommended sampling from config constants.
     """
     extra_body: dict = {
         "chat_template_kwargs": {"enable_thinking": thinking},
     }
 
     if thinking:
-        temperature = 0.6
-        max_tokens = max(max_tokens, 32768)
-        extra_body["top_k"] = 20
+        temperature = LLM_THINKING_TEMPERATURE
+        max_tokens = max(max_tokens, LLM_THINKING_MIN_TOKENS)
+        extra_body["top_k"] = LLM_THINKING_TOP_K
 
     client = ChatOpenAI(
         base_url=f"{LLAMA_URL}/v1",
@@ -62,8 +70,8 @@ def get_llm(
         model=MODEL,
         temperature=temperature,
         max_tokens=max_tokens,
-        top_p=0.95 if thinking else None,
-        presence_penalty=1.5 if thinking else None,
+        top_p=LLM_THINKING_TOP_P if thinking else None,
+        presence_penalty=LLM_THINKING_PRESENCE_PENALTY if thinking else None,
         extra_body=extra_body,
     )
     mode = "thinking" if thinking else "instruct"

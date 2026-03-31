@@ -73,9 +73,6 @@ from src.tools.wikipedia import get_wikipedia_tool
 from src.tools.page_fetcher import get_page_fetcher_tool
 from src.tools.serper import get_serper_tool, is_available as serper_available, search_serper
 from src.tools.brave import get_brave_tool, is_available as brave_available, search_brave
-# SearXNG disabled — multi-engine fan-out returns too much topically
-# irrelevant noise (DID pages for "did Pelosi", travel guides for "China").
-# Container stays running; re-enable after adding relevance filtering.
 from src.tools.legiscan import search_legislation, is_available as legiscan_available
 from src.schemas.interested_parties import InterestedPartiesDict
 from src.utils.evidence_ranker import score_url, source_tier, tier_label
@@ -222,8 +219,6 @@ def _build_progress_note(messages: list) -> str | None:
         tl = t.lower()
         if "serper" in tl:
             engine_names.append("Serper")
-        elif "searxng" in tl:
-            engine_names.append("SearXNG")  # legacy: may appear from older runs
         elif "brave" in tl:
             engine_names.append("Brave")
         elif "web_search" in tl or "duckduckgo" in tl:
@@ -239,7 +234,6 @@ def _build_progress_note(messages: list) -> str | None:
     available_engines = {"DuckDuckGo", "Wikipedia"}
     if serper_available():
         available_engines.add("Serper")
-    # SearXNG disabled — too much topically irrelevant noise
     if brave_available():
         available_engines.add("Brave")
     unused_engines = available_engines - set(engine_names)
@@ -303,8 +297,7 @@ def _build_tool_list() -> list:
     Search tools (priority order):
       1. Serper (primary — Google results via Serper API, needs SERPER_API_KEY)
       2. DuckDuckGo (fallback — always available, free)
-      3. SearXNG (optional padding — self-hosted meta-search)
-      4. Brave (optional — independent index, needs BRAVE_API_KEY)
+      3. Brave (optional — independent index, needs BRAVE_API_KEY)
 
     Always included:
       - Wikipedia (free, reliable for established facts)
@@ -319,10 +312,6 @@ def _build_tool_list() -> list:
 
     # DuckDuckGo — fallback, always available
     tools.append(get_web_search_tool())
-
-    # SearXNG — disabled from agent tools (multi-engine fan-out returns
-    # too much topically irrelevant noise that pollutes seed ranking).
-    # Container stays running for potential future use with relevance filtering.
 
     # Brave — optional, independent index
     if brave_available():
@@ -417,8 +406,6 @@ def _parse_tool_output(content: str, tool_name: str) -> list[dict]:
     if stripped in (
         "No results found.",
         "No Wikipedia results found.",
-        "No SearXNG results found. Try web_search as a fallback.",
-        "SearXNG search failed. Try web_search as a fallback.",
         "Wikipedia search failed. Try web search instead.",
     ):
         return []
@@ -456,7 +443,7 @@ def _parse_tool_output(content: str, tool_name: str) -> list[dict]:
     if stripped.startswith(("Blocked source:", "Failed to fetch", "Invalid URL")):
         return []
 
-    # Multi-result tools (Serper, SearXNG, Brave, Wikipedia, DDG)
+    # Multi-result tools (Serper, Brave, Wikipedia, DDG)
     # Split on '---' separator used by all our tool wrappers
     blocks = stripped.split("\n\n---\n\n")
 
@@ -542,7 +529,7 @@ def extract_evidence(messages: list) -> list[dict]:
 
     We parse each ToolMessage to extract individual evidence items with
     metadata (URL, title, source_type). Multi-result tool outputs (e.g.,
-    SearXNG returning 8 results) are split into separate evidence items.
+    Serper returning 8 results) are split into separate evidence items.
 
     The agent's final AIMessage is NOT included — it's the agent's own
     interpretation, not primary evidence. The judge should reason only
@@ -609,11 +596,10 @@ async def _run_seed_searches(
     """Run seed searches concurrently using LLM-written queries.
 
     The decompose LLM writes targeted search queries per fact. This
-    function wraps them in backend routing (SearXNG category based on
-    the fact's categories) and fires them alongside mechanical base
-    queries (raw sub-claim, Wikipedia).
+    function wraps them in backend routing and fires them alongside
+    mechanical base queries (raw sub-claim, Wikipedia).
 
-    Unavailable backends fall back to SearXNG (self-hosted, always available).
+    Unavailable backends fall back to DuckDuckGo (always available).
 
     Returns evidence dicts matching _parse_tool_output schema:
         {source_type, source_url, title, content}
@@ -644,8 +630,6 @@ async def _run_seed_searches(
                 resolved_backend = "duckduckgo"  # free fallback
             elif backend == "brave" and not brave_available():
                 resolved_backend = None
-            elif backend == "searxng":
-                resolved_backend = None  # SearXNG disabled from seeds
             # duckduckgo is always available — no fallback needed
 
             if resolved_backend and resolved_backend != backend:
@@ -659,7 +643,6 @@ async def _run_seed_searches(
             async def _do_search(
                 q=spec["query"],
                 mx=spec["max_results"],
-                cat=spec["searxng_category"],
                 be=resolved_backend,
                 lbl=spec["label"],
             ):
@@ -1479,8 +1462,8 @@ async def research_claim(
                       we return whatever evidence was gathered so far.
                       Default 420s (7 min).
         categories: Evidence-need categories from decompose (e.g. ["QUANTITATIVE",
-                    "LEGISLATIVE"]). Determines SearXNG category routing for
-                    seed queries. None defaults to ["GENERAL"].
+                    "LEGISLATIVE"]). Used for seed query generation.
+                    None defaults to ["GENERAL"].
         seed_queries: LLM-written search queries from decompose. These are
                       human-quality queries tailored to the specific evidence
                       this fact needs. None if decompose didn't produce them.
@@ -1776,7 +1759,7 @@ async def _research_fallback(sub_claim: str) -> list[dict]:
     we fall back to running search tools directly. No LLM reasoning about
     what to search — we just search for the claim text directly.
 
-    Uses the best available search tool (Serper > SearXNG > Brave > DDG).
+    Uses the best available search tool (Serper > Brave > DDG).
     """
     log.info(logger, MODULE, "fallback_start", "Running fallback direct search",
              sub_claim=sub_claim)
@@ -1798,7 +1781,7 @@ async def _research_fallback(sub_claim: str) -> list[dict]:
                         "Serper fallback search failed",
                         error=str(e), error_type=type(e).__name__)
 
-    # SearXNG fallback disabled — too much topically irrelevant noise
+    # Brave fallback — independent index, needs BRAVE_API_KEY
 
     # Try Brave (different index = different results)
     if brave_available():

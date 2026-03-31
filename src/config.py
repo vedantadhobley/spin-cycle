@@ -30,12 +30,16 @@ LLM_MAX_RETRIES = 2
 
 # Per-step max_tokens (extraction/review/judge need large output windows)
 EXTRACTION_MAX_TOKENS = 16384
-REVIEW_MAX_TOKENS = 16384
-SYNTHESIS_MAX_TOKENS = 4096
-NORMALIZE_MAX_TOKENS = 16384
 DECOMPOSE_MAX_TOKENS = 16384
 JUDGE_MAX_TOKENS = 16384
 SYNTHESIZE_MAX_TOKENS = 16384
+
+# Thinking mode (judge + synthesize)
+LLM_THINKING_TEMPERATURE = 0.6
+LLM_THINKING_MIN_TOKENS = 32768
+LLM_THINKING_TOP_K = 20
+LLM_THINKING_TOP_P = 0.95
+LLM_THINKING_PRESENCE_PENALTY = 1.5
 
 # Retry pause between LLM attempts (seconds)
 LLM_RETRY_DELAY = 1
@@ -87,9 +91,6 @@ MIN_SYNTHESIZE_CITATIONS = 5
 LOW_CONFIDENCE_THRESHOLD = 0.3  # strong verdict + low confidence → warning
 HIGH_CONFIDENCE_THRESHOLD = 0.8  # unverifiable + high confidence → warning
 
-# Near-duplicate detection in decompose quality check
-DECOMPOSE_DEDUP_RATIO = 0.8  # word-set overlap ratio for trivial dedup
-
 # ---------------------------------------------------------------------------
 # Temporal activity timeouts (seconds)
 # ---------------------------------------------------------------------------
@@ -136,8 +137,6 @@ PREFETCH_CONCURRENCY = 5
 
 MAX_JUDGE_EVIDENCE = 20
 MAX_PER_DOMAIN = 3
-MAX_PER_DOMAIN_TIER1 = 5
-MAX_GOV_EVIDENCE = 4
 
 # ---------------------------------------------------------------------------
 # External service timeouts (seconds)
@@ -149,6 +148,7 @@ SERPER_TIMEOUT = 15.0
 MBFC_SCRAPE_TIMEOUT = 15.0
 MBFC_API_TIMEOUT = 30.0
 PAGE_FETCH_TIMEOUT = 15
+PAGE_FETCH_MAX_CONTENT = 8000
 CSPAN_PAGE_TIMEOUT = 60000  # milliseconds (Playwright)
 FRONTEND_NOTIFY_TIMEOUT = 5.0
 

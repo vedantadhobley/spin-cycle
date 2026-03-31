@@ -15,6 +15,7 @@ with workflow.unsafe.imports_passed_through():
         store_transcript,
     )
     from src.utils.logging import log
+    from src.config import TIMEOUT_FETCH_TRANSCRIPT, TIMEOUT_STORE_CLAIMS
 
 MODULE = "fetch_and_store"
 
@@ -39,14 +40,14 @@ class FetchAndStoreWorkflow:
             transcript_data = await workflow.execute_activity(
                 fetch_raw_transcript,
                 args=[raw_text, url, title or "", date],
-                start_to_close_timeout=timedelta(seconds=60),
+                start_to_close_timeout=timedelta(seconds=TIMEOUT_FETCH_TRANSCRIPT),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
         else:
             transcript_data = await workflow.execute_activity(
                 fetch_transcript,
                 args=[url],
-                start_to_close_timeout=timedelta(seconds=60),
+                start_to_close_timeout=timedelta(seconds=TIMEOUT_FETCH_TRANSCRIPT),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
             if "source_format" not in transcript_data:
@@ -56,7 +57,7 @@ class FetchAndStoreWorkflow:
         store_result = await workflow.execute_activity(
             store_transcript,
             args=[transcript_data],
-            start_to_close_timeout=timedelta(seconds=60),
+            start_to_close_timeout=timedelta(seconds=TIMEOUT_FETCH_TRANSCRIPT),
             retry_policy=RetryPolicy(maximum_attempts=3),
         )
 

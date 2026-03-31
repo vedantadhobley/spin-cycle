@@ -49,7 +49,13 @@ with workflow.unsafe.imports_passed_through():
 MODULE = "workflow"
 
 with workflow.unsafe.imports_passed_through():
-    from src.config import MAX_FACTS, MAX_CONCURRENT, MAX_ALL_PARTIES
+    from src.config import (
+        MAX_FACTS, MAX_CONCURRENT, MAX_ALL_PARTIES,
+        TIMEOUT_CREATE_CLAIM, TIMEOUT_DECOMPOSE, TIMEOUT_RESEARCH,
+        TIMEOUT_JUDGE, TIMEOUT_SYNTHESIZE, TIMEOUT_STORE_RESULT,
+        TIMEOUT_START_NEXT, TIMEOUT_NOTIFY_FRONTEND,
+        TIMEOUT_FINISH_TRANSCRIPT,
+    )
 
 # Search attribute keys for Temporal UI visibility
 SA_PHASE = SearchAttributeKey.for_keyword("Phase")
@@ -159,7 +165,7 @@ class VerifyClaimWorkflow:
             claim_id = await workflow.execute_activity(
                 create_claim,
                 args=[claim_text],
-                start_to_close_timeout=timedelta(seconds=15),
+                start_to_close_timeout=timedelta(seconds=TIMEOUT_CREATE_CLAIM),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
             log.info(workflow.logger, MODULE, "claim_created", "Created claim record",
@@ -175,7 +181,7 @@ class VerifyClaimWorkflow:
             decompose_claim,
             args=[claim_text, speaker, claim_date, transcript_title,
                   speaker_description, supporting_quotes],
-            start_to_close_timeout=timedelta(seconds=180),
+            start_to_close_timeout=timedelta(seconds=TIMEOUT_DECOMPOSE),
             retry_policy=RetryPolicy(maximum_attempts=3),
         )
 
@@ -257,7 +263,7 @@ class VerifyClaimWorkflow:
                 args=[fact_text, interested_parties,
                       fact_categories, fact_seed_queries, speaker_context,
                       claim_date, claim_text, transcript_title],
-                start_to_close_timeout=timedelta(seconds=540),
+                start_to_close_timeout=timedelta(seconds=TIMEOUT_RESEARCH),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
             # Update progress
@@ -340,7 +346,7 @@ class VerifyClaimWorkflow:
                 judge_subclaim,
                 args=[claim_text, fact_text, evidence, merged_p, speaker_context,
                       claim_date, vt, transcript_title, key_test],
-                start_to_close_timeout=timedelta(seconds=300),
+                start_to_close_timeout=timedelta(seconds=TIMEOUT_JUDGE),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
             # Update progress
@@ -408,7 +414,7 @@ class VerifyClaimWorkflow:
                 synthesize_verdict,
                 args=[claim_text, sub_results, thesis_info, claim_date,
                       transcript_title],
-                start_to_close_timeout=timedelta(seconds=300),
+                start_to_close_timeout=timedelta(seconds=TIMEOUT_SYNTHESIZE),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
 
@@ -428,7 +434,7 @@ class VerifyClaimWorkflow:
         await workflow.execute_activity(
             store_result,
             args=[claim_id, result, thesis_info, atomic_facts],
-            start_to_close_timeout=timedelta(seconds=30),
+            start_to_close_timeout=timedelta(seconds=TIMEOUT_STORE_RESULT),
             retry_policy=RetryPolicy(maximum_attempts=3),
         )
 
@@ -436,7 +442,7 @@ class VerifyClaimWorkflow:
         if not is_child:
             next_claim = await workflow.execute_activity(
                 start_next_queued_claim,
-                start_to_close_timeout=timedelta(seconds=30),
+                start_to_close_timeout=timedelta(seconds=TIMEOUT_START_NEXT),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
 
@@ -444,14 +450,14 @@ class VerifyClaimWorkflow:
             if next_claim is None:
                 await workflow.execute_activity(
                     finish_transcript_and_start_next,
-                    start_to_close_timeout=timedelta(seconds=30),
+                    start_to_close_timeout=timedelta(seconds=TIMEOUT_FINISH_TRANSCRIPT),
                     retry_policy=RetryPolicy(maximum_attempts=2),
                 )
 
         # Notify frontend (fire-and-forget, don't fail workflow)
         await workflow.execute_activity(
             notify_frontend_refresh,
-            start_to_close_timeout=timedelta(seconds=10),
+            start_to_close_timeout=timedelta(seconds=TIMEOUT_NOTIFY_FRONTEND),
             retry_policy=RetryPolicy(maximum_attempts=1),
         )
 

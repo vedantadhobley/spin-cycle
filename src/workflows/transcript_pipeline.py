@@ -30,7 +30,12 @@ with workflow.unsafe.imports_passed_through():
     from src.workflows.synthesize_claims import SynthesizeClaimsWorkflow
     from src.workflows.verify_all_claims import VerifyAllClaimsWorkflow
     from src.utils.logging import log
-    from src.config import TASK_QUEUE
+    from src.config import (
+        TASK_QUEUE,
+        TIMEOUT_UPDATE_STATUS,
+        TIMEOUT_NOTIFY_FRONTEND,
+        TIMEOUT_FINISH_TRANSCRIPT,
+    )
 
 MODULE = "transcript_pipeline"
 
@@ -175,12 +180,12 @@ class TranscriptPipelineWorkflow:
             await workflow.execute_activity(
                 update_transcript_status,
                 args=[self._transcript_id, "verifying"],
-                start_to_close_timeout=timedelta(seconds=15),
+                start_to_close_timeout=timedelta(seconds=TIMEOUT_UPDATE_STATUS),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
             await workflow.execute_activity(
                 notify_frontend_refresh,
-                start_to_close_timeout=timedelta(seconds=10),
+                start_to_close_timeout=timedelta(seconds=TIMEOUT_NOTIFY_FRONTEND),
                 retry_policy=RetryPolicy(maximum_attempts=1),
             )
 
@@ -222,12 +227,12 @@ class TranscriptPipelineWorkflow:
         await self._mark_complete()
         await workflow.execute_activity(
             finish_transcript_and_start_next,
-            start_to_close_timeout=timedelta(seconds=30),
+            start_to_close_timeout=timedelta(seconds=TIMEOUT_FINISH_TRANSCRIPT),
             retry_policy=RetryPolicy(maximum_attempts=2),
         )
         await workflow.execute_activity(
             notify_frontend_refresh,
-            start_to_close_timeout=timedelta(seconds=10),
+            start_to_close_timeout=timedelta(seconds=TIMEOUT_NOTIFY_FRONTEND),
             retry_policy=RetryPolicy(maximum_attempts=1),
         )
 
@@ -244,6 +249,6 @@ class TranscriptPipelineWorkflow:
             await workflow.execute_activity(
                 update_transcript_status,
                 args=[self._transcript_id, "complete"],
-                start_to_close_timeout=timedelta(seconds=15),
+                start_to_close_timeout=timedelta(seconds=TIMEOUT_UPDATE_STATUS),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )

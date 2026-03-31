@@ -106,7 +106,7 @@ HARD_BLOCKED_DOMAINS = {
     "urbandictionary.com",
     "etymonline.com",
 
-    # Name meaning / baby name sites — SearXNG matches person names to these
+    # Name meaning / baby name sites — search engines match person names to these
     "namediscoveries.com",
     "behindthename.com",
     "babynamewizard.com",
@@ -123,7 +123,7 @@ HARD_BLOCKED_DOMAINS = {
     "target.com",
     "alibaba.com",
 
-    # Recipe / lifestyle — SearXNG word-matches to these
+    # Recipe / lifestyle — search engines word-match to these
     "allrecipes.com",
     "food.com",
     "tasty.co",
@@ -137,7 +137,7 @@ HARD_BLOCKED_DOMAINS = {
     "support.google.com",
     "support.apple.com",
 
-    # Gaming forums — SearXNG matches "EU" subdomain to EU-related queries
+    # Gaming forums — search engines match "EU" subdomain to EU-related queries
     "blizzard.com",
     "forums.blizzard.com",
     "eu.forums.blizzard.com",

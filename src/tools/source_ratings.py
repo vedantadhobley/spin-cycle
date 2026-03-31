@@ -28,6 +28,7 @@ import httpx
 from bs4 import BeautifulSoup
 from sqlalchemy import select
 
+from src.config import MBFC_CACHE_TTL_DAYS
 from src.db.session import get_sync_session
 from src.db.models import SourceRating
 from src.utils.logging import log, get_logger
@@ -35,8 +36,6 @@ from src.utils.logging import log, get_logger
 MODULE = "source_ratings"
 logger = get_logger()
 
-# How long before we consider cached data stale
-CACHE_TTL_DAYS = 30
 
 # MBFC base URL
 MBFC_BASE = "https://mediabiasfactcheck.com"
@@ -268,7 +267,7 @@ def _is_stale(scraped_at: datetime) -> bool:
     # Ensure scraped_at is timezone-aware
     if scraped_at.tzinfo is None:
         scraped_at = scraped_at.replace(tzinfo=timezone.utc)
-    return (now - scraped_at) > timedelta(days=CACHE_TTL_DAYS)
+    return (now - scraped_at) > timedelta(days=MBFC_CACHE_TTL_DAYS)
 
 
 async def _lazy_scrape_ownership(domain: str) -> None:

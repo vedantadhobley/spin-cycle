@@ -16,7 +16,7 @@ with workflow.unsafe.imports_passed_through():
         create_claims_for_transcript,
     )
     from src.utils.logging import log
-    from src.config import MAX_CONCURRENT
+    from src.config import MAX_CONCURRENT, TIMEOUT_SYNTHESIZE_CLAIM, TIMEOUT_STORE_CLAIMS
 
 MODULE = "synthesize_claims_workflow"
 
@@ -98,7 +98,7 @@ class SynthesizeClaimsWorkflow:
                             sg["topic"],
                             sg["speaker"],
                         ],
-                        start_to_close_timeout=timedelta(seconds=300),
+                        start_to_close_timeout=timedelta(seconds=TIMEOUT_SYNTHESIZE_CLAIM),
                         retry_policy=RetryPolicy(maximum_attempts=2),
                     )
                     return sg["group_id"], result
@@ -143,7 +143,7 @@ class SynthesizeClaimsWorkflow:
                     transcript_date, transcript_title,
                     speaker_descriptions, source_url,
                 ],
-                start_to_close_timeout=timedelta(seconds=30),
+                start_to_close_timeout=timedelta(seconds=TIMEOUT_STORE_CLAIMS),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
 

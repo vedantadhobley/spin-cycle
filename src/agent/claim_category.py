@@ -10,8 +10,8 @@ The query specs are consumed by _run_seed_searches() in research.py,
 which dispatches them to backends with availability fallback.
 
 Backends: Serper (primary — Google results via API) + DuckDuckGo (free
-fallback, always available). If Serper is unavailable, seeds fall back
-to DDG automatically.
+fallback, always available) + Brave (optional, independent index). If
+Serper is unavailable, seeds fall back to DDG automatically.
 """
 
 
@@ -31,7 +31,6 @@ def generate_seed_queries(
     Returns a list of query specs, each with:
         query: str — the search query
         backends: list[str] — which backends to dispatch to
-        searxng_category: str — kept for interface compat, unused by DDG
         max_results: int — max results per backend
         label: str — unique label for dedup and logging
     """
@@ -42,7 +41,7 @@ def generate_seed_queries(
     specs.append({
         "query": sub_claim[:120],
         "backends": ["serper", "duckduckgo"],
-        "searxng_category": "",
+
         "max_results": 20,
         "label": "primary",
     })
@@ -51,7 +50,7 @@ def generate_seed_queries(
     specs.append({
         "query": sub_claim,
         "backends": ["wikipedia"],
-        "searxng_category": "",
+
         "max_results": 3,
         "label": "wikipedia",
     })
@@ -65,7 +64,7 @@ def generate_seed_queries(
             specs.append({
                 "query": query[:120],
                 "backends": ["serper", "duckduckgo"],
-                "searxng_category": "",
+        
                 "max_results": 15,
                 "label": f"seed_{i}",
             })

@@ -17,7 +17,7 @@ with workflow.unsafe.imports_passed_through():
     from src.utils.logging import log
     from src.transcript.thesis_extractor import build_chunks
     from src.transcript.parsers import SpeakerTurn
-    from src.config import MAX_CONCURRENT
+    from src.config import MAX_CONCURRENT, TIMEOUT_EXTRACT_CHUNK, TIMEOUT_STORE_CLAIMS
 
 MODULE = "extract_claims"
 
@@ -70,7 +70,7 @@ class ExtractClaimsWorkflow:
                 result = await workflow.execute_activity(
                     extract_chunk_activity,
                     args=[transcript_meta, chunk_dict, enriched_speakers],
-                    start_to_close_timeout=timedelta(seconds=2700),
+                    start_to_close_timeout=timedelta(seconds=TIMEOUT_EXTRACT_CHUNK),
                     retry_policy=RetryPolicy(maximum_attempts=2),
                 )
                 chunk_results[idx] = result
@@ -96,7 +96,7 @@ class ExtractClaimsWorkflow:
             tc_ids = await workflow.execute_activity(
                 store_transcript_claims,
                 args=[transcript_id, tagged],
-                start_to_close_timeout=timedelta(seconds=30),
+                start_to_close_timeout=timedelta(seconds=TIMEOUT_STORE_CLAIMS),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
             log.info(workflow.logger, MODULE, "stored",

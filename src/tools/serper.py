@@ -12,6 +12,7 @@ import os
 import httpx
 from langchain_core.tools import tool
 
+from src.config import SERPER_TIMEOUT
 from src.tools.source_filter import filter_results, warm_mbfc_cache_background
 from src.utils.logging import log, get_logger
 
@@ -55,7 +56,7 @@ async def search_serper(query: str, max_results: int = 5) -> list[dict]:
                     "X-API-KEY": SERPER_API_KEY,
                     "Content-Type": "application/json",
                 },
-                timeout=15,
+                timeout=SERPER_TIMEOUT,
             )
             resp.raise_for_status()
             data = resp.json()
@@ -124,7 +125,7 @@ def get_serper_tool():
         web search available.
         """
         if _disabled:
-            return "Google/Serper is unavailable (out of credits). Use SearXNG or DuckDuckGo instead."
+            return "Google/Serper is unavailable (out of credits). Use DuckDuckGo instead."
 
         log.debug(logger, MODULE, "serper_query", "Serper search",
                   query=query)
@@ -139,7 +140,7 @@ def get_serper_tool():
 
         if not results:
             if _disabled:
-                return "Google/Serper is unavailable (out of credits). Use SearXNG or DuckDuckGo instead."
+                return "Google/Serper is unavailable (out of credits). Use DuckDuckGo instead."
             return "No Google results found."
 
         parts = []

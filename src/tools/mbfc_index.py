@@ -20,6 +20,7 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 
+from src.config import MBFC_INDEX_REFRESH_DAYS
 from src.db.session import get_sync_session
 from src.db.models import SourceRating
 from src.tools.source_ratings import BIAS_MAP, extract_domain
@@ -33,7 +34,6 @@ API_FIELDS = "domain,slug,source,bias,factual_reporting,credibility_rating,count
 PAGE_SIZE = 100
 MAX_CONCURRENT_PAGES = 8
 SENTINEL_DOMAIN = "__mbfc_index_meta__"
-REFRESH_INTERVAL_DAYS = 7
 
 # Map API factual_reporting values to our DB enum
 FACTUAL_MAP = {
@@ -122,7 +122,7 @@ def _map_api_record(record: dict) -> dict | None:
 def is_bootstrap_needed() -> bool:
     """Check if the MBFC index needs bootstrapping.
 
-    Returns True if sentinel row is missing or older than REFRESH_INTERVAL_DAYS.
+    Returns True if sentinel row is missing or older than MBFC_INDEX_REFRESH_DAYS.
     """
     with get_sync_session() as session:
         stmt = select(SourceRating).where(SourceRating.domain == SENTINEL_DOMAIN)
@@ -132,7 +132,7 @@ def is_bootstrap_needed() -> bool:
             return True
 
         age = datetime.now(timezone.utc) - sentinel.scraped_at.replace(tzinfo=timezone.utc)
-        return age > timedelta(days=REFRESH_INTERVAL_DAYS)
+        return age > timedelta(days=MBFC_INDEX_REFRESH_DAYS)
 
 
 def _get_last_bootstrap_time() -> datetime | None:

@@ -1,7 +1,7 @@
 """Web search tool for evidence gathering.
 
 DuckDuckGo via langchain_community — uses the official DDG API (not scraping),
-so it works reliably even when SearXNG's DDG engine is CAPTCHA-blocked.
+so it works reliably as a free fallback search engine.
 
 Two interfaces:
   - search_duckduckgo(): async, returns list[dict] — for seed searches
@@ -51,7 +51,7 @@ async def search_duckduckgo(query: str, max_results: int = 5) -> list[dict]:
 
     Uses langchain_community's DuckDuckGoSearchResults (official API).
     Returns list of {title, snippet, url} dicts — same schema as
-    search_serper/search_searxng/search_brave.
+    search_serper/search_brave.
     """
     log.info(logger, MODULE, "ddg_start", "DuckDuckGo search starting",
              query=query, max_results=max_results)

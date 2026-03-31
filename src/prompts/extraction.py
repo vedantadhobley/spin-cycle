@@ -107,13 +107,3 @@ Return JSON:
   ]
 }}\
 """
-
-
-# ---------------------------------------------------------------------------
-# Legacy re-exports (old batch extraction prompt, still importable)
-# ---------------------------------------------------------------------------
-
-from src.prompts._archive_extraction import (  # noqa: F401, E402
-    EXTRACTION_SYSTEM,
-    EXTRACTION_USER,
-)

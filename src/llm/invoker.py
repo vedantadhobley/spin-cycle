@@ -23,6 +23,12 @@ from pydantic import BaseModel, ValidationError
 
 from src.llm.client import get_llm
 from src.llm.parser import extract_json, JSONExtractionError
+from src.config import (
+    LLM_TEMPERATURE,
+    LLM_TEMPERATURE_ON_RETRY,
+    LLM_MAX_RETRIES,
+    LLM_RETRY_DELAY,
+)
 from src.utils.logging import log, get_logger
 
 MODULE = "llm.invoker"
@@ -150,9 +156,9 @@ async def invoke_llm(
     user_prompt: str,
     schema: Type[T],
     *,
-    max_retries: int = 2,
-    temperature: float = 0.1,
-    temperature_on_retry: float = 0.3,
+    max_retries: int = LLM_MAX_RETRIES,
+    temperature: float = LLM_TEMPERATURE,
+    temperature_on_retry: float = LLM_TEMPERATURE_ON_RETRY,
     max_tokens: int = 8192,
     thinking: bool = False,
     semantic_validator: Optional[Callable[[T], tuple[bool, str]]] = None,
@@ -172,7 +178,7 @@ async def invoke_llm(
         user_prompt: User message content
         schema: Pydantic model class to validate against
         max_retries: Number of retry attempts (default: 2)
-        temperature: Initial temperature (default: 0.1)
+        temperature: Initial temperature (default: LLM_TEMPERATURE)
         temperature_on_retry: Temperature for retry attempts (default: 0.3)
         semantic_validator: Optional function (model) -> (is_valid, error_msg)
         activity_name: Name for logging context
@@ -256,7 +262,7 @@ async def invoke_llm(
         except LLMStreamError:
             # Stream aborted early — counts as a failed attempt, retry
             if attempt < max_retries:
-                await asyncio.sleep(1)
+                await asyncio.sleep(LLM_RETRY_DELAY)
             continue
 
         except BaseException as e:
@@ -270,7 +276,7 @@ async def invoke_llm(
             if not isinstance(e, Exception):
                 raise
             if attempt < max_retries:
-                await asyncio.sleep(1)  # Brief pause before retry
+                await asyncio.sleep(LLM_RETRY_DELAY)
 
     # All attempts failed
     raise LLMInvocationError(
@@ -286,7 +292,7 @@ async def invoke_llm_raw(
     system_prompt: str,
     user_prompt: str,
     *,
-    temperature: float = 0.1,
+    temperature: float = LLM_TEMPERATURE,
     activity_name: str = "invoke",
 ) -> tuple[str, int]:
     """Invoke LLM and return raw output without parsing/validation.
