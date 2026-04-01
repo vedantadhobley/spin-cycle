@@ -61,6 +61,7 @@ from src.activities.transcript_activities import (  # noqa: E402
     load_synthesize_inputs,
     load_verify_inputs,
     notify_frontend_refresh,
+    queue_claims_for_verification,
 )
 
 from src.config import TASK_QUEUE, TEMPORAL_HOST, MAX_CONCURRENT
@@ -123,6 +124,8 @@ async def main():
             load_verify_inputs,
             # Frontend notification
             notify_frontend_refresh,
+            # Claim status management
+            queue_claims_for_verification,
         ],
         # Match MAX_CONCURRENT=2 in the workflow — 2 LLM inference slots
         # with 65K context each (2 slots x 65K = 131072 total ctx).
@@ -130,7 +133,7 @@ async def main():
     )
 
     log.info(logger, MODULE, "ready", "Worker listening",
-             task_queue=TASK_QUEUE, activity_count=24, workflow_count=7)
+             task_queue=TASK_QUEUE, activity_count=25, workflow_count=7)
     try:
         await worker.run()
     finally:

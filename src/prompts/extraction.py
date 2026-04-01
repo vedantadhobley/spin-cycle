@@ -41,12 +41,11 @@ EXTRACT:
 - Policy descriptions (what a law does, what a program costs)
 - Comparisons with specific metrics
 - Causal claims (X caused Y)
+- Superlative claims (biggest, strongest, best, most)
+- Claims about past promises, commitments, or actions taken
 
-SKIP:
-- Greetings, pleasantries, filler ("Thank you for being here")
-- Pure subjective opinions with no factual anchor ("This is the greatest")
-- Future predictions and promises ("We will achieve", "I'm going to do")
-- Vague rhetoric without specific claims ("We have the best people")
+SKIP only greetings, pleasantries, and filler ("Thank you for being here"). \
+Extract everything else — a downstream classifier decides what is checkable.
 
 ## Step 1 — Extract Claims
 

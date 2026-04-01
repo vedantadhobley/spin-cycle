@@ -37,6 +37,7 @@ class SynthesizeClaimsWorkflow:
         source_url: str | None = None,
         transcript_date: str | None = None,
         transcript_title: str | None = None,
+        transcript_description: str | None = None,
         speaker_descriptions: dict | None = None,
     ) -> dict:
         # Load from DB if inputs not provided (standalone mode)
@@ -54,6 +55,7 @@ class SynthesizeClaimsWorkflow:
             source_url = source_url or loaded.get("source_url")
             transcript_date = transcript_date or loaded.get("transcript_date")
             transcript_title = transcript_title or loaded.get("transcript_title")
+            transcript_description = transcript_description or loaded.get("transcript_description")
             speaker_descriptions = speaker_descriptions or loaded.get("speaker_descriptions", {})
 
         speaker_descriptions = speaker_descriptions or {}
@@ -115,6 +117,9 @@ class SynthesizeClaimsWorkflow:
                             sg["member_statements"],
                             sg["topic"],
                             sg["speaker"],
+                            transcript_title or "",
+                            transcript_description or "",
+                            transcript_date or "",
                         ],
                         start_to_close_timeout=timedelta(seconds=TIMEOUT_SYNTHESIZE_CLAIM),
                         retry_policy=RetryPolicy(maximum_attempts=2),

@@ -23,6 +23,7 @@ with workflow.unsafe.imports_passed_through():
         update_transcript_status,
         finish_transcript_and_start_next,
         notify_frontend_refresh,
+        queue_claims_for_verification,
     )
     from src.workflows.fetch_and_store import FetchAndStoreWorkflow
     from src.workflows.extract_claims import ExtractClaimsWorkflow
@@ -161,6 +162,7 @@ class TranscriptPipelineWorkflow:
                 url,
                 fetch_result["transcript_meta"].get("date"),
                 self._title,
+                fetch_result["transcript_meta"].get("description") or "",
                 speaker_descriptions,
             ],
             id=f"synthesize-{workflow.info().workflow_id}",
@@ -177,6 +179,13 @@ class TranscriptPipelineWorkflow:
 
         # --- Phase 5: Verify ---
         if synth_result.get("claim_ids"):
+            # Flip claims from 'extracted' → 'queued' so verification can run
+            await workflow.execute_activity(
+                queue_claims_for_verification,
+                args=[synth_result["claim_ids"]],
+                start_to_close_timeout=timedelta(seconds=TIMEOUT_UPDATE_STATUS),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
             await workflow.execute_activity(
                 update_transcript_status,
                 args=[self._transcript_id, "verifying"],

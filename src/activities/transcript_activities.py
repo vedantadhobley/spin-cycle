@@ -237,6 +237,9 @@ async def synthesize_claim_activity(
     member_statements: list[str],
     topic: str,
     speaker: str,
+    transcript_title: str = "",
+    transcript_description: str = "",
+    transcript_date: str = "",
 ) -> dict:
     """Synthesize an overarching claim for one group.
 
@@ -249,7 +252,12 @@ async def synthesize_claim_activity(
              speaker=speaker, topic=topic,
              member_count=len(member_statements))
 
-    output = await synthesize_group_claim(member_statements, topic, speaker)
+    output = await synthesize_group_claim(
+        member_statements, topic, speaker,
+        transcript_title=transcript_title,
+        transcript_description=transcript_description,
+        transcript_date=transcript_date,
+    )
 
     log.info(activity.logger, "transcript", "synthesize_done",
              "Claim synthesis complete",
@@ -498,7 +506,7 @@ async def create_claims_for_transcript(
                     claim_date=transcript_date,
                     transcript_title=transcript_title,
                     supporting_quotes=group.get("original_quotes"),
-                    status="queued",
+                    status="extracted",
                 )
                 session.add(claim)
                 await session.flush()
@@ -518,6 +526,36 @@ async def create_claims_for_transcript(
              transcript_id=transcript_id, claim_count=len(claim_ids))
 
     return claim_ids
+
+
+@activity.defn
+async def queue_claims_for_verification(claim_ids: list[str]) -> int:
+    """Flip claims from 'extracted' to 'queued' so verification picks them up.
+
+    Called by the orchestrator right before starting VerifyAllClaimsWorkflow.
+    This is the only place claims transition to 'queued' status.
+    """
+    from sqlalchemy import select
+    from src.db.session import async_session
+    from src.db.models import Claim
+
+    count = 0
+    async with async_session() as session:
+        for cid_str in claim_ids:
+            cid = _uuid_mod.UUID(cid_str)
+            result = await session.execute(
+                select(Claim).where(Claim.id == cid)
+            )
+            claim = result.scalar_one_or_none()
+            if claim and claim.status == "extracted":
+                claim.status = "queued"
+                count += 1
+        await session.commit()
+
+    log.info(activity.logger, "transcript", "claims_queued",
+             "Claims queued for verification",
+             count=count, total=len(claim_ids))
+    return count
 
 
 @activity.defn

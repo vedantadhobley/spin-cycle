@@ -44,7 +44,7 @@ If distinct_specifics_exist=true: Pick the MOST SPECIFIC member version \
 SYNTHESIZE_CLAIM_USER = """\
 Speaker: {speaker_name}
 Topic: {topic}
-
+{transcript_context}
 Member claims in this group:
 {member_claims_list}
 

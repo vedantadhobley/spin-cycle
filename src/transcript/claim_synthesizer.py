@@ -23,6 +23,9 @@ async def synthesize_group_claim(
     member_statements: list[str],
     topic: str,
     speaker: str,
+    transcript_title: str = "",
+    transcript_description: str = "",
+    transcript_date: str = "",
 ) -> SynthesizedClaim:
     """Generate an overarching claim for a group of related claims.
 
@@ -30,6 +33,9 @@ async def synthesize_group_claim(
         member_statements: Thesis statements from all group members.
         topic: Group topic area.
         speaker: Speaker name.
+        transcript_title: Title of the source transcript.
+        transcript_description: Description of the source transcript.
+        transcript_date: Date of the source transcript.
 
     Returns:
         SynthesizedClaim with overarching_claim and rationale.
@@ -37,6 +43,16 @@ async def synthesize_group_claim(
     member_claims_list = "\n".join(
         f"{i+1}. \"{stmt}\"" for i, stmt in enumerate(member_statements)
     )
+
+    # Build transcript context line
+    ctx_parts = []
+    if transcript_title:
+        ctx_parts.append(f"Source: {transcript_title}")
+    if transcript_date:
+        ctx_parts.append(f"Date: {transcript_date}")
+    if transcript_description:
+        ctx_parts.append(f"Description: {transcript_description}")
+    transcript_context = "\n".join(ctx_parts)
 
     log.info(logger, MODULE, "synthesize_start",
              f"Synthesizing {len(member_statements)} claims for {speaker}",
@@ -48,6 +64,7 @@ async def synthesize_group_claim(
         user_prompt=SYNTHESIZE_CLAIM_USER.format(
             speaker_name=speaker,
             topic=topic,
+            transcript_context=transcript_context,
             member_claims_list=member_claims_list,
         ),
         schema=SynthesizedClaim,

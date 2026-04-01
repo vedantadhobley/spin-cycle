@@ -304,6 +304,20 @@ async def lifespan(app: FastAPI):
                         ))
         await conn.run_sync(_migrate)
 
+    # Add 'extracted' to claim_status enum if missing
+    async with engine.begin() as conn:
+        await conn.execute(text("""
+            DO $$ BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_enum
+                    WHERE enumlabel = 'extracted'
+                    AND enumtypid = (SELECT oid FROM pg_type WHERE typname = 'claim_status')
+                ) THEN
+                    ALTER TYPE claim_status ADD VALUE 'extracted';
+                END IF;
+            END $$;
+        """))
+
     log.info(logger, MODULE, "db_ready", "Database tables ready")
 
     # Bootstrap MBFC index from REST API if needed
