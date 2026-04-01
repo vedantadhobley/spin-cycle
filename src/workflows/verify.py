@@ -133,7 +133,8 @@ class VerifyClaimWorkflow:
                   is_child: bool = False,
                   transcript_title: str | None = None,
                   speaker_description: str = "",
-                  supporting_quotes: list[str] | None = None) -> dict:
+                  supporting_quotes: list[str] | None = None,
+                  transcript_description: str = "") -> dict:
         """Run the verification pipeline.
 
         Args:
@@ -180,7 +181,7 @@ class VerifyClaimWorkflow:
         decomposition = await workflow.execute_activity(
             decompose_claim,
             args=[claim_text, speaker, claim_date, transcript_title,
-                  speaker_description, supporting_quotes],
+                  speaker_description, supporting_quotes, transcript_description],
             start_to_close_timeout=timedelta(seconds=TIMEOUT_DECOMPOSE),
             retry_policy=RetryPolicy(maximum_attempts=3),
         )
@@ -262,7 +263,8 @@ class VerifyClaimWorkflow:
                 research_subclaim,
                 args=[fact_text, interested_parties,
                       fact_categories, fact_seed_queries, speaker_context,
-                      claim_date, claim_text, transcript_title],
+                      claim_date, claim_text, transcript_title,
+                      transcript_description],
                 start_to_close_timeout=timedelta(seconds=TIMEOUT_RESEARCH),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
@@ -345,7 +347,8 @@ class VerifyClaimWorkflow:
             result = await workflow.execute_activity(
                 judge_subclaim,
                 args=[claim_text, fact_text, evidence, merged_p, speaker_context,
-                      claim_date, vt, transcript_title, key_test],
+                      claim_date, vt, transcript_title, key_test,
+                      transcript_description],
                 start_to_close_timeout=timedelta(seconds=TIMEOUT_JUDGE),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
@@ -413,7 +416,7 @@ class VerifyClaimWorkflow:
             result = await workflow.execute_activity(
                 synthesize_verdict,
                 args=[claim_text, sub_results, thesis_info, claim_date,
-                      transcript_title],
+                      transcript_title, transcript_description],
                 start_to_close_timeout=timedelta(seconds=TIMEOUT_SYNTHESIZE),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )

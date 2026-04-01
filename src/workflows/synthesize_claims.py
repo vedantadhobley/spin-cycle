@@ -14,6 +14,7 @@ with workflow.unsafe.imports_passed_through():
     from src.activities.transcript_activities import (
         synthesize_claim_activity,
         create_claims_for_transcript,
+        load_synthesize_inputs,
     )
     from src.utils.logging import log
     from src.config import MAX_CONCURRENT, TIMEOUT_SYNTHESIZE_CLAIM, TIMEOUT_STORE_CLAIMS
@@ -29,15 +30,32 @@ class SynthesizeClaimsWorkflow:
     async def run(
         self,
         transcript_id: str,
-        dedup_groups: list[dict],
-        classified_theses: list[dict],
-        enriched_speakers: list[dict],
-        tc_ids: list[str],
+        dedup_groups: list[dict] | None = None,
+        classified_theses: list[dict] | None = None,
+        enriched_speakers: list[dict] | None = None,
+        tc_ids: list[str] | None = None,
         source_url: str | None = None,
         transcript_date: str | None = None,
         transcript_title: str | None = None,
         speaker_descriptions: dict | None = None,
     ) -> dict:
+        # Load from DB if inputs not provided (standalone mode)
+        if dedup_groups is None or classified_theses is None:
+            loaded = await workflow.execute_activity(
+                load_synthesize_inputs,
+                args=[transcript_id],
+                start_to_close_timeout=timedelta(seconds=TIMEOUT_STORE_CLAIMS),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+            dedup_groups = dedup_groups or loaded["dedup_groups"]
+            classified_theses = classified_theses or loaded["classified_theses"]
+            enriched_speakers = enriched_speakers or loaded["enriched_speakers"]
+            tc_ids = tc_ids or loaded["tc_ids"]
+            source_url = source_url or loaded.get("source_url")
+            transcript_date = transcript_date or loaded.get("transcript_date")
+            transcript_title = transcript_title or loaded.get("transcript_title")
+            speaker_descriptions = speaker_descriptions or loaded.get("speaker_descriptions", {})
+
         speaker_descriptions = speaker_descriptions or {}
         checkable_groups = [g for g in dedup_groups if g["checkable"]]
 
@@ -134,6 +152,7 @@ class SynthesizeClaimsWorkflow:
                     "claim_text": g["claim_text"],
                     "speaker": g["speaker"],
                     "member_tc_ids": member_tc_ids,
+                    "original_quotes": g.get("original_quotes", []),
                 })
 
             claim_ids = await workflow.execute_activity(

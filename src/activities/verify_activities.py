@@ -71,7 +71,8 @@ async def decompose_claim(claim_text: str, speaker: str | None = None,
                           claim_date: str | None = None,
                           transcript_title: str | None = None,
                           speaker_description: str = "",
-                          supporting_quotes: list[str] | None = None) -> dict:
+                          supporting_quotes: list[str] | None = None,
+                          transcript_description: str = "") -> dict:
     """Normalize and extract atomic verifiable facts and thesis from a claim.
 
     Delegates to src/agent/decompose.decompose() for all domain logic.
@@ -88,7 +89,8 @@ async def decompose_claim(claim_text: str, speaker: str | None = None,
                              claim_date=claim_date,
                              transcript_title=transcript_title,
                              speaker_description=speaker_description,
-                             supporting_quotes=supporting_quotes)
+                             supporting_quotes=supporting_quotes,
+                             transcript_description=transcript_description)
     log.info(activity.logger, "decompose", "done", "Decompose complete",
              fact_count=len(result.get("facts", [])),
              thesis=result.get("thesis_info", {}).get("thesis", "")[:80])
@@ -105,6 +107,7 @@ async def research_subclaim(
     claim_date: str | None = None,
     claim_text: str = "",
     transcript_title: str | None = None,
+    transcript_description: str = "",
 ) -> dict:
     """Research evidence for a sub-claim using the LangGraph ReAct agent.
 
@@ -128,6 +131,7 @@ async def research_subclaim(
         claim_date=claim_date,
         claim_text=claim_text,
         transcript_title=transcript_title,
+        transcript_description=transcript_description,
     )
 
     log.info(activity.logger, "research", "done", "Research complete",
@@ -146,6 +150,7 @@ async def judge_subclaim(
     verification_target: str = "",
     transcript_title: str | None = None,
     key_test: str = "",
+    transcript_description: str = "",
 ) -> dict:
     """Judge a sub-claim based on collected evidence.
 
@@ -166,7 +171,8 @@ async def judge_subclaim(
                          speaker=speaker, claim_date=claim_date,
                          verification_target=verification_target,
                          transcript_title=transcript_title,
-                         key_test=key_test)
+                         key_test=key_test,
+                         transcript_description=transcript_description)
     log.info(activity.logger, "judge", "done", "Judge complete",
              sub_claim=sub_claim[:80],
              verdict=result.get("verdict"), confidence=result.get("confidence"))
@@ -180,6 +186,7 @@ async def synthesize_verdict(
     thesis_info: dict | None = None,
     claim_date: str | None = None,
     transcript_title: str | None = None,
+    transcript_description: str = "",
 ) -> dict:
     """Combine child verdicts into a final overall verdict.
 
@@ -191,7 +198,8 @@ async def synthesize_verdict(
     from src.agent.synthesize import synthesize
     result = await synthesize(claim_text, child_results, thesis_info,
                               claim_date=claim_date,
-                              transcript_title=transcript_title)
+                              transcript_title=transcript_title,
+                              transcript_description=transcript_description)
     log.info(activity.logger, "synthesize", "done", "Synthesis complete",
              verdict=result.get("verdict"), confidence=result.get("confidence"))
     return result

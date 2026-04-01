@@ -29,6 +29,15 @@ logger = get_logger()
 MAX_JUDGE_EVIDENCE = 20
 
 
+def _build_transcript_context(title: str | None, description: str) -> str:
+    parts = []
+    if title:
+        parts.append(f"Source transcript: {title}")
+    if description:
+        parts.append(f"Description: {description}")
+    return ("\n" + "\n".join(parts)) if parts else ""
+
+
 def _format_source_tag(rating: dict | None) -> str:
     """Format a rating as a readable tag for evidence annotation.
 
@@ -166,6 +175,7 @@ async def judge(
     verification_target: str = "",
     transcript_title: str | None = None,
     key_test: str = "",
+    transcript_description: str = "",
 ) -> dict:
     """Evaluate evidence and return a verdict.
 
@@ -255,7 +265,7 @@ async def judge(
                 key_test_line=f"\nKey test for overall claim: {key_test}" if key_test else "",
                 evidence_text=full_evidence,
                 speaker_line=f"\nSpeaker: {speaker}" if speaker else "",
-                transcript_context=f"\nSource transcript: {transcript_title}" if transcript_title else "",
+                transcript_context=_build_transcript_context(transcript_title, transcript_description),
             ),
             schema=JudgeOutput,
             semantic_validator=validate_judge,

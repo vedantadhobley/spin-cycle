@@ -191,6 +191,7 @@ class TranscriptPipelineWorkflow:
 
             self._set_phase("verifying")
             transcript_date = fetch_result["transcript_meta"].get("date") or "unknown"
+            transcript_description = fetch_result["transcript_meta"].get("description") or ""
 
             # Build claim dicts for VerifyAllClaimsWorkflow
             verify_claims = []
@@ -208,6 +209,7 @@ class TranscriptPipelineWorkflow:
                     ),
                     "transcript_date": transcript_date,
                     "transcript_title": self._title,
+                    "transcript_description": transcript_description,
                     "supporting_quotes": group.get("original_quotes", []),
                 })
 

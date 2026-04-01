@@ -394,6 +394,12 @@ async def fetch_cspan_transcript(url_or_id: str) -> TranscriptData:
         title = title_tag.get_text(strip=True) if title_tag else ""
     title = re.sub(r"\s*\|.*$", "", title)
 
+    # Extract description — og:description
+    description = None
+    og_desc = soup.find("meta", property="og:description")
+    if og_desc and og_desc.get("content"):
+        description = og_desc["content"].strip()
+
     # Extract date — try multiple sources
     date = None
     # 1. <time datetime="YYYY-MM-DD"> element (most reliable)
@@ -501,6 +507,7 @@ async def fetch_cspan_transcript(url_or_id: str) -> TranscriptData:
         url=url,
         title=title,
         date=date,
+        description=description,
         speakers=turn_speakers,
         turns=turns,
         source_format="cspan",

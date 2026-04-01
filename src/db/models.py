@@ -23,6 +23,7 @@ class Claim(Base):
     speaker_description = Column(String(512), nullable=True)  # Wikidata role/title (e.g. "45th president")
     claim_date = Column(String(64), nullable=True)  # when the claim was made (from transcript, article, etc.)
     transcript_title = Column(String(512), nullable=True)  # source transcript title for topic context
+    supporting_quotes = Column(JSONB, nullable=True)  # original transcript quotes supporting this claim
     status = Column(
         Enum("queued", "pending", "processing", "verified", "flagged", name="claim_status"),
         default="pending",
@@ -127,6 +128,7 @@ class TranscriptRecord(Base):
     url = Column(String(2048), nullable=False, unique=True)
     title = Column(String(512), nullable=False)
     date = Column(String(64), nullable=True)
+    description = Column(Text, nullable=True)  # source blurb: rev.com description, editor's note, og:description
     speakers = Column(JSONB, nullable=False)  # list of speaker names
     word_count = Column(Integer, nullable=False)
     segment_count = Column(Integer, nullable=False)
@@ -134,8 +136,9 @@ class TranscriptRecord(Base):
     status = Column(String(32), default="queued", nullable=False)  # queued → extracting → verifying → complete → failed
     # Thesis extraction v2 fields
     segments_data = Column(JSONB, nullable=True)  # list of SpeakerTurn dicts
-    source_format = Column(String(32), default="revcom", nullable=True)  # "revcom", "raw_text", "cspan"
+    source_format = Column(String(32), default="rev", nullable=True)  # "rev", "raw_text", "cspan"
     speaker_aliases = Column(JSONB, nullable=True)  # canonical → variants
+    enriched_speakers = Column(JSONB, nullable=True)  # Wikidata-enriched speaker list [{name, description, ...}]
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     transcript_claims = relationship("TranscriptClaim", back_populates="transcript", cascade="all, delete-orphan")
@@ -157,6 +160,7 @@ class TranscriptClaim(Base):
     checkability_rationale = Column(Text, nullable=True)
     worth_checking = Column(Boolean, nullable=False, default=True)
     is_duplicate = Column(Boolean, nullable=False, default=False)
+    dedup_group_id = Column(String(64), nullable=True)  # group ID from embedding dedup
     factual_anchor = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 

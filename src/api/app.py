@@ -215,6 +215,14 @@ async def lifespan(app: FastAPI):
                     sync_conn.execute(text(
                         "ALTER TABLE transcripts ADD COLUMN status VARCHAR(32) DEFAULT 'complete' NOT NULL"
                     ))
+                if "enriched_speakers" not in t_cols:
+                    sync_conn.execute(text(
+                        "ALTER TABLE transcripts ADD COLUMN enriched_speakers JSONB"
+                    ))
+                if "description" not in t_cols:
+                    sync_conn.execute(text(
+                        "ALTER TABLE transcripts ADD COLUMN description TEXT"
+                    ))
             # Claims table: claim_date for temporal context
             c_cols = {c["name"] for c in inspector.get_columns("claims")}
             if "claim_date" not in c_cols:
@@ -233,6 +241,7 @@ async def lifespan(app: FastAPI):
                 "structure_justification": "TEXT",
                 "interested_parties_reasoning": "TEXT",
                 "wikidata_context": "TEXT",
+                "supporting_quotes": "JSONB",
             }
             for col, dtype in claim_migrations.items():
                 if col not in c_cols:
@@ -280,6 +289,11 @@ async def lifespan(app: FastAPI):
                 elif "classification" not in tc_cols:
                     sync_conn.execute(text(
                         "ALTER TABLE transcript_claims ADD COLUMN classification VARCHAR(64)"
+                    ))
+                # Dedup group tracking
+                if "dedup_group_id" not in tc_cols:
+                    sync_conn.execute(text(
+                        "ALTER TABLE transcript_claims ADD COLUMN dedup_group_id VARCHAR(64)"
                     ))
                 # Drop dead columns
                 for dead_col in ["segment_gist", "supporting_references",

@@ -51,7 +51,7 @@ class FetchAndStoreWorkflow:
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
             if "source_format" not in transcript_data:
-                transcript_data["source_format"] = "revcom"
+                transcript_data["source_format"] = "rev"
 
         # Step 2: Store + enrich speakers
         store_result = await workflow.execute_activity(
@@ -64,15 +64,16 @@ class FetchAndStoreWorkflow:
         transcript_id = store_result["transcript_id"]
         enriched_speakers = store_result.get("speakers", [])
 
-        # Build slim transcript_meta (7 fields — no turns, no display_text)
+        # Build slim transcript_meta — no turns, no display_text
         transcript_meta = {
             "url": transcript_data["url"],
             "title": transcript_data["title"],
             "date": transcript_data.get("date"),
+            "description": transcript_data.get("description"),
             "speakers": transcript_data["speakers"],
             "word_count": transcript_data["word_count"],
             "turn_count": len(transcript_data["turns"]),
-            "source_format": transcript_data.get("source_format", "revcom"),
+            "source_format": transcript_data.get("source_format", "rev"),
         }
 
         log.info(workflow.logger, MODULE, "complete",

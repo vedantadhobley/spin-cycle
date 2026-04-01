@@ -51,9 +51,9 @@ _SECTION_HEADER = re.compile(
     r"^([A-Z][A-Za-z0-9\s,'\-&:]+)$"
 )
 
-# Editor's note pattern (typically first line)
-_EDITORS_NOTE = re.compile(
-    r"^(?:Editor'?s?\s+Notes?|Notes?)\s*:\s*(.+)", re.IGNORECASE | re.DOTALL
+# Description line (typically first line of raw text input)
+_DESCRIPTION_RE = re.compile(
+    r"^Description\s*:\s*(.+)", re.IGNORECASE | re.DOTALL
 )
 
 # Lines that look like speaker labels but aren't
@@ -231,16 +231,16 @@ def parse_raw_text(
     """
     lines = content.split("\n")
 
-    # Pass 1: Detect editor's note (first non-empty line)
-    editors_note = None
+    # Pass 1: Detect editor's note / description (first non-empty line)
+    description = None
     content_start = 0
     for i, line in enumerate(lines):
         stripped = line.strip()
         if not stripped:
             continue
-        m = _EDITORS_NOTE.match(stripped)
+        m = _DESCRIPTION_RE.match(stripped)
         if m:
-            editors_note = m.group(1).strip()
+            description = m.group(1).strip()
             content_start = i + 1
         break
 
@@ -359,5 +359,5 @@ def parse_raw_text(
         turns=turns,
         source_format="raw_text",
         speaker_aliases=alias_map,
-        editors_note=editors_note,
+        description=description,
     )

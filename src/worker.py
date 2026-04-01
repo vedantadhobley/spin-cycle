@@ -56,6 +56,10 @@ from src.activities.transcript_activities import (  # noqa: E402
     update_transcript_claims_classification,
     update_transcript_claims_dedup,
     finish_transcript_and_start_next,
+    load_extract_inputs,
+    load_classify_inputs,
+    load_synthesize_inputs,
+    load_verify_inputs,
     notify_frontend_refresh,
 )
 
@@ -112,6 +116,11 @@ async def main():
             update_transcript_claims_classification,
             update_transcript_claims_dedup,
             finish_transcript_and_start_next,
+            # DB loaders (for independent workflow testing)
+            load_extract_inputs,
+            load_classify_inputs,
+            load_synthesize_inputs,
+            load_verify_inputs,
             # Frontend notification
             notify_frontend_refresh,
         ],
@@ -121,7 +130,7 @@ async def main():
     )
 
     log.info(logger, MODULE, "ready", "Worker listening",
-             task_queue=TASK_QUEUE, activity_count=20, workflow_count=7)
+             task_queue=TASK_QUEUE, activity_count=24, workflow_count=7)
     try:
         await worker.run()
     finally:

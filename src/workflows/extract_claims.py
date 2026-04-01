@@ -13,6 +13,7 @@ with workflow.unsafe.imports_passed_through():
     from src.activities.transcript_activities import (
         extract_chunk_activity,
         store_transcript_claims,
+        load_extract_inputs,
     )
     from src.utils.logging import log
     from src.transcript.thesis_extractor import build_chunks
@@ -30,10 +31,22 @@ class ExtractClaimsWorkflow:
     async def run(
         self,
         transcript_id: str,
-        transcript_meta: dict,
-        enriched_speakers: list[dict],
-        turns: list[dict],
+        transcript_meta: dict | None = None,
+        enriched_speakers: list[dict] | None = None,
+        turns: list[dict] | None = None,
     ) -> dict:
+        # Load from DB if inputs not provided (standalone mode)
+        if transcript_meta is None or enriched_speakers is None or turns is None:
+            loaded = await workflow.execute_activity(
+                load_extract_inputs,
+                args=[transcript_id],
+                start_to_close_timeout=timedelta(seconds=TIMEOUT_STORE_CLAIMS),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+            transcript_meta = transcript_meta or loaded["transcript_meta"]
+            enriched_speakers = enriched_speakers or loaded["enriched_speakers"]
+            turns = turns or loaded["turns"]
+
         log.info(workflow.logger, MODULE, "started",
                  "Starting chunked extraction",
                  transcript_id=transcript_id,

@@ -35,9 +35,9 @@ class TranscriptData:
     date: str | None
     speakers: list[str]                         # normalized, deduplicated
     turns: list[SpeakerTurn]
-    source_format: str                          # "raw_text", "revcom", "cspan"
+    source_format: str                          # "raw_text", "rev", "cspan"
     speaker_aliases: dict[str, list[str]] = field(default_factory=dict)  # canonical → variants
-    editors_note: str | None = None
+    description: str | None = None  # source-specific blurb: rev.com description, editor's note, og:description
     # Optional overrides — used when reconstructing from slim metadata (no turns)
     _word_count_override: int | None = field(default=None, repr=False)
     _turn_count_override: int | None = field(default=None, repr=False)
@@ -131,5 +131,5 @@ def detect_format(url: str) -> str:
     if "c-span.org" in url:
         return "cspan"
     if "rev.com" in url:
-        return "revcom"
-    return "revcom"
+        return "rev"
+    return "rev"

@@ -1431,6 +1431,7 @@ async def research_claim(
     claim_date: str | None = None,
     claim_text: str = "",
     transcript_title: str | None = None,
+    transcript_description: str = "",
 ) -> tuple[list[dict], InterestedPartiesDict]:
     """Run the research agent to gather evidence for a sub-claim.
 
@@ -1567,9 +1568,12 @@ async def research_claim(
         agent = build_research_agent(
             wikidata_context + relay_context, claim_date=claim_date,
         )
-        transcript_context = (
-            f"\nSource transcript: {transcript_title}" if transcript_title else ""
-        )
+        transcript_parts = []
+        if transcript_title:
+            transcript_parts.append(f"Source transcript: {transcript_title}")
+        if transcript_description:
+            transcript_parts.append(f"Description: {transcript_description}")
+        transcript_context = ("\n" + "\n".join(transcript_parts)) if transcript_parts else ""
         input_msg = HumanMessage(
             content=RESEARCH_USER.format(
                 sub_claim=sub_claim,

@@ -318,9 +318,11 @@ async def extract_chunk(
     """
     is_multi_chunk = chunk.total_chunks > 1
 
+    desc_line = f" Description: {transcript.description}." if transcript.description else ""
     context_note = (
         f"Title: {transcript.title}. "
-        f"Date: {transcript.date or 'unknown'}. "
+        f"Date: {transcript.date or 'unknown'}."
+        f"{desc_line} "
         f"{transcript.word_count} words across {transcript.turn_count} speaker turns. "
         f"Speakers: {', '.join(transcript.speakers)}."
     )

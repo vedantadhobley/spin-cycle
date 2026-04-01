@@ -7,10 +7,14 @@ If a single claim fails after retries, it is skipped and the rest continue.
 
 from temporalio import workflow
 
+from datetime import timedelta
+from temporalio.common import RetryPolicy
+
 with workflow.unsafe.imports_passed_through():
     from src.workflows.verify import VerifyClaimWorkflow
+    from src.activities.transcript_activities import load_verify_inputs
     from src.utils.logging import log
-    from src.config import TASK_QUEUE
+    from src.config import TASK_QUEUE, TIMEOUT_STORE_CLAIMS
 
 MODULE = "verify_all_claims"
 
@@ -35,22 +39,32 @@ class VerifyAllClaimsWorkflow:
         }
 
     @workflow.run
-    async def run(self, claims: list[dict]) -> dict:
+    async def run(
+        self,
+        claims: list[dict] | None = None,
+        transcript_id: str | None = None,
+    ) -> dict:
         """Verify claims sequentially.
 
         Args:
-            claims: List of dicts, each with:
-                - claim_id: str
-                - claim_text: str
-                - speaker: str
-                - speaker_description: str
-                - transcript_date: str
-                - transcript_title: str
-                - supporting_quotes: list[str]
+            claims: List of dicts, each with claim_id, claim_text, speaker, etc.
+                    If None, loads from DB using transcript_id.
+            transcript_id: Load claims linked to this transcript from DB.
 
         Returns:
             Dict with verified/failed/skipped counts and failed claim IDs.
         """
+        # Load from DB if claims not provided
+        if claims is None:
+            if transcript_id is None:
+                raise ValueError("Either claims or transcript_id must be provided")
+            claims = await workflow.execute_activity(
+                load_verify_inputs,
+                args=[transcript_id],
+                start_to_close_timeout=timedelta(seconds=TIMEOUT_STORE_CLAIMS),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+
         self._total = len(claims)
         failed_ids: list[str] = []
 
@@ -79,6 +93,7 @@ class VerifyAllClaimsWorkflow:
                         claim.get("transcript_title"),
                         claim.get("speaker_description", ""),
                         claim.get("supporting_quotes", []),
+                        claim.get("transcript_description", ""),
                     ],
                     id=f"verify-{claim_id}",
                     task_queue=TASK_QUEUE,

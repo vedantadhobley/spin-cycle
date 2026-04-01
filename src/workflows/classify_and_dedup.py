@@ -15,6 +15,7 @@ with workflow.unsafe.imports_passed_through():
         dedup_claims_activity,
         update_transcript_claims_classification,
         update_transcript_claims_dedup,
+        load_classify_inputs,
     )
     from src.utils.logging import log
     from src.config import (
@@ -36,10 +37,22 @@ class ClassifyAndDedupWorkflow:
     async def run(
         self,
         transcript_id: str,
-        tc_ids: list[str],
-        all_theses: list[dict],
-        enriched_speakers: list[dict],
+        tc_ids: list[str] | None = None,
+        all_theses: list[dict] | None = None,
+        enriched_speakers: list[dict] | None = None,
     ) -> dict:
+        # Load from DB if inputs not provided (standalone mode)
+        if tc_ids is None or all_theses is None or enriched_speakers is None:
+            loaded = await workflow.execute_activity(
+                load_classify_inputs,
+                args=[transcript_id],
+                start_to_close_timeout=timedelta(seconds=TIMEOUT_STORE_CLAIMS),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+            tc_ids = tc_ids or loaded["tc_ids"]
+            all_theses = all_theses or loaded["all_theses"]
+            enriched_speakers = enriched_speakers or loaded["enriched_speakers"]
+
         log.info(workflow.logger, MODULE, "started",
                  f"Classifying {len(all_theses)} claims",
                  transcript_id=transcript_id)
@@ -225,16 +238,21 @@ def _build_dedup_updates(
     if not tc_ids:
         return []
 
-    # Determine which global indices are duplicates and which are checkable
+    # Determine which global indices are duplicates, checkable, and their group IDs
     checkable_indices: set[int] = set()
     duplicate_indices: set[int] = set()
+    index_to_group: dict[int, str] = {}
 
     for speaker, result in dedup_results.items():
         global_indices = result["global_indices"]
 
-        for cluster in result["clusters"]:
+        for ci, cluster in enumerate(result["clusters"]):
             local_indices = cluster["member_indices"]
             member_global = [global_indices[li] for li in local_indices]
+            group_id = f"{speaker}_C{ci}"
+
+            for gi in member_global:
+                index_to_group[gi] = group_id
 
             if cluster.get("checkable", False):
                 checkable_indices.update(member_global)
@@ -254,6 +272,7 @@ def _build_dedup_updates(
                     "tc_id": tc_ids[gi],
                     "is_duplicate": gi in duplicate_indices,
                     "worth_checking": gi in checkable_indices,
+                    "dedup_group_id": index_to_group.get(gi),
                 })
 
     return updates

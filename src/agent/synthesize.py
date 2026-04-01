@@ -17,12 +17,22 @@ MODULE = "synthesize"
 logger = get_logger()
 
 
+def _build_transcript_context(title: str | None, description: str) -> str:
+    parts = []
+    if title:
+        parts.append(f"Source transcript: {title}")
+    if description:
+        parts.append(f"Description: {description}")
+    return ("\n" + "\n".join(parts)) if parts else ""
+
+
 async def synthesize(
     claim_text: str,
     child_results: list[dict],
     thesis_info: dict | None = None,
     claim_date: str | None = None,
     transcript_title: str | None = None,
+    transcript_description: str = "",
 ) -> dict:
     """Combine child verdicts into a final overall verdict.
 
@@ -95,7 +105,7 @@ async def synthesize(
                 synthesis_framing=synthesis_framing,
                 sub_verdicts_text=sub_verdicts_text,
                 evidence_digest=evidence_digest_text,
-                transcript_context=f"\nSource transcript: {transcript_title}" if transcript_title else "",
+                transcript_context=_build_transcript_context(transcript_title, transcript_description),
             ),
             schema=SynthesizeOutput,
             semantic_validator=validate_synthesize,

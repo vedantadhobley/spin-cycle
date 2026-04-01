@@ -12,6 +12,10 @@ Activities:
   9. create_claims_for_transcript  — batch-create Claim records + link FKs
  10. update_transcript_status      — set transcript status field
  11. finish_transcript_and_start_next — mark transcript complete, start next queued
+ 12. load_extract_inputs           — load DB state for ExtractClaimsWorkflow
+ 13. load_classify_inputs          — load DB state for ClassifyAndDedupWorkflow
+ 14. load_synthesize_inputs        — load DB state for SynthesizeClaimsWorkflow
+ 15. load_verify_inputs            — load DB state for VerifyAllClaimsWorkflow
 
 Each chunk is a separate activity so it's visible in Temporal UI.
 The workflow orchestrates chunks — Temporal's max_concurrent_activities
@@ -35,12 +39,15 @@ async def fetch_transcript(url: str) -> dict:
     Returns a serialized TranscriptData-shaped dict with speaker turns.
     """
     from src.transcript.cspan import fetch_cspan_transcript, is_cspan_url
+    from src.transcript.rev import fetch_rev_transcript, is_rev_url
 
     log.info(activity.logger, "transcript", "fetch_start", "Fetching transcript",
              url=url)
 
     if is_cspan_url(url):
         td = await fetch_cspan_transcript(url)
+    elif is_rev_url(url):
+        td = await fetch_rev_transcript(url)
     else:
         raise ValueError(f"Unsupported transcript URL: {url}")
 
@@ -48,6 +55,7 @@ async def fetch_transcript(url: str) -> dict:
         "url": td.url,
         "title": td.title,
         "date": td.date,
+        "description": td.description,
         "speakers": td.speakers,
         "word_count": td.word_count,
         "display_text": td.display_text,
@@ -95,6 +103,7 @@ async def fetch_raw_transcript(
         "url": td.url,
         "title": td.title,
         "date": td.date,
+        "description": td.description,
         "speakers": td.speakers,
         "word_count": td.word_count,
         "display_text": td.display_text,
@@ -139,9 +148,10 @@ async def extract_chunk_activity(
         url=transcript_meta.get("url", ""),
         title=transcript_meta["title"],
         date=transcript_meta.get("date"),
+        description=transcript_meta.get("description"),
         speakers=transcript_meta["speakers"],
         turns=[],  # not needed by extract_chunk — only metadata used
-        source_format=transcript_meta.get("source_format", "revcom"),
+        source_format=transcript_meta.get("source_format", "rev"),
         speaker_aliases=transcript_meta.get("speaker_aliases", {}),
         _word_count_override=transcript_meta.get("word_count"),
         _turn_count_override=transcript_meta.get("turn_count"),
@@ -289,7 +299,7 @@ async def update_transcript_claims_dedup(
 ) -> None:
     """Update dedup fields on existing transcript_claims.
 
-    Each update dict has: tc_id, is_duplicate, worth_checking.
+    Each update dict has: tc_id, is_duplicate, worth_checking, dedup_group_id.
     """
     from sqlalchemy import select
     from src.db.session import async_session
@@ -304,6 +314,8 @@ async def update_transcript_claims_dedup(
             tc = result.scalar_one()
             tc.is_duplicate = u.get("is_duplicate", False)
             tc.worth_checking = u.get("worth_checking", True)
+            if "dedup_group_id" in u:
+                tc.dedup_group_id = u["dedup_group_id"]
         await session.commit()
 
     log.info(activity.logger, "transcript", "dedup_updated",
@@ -342,7 +354,9 @@ async def store_transcript(transcript_data: dict) -> dict:
         if record:
             record.title = transcript_data["title"]
             record.date = transcript_data.get("date")
+            record.description = transcript_data.get("description")
             record.speakers = transcript_data["speakers"]
+            record.enriched_speakers = enriched_speakers
             record.word_count = transcript_data["word_count"]
             record.segment_count = len(transcript_data["turns"])
             record.display_text = transcript_data["display_text"]
@@ -359,14 +373,16 @@ async def store_transcript(transcript_data: dict) -> dict:
                 url=url,
                 title=transcript_data["title"],
                 date=transcript_data.get("date"),
+                description=transcript_data.get("description"),
                 speakers=transcript_data["speakers"],
+                enriched_speakers=enriched_speakers,
                 word_count=transcript_data["word_count"],
                 segment_count=len(transcript_data["turns"]),
                 display_text=transcript_data["display_text"],
                 status="extracting",
                 # v2 fields
                 segments_data=transcript_data.get("turns"),
-                source_format=transcript_data.get("source_format", "revcom"),
+                source_format=transcript_data.get("source_format", "rev"),
                 speaker_aliases=transcript_data.get("speaker_aliases"),
             )
             session.add(record)
@@ -481,6 +497,7 @@ async def create_claims_for_transcript(
                     source_url=source_url,
                     claim_date=transcript_date,
                     transcript_title=transcript_title,
+                    supporting_quotes=group.get("original_quotes"),
                     status="queued",
                 )
                 session.add(claim)
@@ -611,6 +628,277 @@ async def finish_transcript_and_start_next() -> str | None:
              transcript_id=transcript_id, url=url)
 
     return transcript_id
+
+
+@activity.defn
+async def load_extract_inputs(transcript_id: str) -> dict:
+    """Load inputs for ExtractClaimsWorkflow from DB.
+
+    Returns transcript_meta, enriched_speakers, and turns for a stored transcript.
+    """
+    from sqlalchemy import select
+    from src.db.session import async_session
+    from src.db.models import TranscriptRecord
+
+    tid = _uuid_mod.UUID(transcript_id)
+    async with async_session() as session:
+        result = await session.execute(
+            select(TranscriptRecord).where(TranscriptRecord.id == tid)
+        )
+        record = result.scalar_one()
+
+        transcript_meta = {
+            "url": record.url,
+            "title": record.title,
+            "date": record.date,
+            "description": record.description,
+            "speakers": record.speakers,
+            "word_count": record.word_count,
+            "turn_count": record.segment_count,
+            "source_format": record.source_format or "rev",
+        }
+        enriched_speakers = record.enriched_speakers or record.speakers or []
+        turns = record.segments_data or []
+
+    log.info(activity.logger, "transcript", "load_extract",
+             "Loaded extract inputs from DB",
+             transcript_id=transcript_id,
+             turn_count=len(turns))
+
+    return {
+        "transcript_meta": transcript_meta,
+        "enriched_speakers": enriched_speakers,
+        "turns": turns,
+    }
+
+
+@activity.defn
+async def load_classify_inputs(transcript_id: str) -> dict:
+    """Load inputs for ClassifyAndDedupWorkflow from DB.
+
+    Reconstructs tc_ids, all_theses, and enriched_speakers from stored
+    TranscriptRecord + TranscriptClaim rows.
+    """
+    from sqlalchemy import select
+    from src.db.session import async_session
+    from src.db.models import TranscriptRecord, TranscriptClaim
+
+    tid = _uuid_mod.UUID(transcript_id)
+    async with async_session() as session:
+        # Load transcript for enriched_speakers
+        t_result = await session.execute(
+            select(TranscriptRecord).where(TranscriptRecord.id == tid)
+        )
+        record = t_result.scalar_one()
+        enriched_speakers = record.enriched_speakers or record.speakers or []
+
+        # Load transcript_claims in creation order
+        tc_result = await session.execute(
+            select(TranscriptClaim)
+            .where(TranscriptClaim.transcript_id == tid)
+            .order_by(TranscriptClaim.created_at.asc())
+        )
+        claims = tc_result.scalars().all()
+
+        tc_ids = [str(tc.id) for tc in claims]
+        all_theses = []
+        for tc in claims:
+            all_theses.append({
+                "thesis_statement": tc.claim_text,
+                "original_quote": tc.original_quote or "",
+                "speakers": [tc.speaker] if tc.speaker else [],
+                "topic": tc.topic,
+                "classification": tc.classification,
+                "checkable": tc.checkable,
+                "check_rationale": tc.checkability_rationale or "",
+                "factual_anchor": tc.factual_anchor,
+                "worth_checking": tc.worth_checking,
+                "is_duplicate": tc.is_duplicate,
+            })
+
+    log.info(activity.logger, "transcript", "load_classify",
+             "Loaded classify inputs from DB",
+             transcript_id=transcript_id,
+             claim_count=len(tc_ids))
+
+    return {
+        "tc_ids": tc_ids,
+        "all_theses": all_theses,
+        "enriched_speakers": enriched_speakers,
+    }
+
+
+@activity.defn
+async def load_synthesize_inputs(transcript_id: str) -> dict:
+    """Load inputs for SynthesizeClaimsWorkflow from DB.
+
+    Reconstructs dedup_groups, classified_theses, enriched_speakers, tc_ids,
+    and transcript metadata from stored records.
+    """
+    from sqlalchemy import select
+    from src.db.session import async_session
+    from src.db.models import TranscriptRecord, TranscriptClaim
+
+    tid = _uuid_mod.UUID(transcript_id)
+    async with async_session() as session:
+        # Load transcript
+        t_result = await session.execute(
+            select(TranscriptRecord).where(TranscriptRecord.id == tid)
+        )
+        record = t_result.scalar_one()
+        enriched_speakers = record.enriched_speakers or record.speakers or []
+
+        # Build speaker descriptions
+        speaker_descriptions = {}
+        for s in enriched_speakers:
+            if isinstance(s, dict) and s.get("description"):
+                speaker_descriptions[s["name"]] = s["description"]
+
+        # Load transcript_claims in creation order
+        tc_result = await session.execute(
+            select(TranscriptClaim)
+            .where(TranscriptClaim.transcript_id == tid)
+            .order_by(TranscriptClaim.created_at.asc())
+        )
+        claims = tc_result.scalars().all()
+
+        tc_ids = [str(tc.id) for tc in claims]
+        classified_theses = []
+        for tc in claims:
+            classified_theses.append({
+                "thesis_statement": tc.claim_text,
+                "original_quote": tc.original_quote or "",
+                "speakers": [tc.speaker] if tc.speaker else [],
+                "topic": tc.topic,
+                "classification": tc.classification,
+                "checkable": tc.checkable,
+                "check_rationale": tc.checkability_rationale or "",
+                "factual_anchor": tc.factual_anchor,
+                "worth_checking": tc.worth_checking,
+                "is_duplicate": tc.is_duplicate,
+            })
+
+        # Rebuild dedup_groups from dedup_group_id + classification data
+        group_map: dict[str, list[int]] = {}
+        for i, tc in enumerate(claims):
+            gid = tc.dedup_group_id
+            if gid:
+                group_map.setdefault(gid, []).append(i)
+            else:
+                # No group — treat as singleton
+                group_map.setdefault(f"{tc.speaker}_C{i}", []).append(i)
+
+        dedup_groups = []
+        for gid, member_indices in group_map.items():
+            # Collect original quotes (deduped)
+            original_quotes = []
+            seen_quotes: set[str] = set()
+            for gi in member_indices:
+                quote = classified_theses[gi].get("original_quote", "")
+                if quote and quote not in seen_quotes:
+                    original_quotes.append(quote)
+                    seen_quotes.add(quote)
+
+            first = classified_theses[member_indices[0]]
+            speaker = first["speakers"][0] if first.get("speakers") else "Unknown"
+            dedup_groups.append({
+                "group_id": gid,
+                "local_group_id": gid.split("_", 1)[-1] if "_" in gid else gid,
+                "speaker": speaker,
+                "topic": first.get("topic", ""),
+                "checkable": first.get("checkable", False),
+                "member_global_indices": member_indices,
+                "claim_text": "\n".join(
+                    classified_theses[gi]["thesis_statement"]
+                    for gi in member_indices
+                ),
+                "original_quotes": original_quotes,
+            })
+
+    log.info(activity.logger, "transcript", "load_synthesize",
+             "Loaded synthesize inputs from DB",
+             transcript_id=transcript_id,
+             group_count=len(dedup_groups))
+
+    return {
+        "dedup_groups": dedup_groups,
+        "classified_theses": classified_theses,
+        "enriched_speakers": enriched_speakers,
+        "tc_ids": tc_ids,
+        "source_url": record.url,
+        "transcript_date": record.date,
+        "transcript_title": record.title,
+        "transcript_description": record.description or "",
+        "speaker_descriptions": speaker_descriptions,
+    }
+
+
+@activity.defn
+async def load_verify_inputs(transcript_id: str) -> list[dict]:
+    """Load inputs for VerifyAllClaimsWorkflow from DB.
+
+    Returns list of claim dicts ready for sequential verification.
+    Only includes claims with status='queued' linked to this transcript.
+    """
+    from sqlalchemy import select
+    from src.db.session import async_session
+    from src.db.models import TranscriptRecord, TranscriptClaim, Claim
+
+    tid = _uuid_mod.UUID(transcript_id)
+    async with async_session() as session:
+        # Load transcript for metadata
+        t_result = await session.execute(
+            select(TranscriptRecord).where(TranscriptRecord.id == tid)
+        )
+        record = t_result.scalar_one()
+
+        # Build speaker descriptions from enriched speakers
+        speaker_descriptions = {}
+        enriched = record.enriched_speakers or []
+        for s in enriched:
+            if isinstance(s, dict) and s.get("description"):
+                speaker_descriptions[s["name"]] = s["description"]
+
+        # Load linked claims via transcript_claims FK
+        tc_result = await session.execute(
+            select(TranscriptClaim)
+            .where(TranscriptClaim.transcript_id == tid)
+            .where(TranscriptClaim.claim_id.isnot(None))
+        )
+        tc_rows = tc_result.scalars().all()
+
+        # Unique claim IDs (multiple TCs can link to one Claim)
+        claim_ids = list({tc.claim_id for tc in tc_rows})
+        if not claim_ids:
+            return []
+
+        c_result = await session.execute(
+            select(Claim).where(Claim.id.in_(claim_ids))
+        )
+        claims = c_result.scalars().all()
+
+        verify_claims = []
+        for claim in claims:
+            verify_claims.append({
+                "claim_id": str(claim.id),
+                "claim_text": claim.text,
+                "speaker": claim.speaker,
+                "speaker_description": (
+                    speaker_descriptions.get(claim.speaker, "")
+                    if claim.speaker else ""
+                ),
+                "transcript_date": record.date or "unknown",
+                "transcript_title": record.title,
+                "transcript_description": record.description or "",
+                "supporting_quotes": claim.supporting_quotes or [],
+            })
+
+    log.info(activity.logger, "transcript", "load_verify",
+             "Loaded verify inputs from DB",
+             transcript_id=transcript_id,
+             claim_count=len(verify_claims))
+
+    return verify_claims
 
 
 @activity.defn

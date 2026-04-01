@@ -410,7 +410,8 @@ async def decompose(claim_text: str, speaker: str | None = None,
                     claim_date: str | None = None,
                     transcript_title: str | None = None,
                     speaker_description: str = "",
-                    supporting_quotes: list[str] | None = None) -> dict:
+                    supporting_quotes: list[str] | None = None,
+                    transcript_description: str = "") -> dict:
     """Full decompose pipeline: normalize → extract → quality validate → NER → Wikidata.
 
     Pipeline:
@@ -463,9 +464,12 @@ async def decompose(claim_text: str, speaker: str | None = None,
         speaker_line = f"\nSpeaker: {speaker}"
     else:
         speaker_line = ""
-    transcript_context = (
-        f"\nSource transcript: {transcript_title}" if transcript_title else ""
-    )
+    transcript_parts = []
+    if transcript_title:
+        transcript_parts.append(f"Source transcript: {transcript_title}")
+    if transcript_description:
+        transcript_parts.append(f"Description: {transcript_description}")
+    transcript_context = ("\n" + "\n".join(transcript_parts)) if transcript_parts else ""
 
     # Build optional supporting quotes section (thesis extraction v2)
     supporting_quotes_section = ""
