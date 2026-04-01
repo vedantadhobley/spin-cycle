@@ -529,6 +529,42 @@ class SubclaimWeight(BaseModel):
         return v
 
 
+# =============================================================================
+# SPEAKER ATTRIBUTION OUTPUT (unnamed transcript turns → attributed speakers)
+# =============================================================================
+
+class TurnAttribution(BaseModel):
+    """Attribution reasoning for a single Unknown turn (Step 2)."""
+    turn_index: int = Field(
+        ..., description="0-based index of the Unknown turn in the turn list"
+    )
+    content_signals: str = Field(
+        ..., description="What content signals suggest about the speaker: "
+        "authority language, questions, titles used, meta-commentary, etc."
+    )
+    speaker: str = Field(
+        ..., description="Attributed speaker: a known speaker name "
+        "or 'Narrator'"
+    )
+
+
+class AttributeSpeakersOutput(BaseModel):
+    """LLM output for speaker attribution of unnamed transcript turns."""
+    format_type: str = Field(
+        ..., description="Event format: 'press_conference', 'hearing', "
+        "'interview', 'speech', 'panel', 'other'"
+    )
+    attributions: list[TurnAttribution] = Field(
+        default_factory=list,
+        description="Attribution for each Unknown turn"
+    )
+
+
+# =============================================================================
+# SYNTHESIZE OUTPUT (rubric-based with thesis evaluation)
+# =============================================================================
+
+
 class SynthesizeOutput(BaseModel):
     """Rubric-based synthesis with explicit thesis evaluation.
 

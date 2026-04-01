@@ -22,6 +22,7 @@ from src.schemas.llm_outputs import (
     SynthesizeOutput,
     ThesisExtractionOutput,
     SynthesizedClaim,
+    AttributeSpeakersOutput,
 )
 from src.utils.logging import log, get_logger
 
@@ -294,6 +295,52 @@ def validate_thesis_extraction(output: ThesisExtractionOutput) -> tuple[bool, st
         log.info(logger, MODULE, "thesis_extraction_filtered",
                  f"Filtered {dropped} malformed theses",
                  dropped=dropped)
+
+    return True, ""
+
+
+def validate_speaker_attribution(
+    output: AttributeSpeakersOutput,
+    known_speakers: set[str] | None = None,
+) -> tuple[bool, str]:
+    """Validate speaker attribution output semantically.
+
+    Checks:
+    1. format_type is non-empty
+    2. Every attribution has substantive content_signals (>=15 chars)
+    3. Every attribution has a non-empty speaker
+    4. No duplicate turn_index values
+    5. Speaker names are from the allowed set (known speakers + Narrator)
+    """
+    if not output.format_type or not output.format_type.strip():
+        return False, "format_type is empty"
+
+    seen_indices: set[int] = set()
+    for attr in output.attributions:
+        # Check 2: content_signals must be substantive
+        if not attr.content_signals or len(attr.content_signals.strip()) < 15:
+            return False, (
+                f"attribution[turn_index={attr.turn_index}].content_signals "
+                f"too short (<15 chars) — must articulate reasoning"
+            )
+
+        # Check 3: speaker must be non-empty
+        if not attr.speaker or not attr.speaker.strip():
+            return False, f"attribution[turn_index={attr.turn_index}].speaker is empty"
+
+        # Check 4: no duplicate turn indices
+        if attr.turn_index in seen_indices:
+            return False, f"Duplicate turn_index={attr.turn_index}"
+        seen_indices.add(attr.turn_index)
+
+        # Check 5: speaker must be from allowed set
+        if known_speakers is not None:
+            allowed = known_speakers | {"Narrator", "Unknown"}
+            if attr.speaker not in allowed:
+                return False, (
+                    f"attribution[turn_index={attr.turn_index}].speaker "
+                    f"'{attr.speaker}' not in allowed set: {sorted(allowed)}"
+                )
 
     return True, ""
 

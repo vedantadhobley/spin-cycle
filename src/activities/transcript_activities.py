@@ -134,6 +134,152 @@ async def fetch_raw_transcript(
     return result
 
 
+def _normalize_transcript(transcript_data: dict) -> dict:
+    """Merge consecutive same-speaker turns and update derived fields.
+
+    This is the single normalization point for all transcript formats.
+    Parsers return raw turns; this runs after any LLM attribution.
+    """
+    from src.transcript.parsers import clean_speaker_name
+
+    turns = transcript_data.get("turns", [])
+    if not turns:
+        return transcript_data
+
+    # Clean speaker names (strip quoted nicknames, etc.) before merging
+    for t in turns:
+        if t.get("speaker"):
+            t["speaker"] = clean_speaker_name(t["speaker"])
+
+    merged: list[dict] = [dict(turns[0])]  # shallow copy first turn
+    for t in turns[1:]:
+        prev = merged[-1]
+        if (t.get("speaker") == prev.get("speaker")
+                and t.get("section_header") is None):
+            prev["text"] = prev["text"] + "\n\n" + t["text"]
+        else:
+            merged.append(dict(t))
+
+    transcript_data["turns"] = merged
+    transcript_data["speakers"] = list(dict.fromkeys(
+        t.get("speaker", "") for t in merged
+    ))
+    transcript_data["display_text"] = "\n\n".join(
+        f"{t.get('speaker', 'Unknown')}: {t.get('text', '')}" for t in merged
+    )
+    transcript_data["word_count"] = sum(
+        len(t.get("text", "").split()) for t in merged
+    )
+    return transcript_data
+
+
+@activity.defn
+async def attribute_speakers(transcript_data: dict) -> dict:
+    """Attribute Unknown speaker turns using an LLM.
+
+    Receives the transcript_data dict from fetch_transcript, calls the LLM
+    to attribute any "Unknown" speaker turns based on content signals, then
+    returns the modified transcript_data with speakers filled in.
+
+    If no Unknown turns exist (e.g. Rev.com transcripts), returns unchanged.
+    """
+    turns = transcript_data.get("turns", [])
+
+    # Collect Unknown turn indices
+    unknown_indices = [
+        i for i, t in enumerate(turns) if t.get("speaker") == "Unknown"
+    ]
+
+    if not unknown_indices:
+        log.info(activity.logger, "attribution", "skip",
+                 "No Unknown turns — skipping speaker attribution")
+        return _normalize_transcript(transcript_data)
+
+    log.info(activity.logger, "attribution", "start",
+             "Attributing unknown speaker turns",
+             unknown_count=len(unknown_indices),
+             total_turns=len(turns))
+
+    from src.llm.invoker import invoke_llm
+    from src.schemas.llm_outputs import AttributeSpeakersOutput
+    from src.llm.validators import validate_speaker_attribution
+    from src.prompts.speaker_attribution import (
+        SPEAKER_ATTRIBUTION_SYSTEM,
+        SPEAKER_ATTRIBUTION_USER,
+    )
+
+    # Build known speaker list from named turns + transcript-level speakers
+    # (C-SPAN extracts person names from HTML even when all cc_names are ">>")
+    skip = {"Unknown", "Narrator"}
+    known_speakers: set[str] = set()
+    for t in turns:
+        speaker = t.get("speaker", "")
+        if speaker and speaker not in skip:
+            known_speakers.add(speaker)
+    for s in transcript_data.get("speakers", []):
+        if isinstance(s, str) and s and s not in skip:
+            known_speakers.add(s)
+
+    speaker_list = ", ".join(sorted(known_speakers)) if known_speakers else "(none identified)"
+
+    # Build turn list string — all turns, truncated text for long ones
+    turn_lines = []
+    for i, t in enumerate(turns):
+        text = t.get("text", "")
+        total_len = len(text)
+        if total_len > 300:
+            display_text = text[:300].rstrip() + f"... [{total_len} chars total]"
+        else:
+            display_text = text
+        turn_lines.append(f"[{i}] {t.get('speaker', 'Unknown')}: {display_text}")
+
+    turn_list = "\n".join(turn_lines)
+
+    # Build a validator that knows the allowed speaker names
+    def _validator(output: AttributeSpeakersOutput) -> tuple[bool, str]:
+        return validate_speaker_attribution(output, known_speakers=known_speakers)
+
+    output = await invoke_llm(
+        system_prompt=SPEAKER_ATTRIBUTION_SYSTEM,
+        user_prompt=SPEAKER_ATTRIBUTION_USER.format(
+            title=transcript_data.get("title", ""),
+            date=transcript_data.get("date", "unknown"),
+            description=transcript_data.get("description", "") or "",
+            speaker_list=speaker_list,
+            turn_list=turn_list,
+        ),
+        schema=AttributeSpeakersOutput,
+        semantic_validator=_validator,
+        max_retries=2,
+        max_tokens=4096,
+        activity_name="attribute_speakers",
+    )
+
+    # Apply attributions (skip "Unknown" — LLM saying "I can't tell")
+    attributed_indices: set[int] = set()
+    for attr in output.attributions:
+        idx = attr.turn_index
+        if 0 <= idx < len(turns) and turns[idx].get("speaker") == "Unknown":
+            if attr.speaker != "Unknown":
+                turns[idx]["speaker"] = attr.speaker
+            attributed_indices.add(idx)
+
+    # Any Unknown turns the LLM didn't attribute stay as "Unknown"
+    missed = [i for i in unknown_indices if i not in attributed_indices]
+    if missed:
+        log.info(activity.logger, "attribution", "unattributed_turns",
+                 "Some turns remain Unknown (LLM could not identify speaker)",
+                 count=len(missed))
+
+    log.info(activity.logger, "attribution", "done",
+             "Speaker attribution complete",
+             format_type=output.format_type,
+             attributed=len(attributed_indices),
+             missed=len(missed))
+
+    return _normalize_transcript(transcript_data)
+
+
 @activity.defn
 async def extract_chunk_activity(
     transcript_meta: dict,

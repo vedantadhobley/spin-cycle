@@ -8,13 +8,15 @@ The transcript API returns closed-caption data with speaker labels in the
 `cc_name` field (e.g. "GOV. ABBOT", "SEN. SCHUMER"). Some programs use ">>"
 as a generic caption marker without speaker attribution.
 
-Speaker attribution post-processing:
+Speaker resolution (programmatic, in this module):
   1. Extract proper names from HTML /person/ links on the program page
   2. Map cc_name labels to proper names by last-name matching
      (e.g. "SEC. RUBIO" → "Marco Rubio")
-  3. For unnamed (>>) segments when there's one primary speaker:
-     short segments with question marks → "Reporter",
-     otherwise → the primary speaker
+  3. Unnamed (>>) segments are left as "Unknown" for LLM attribution
+     in the attribute_speakers activity (see FetchAndStoreWorkflow)
+
+Turns are returned as raw caption segments (no same-speaker merging).
+The attribute_speakers activity normalizes once after LLM attribution.
 
 Text arrives in ALL CAPS from the captioning system — we title-case it for
 readability and normalize multi-line caption blocks into paragraphs.
@@ -24,7 +26,7 @@ import json
 import re
 import asyncio
 
-from src.transcript.parsers import TranscriptData, SpeakerTurn, normalize_turns
+from src.transcript.parsers import TranscriptData, SpeakerTurn, clean_speaker_name
 from src.utils.logging import log, get_logger
 
 MODULE = "cspan"
@@ -236,17 +238,13 @@ def _clean_caption_text(text: str) -> str:
 # Speaker attribution
 # ---------------------------------------------------------------------------
 
-# Max word count for a segment to be considered a "reporter question"
-_REPORTER_MAX_WORDS = 40
-
-
 def _extract_person_names(soup) -> list[str]:
     """Extract proper names from /person/ links on the program page."""
     names = []
     seen = set()
     for a in soup.find_all("a", href=True):
         if "/person/" in a["href"]:
-            name = a.get_text().strip()
+            name = clean_speaker_name(a.get_text().strip())
             if name and name not in seen:
                 names.append(name)
                 seen.add(name)
@@ -286,63 +284,6 @@ def _build_cc_name_map(cc_names: list[str], person_names: list[str]) -> dict[str
                 mapping[cc] = last_name_lookup[last]
 
     return mapping
-
-
-def _attribute_unnamed_turns(
-    turns: list[SpeakerTurn],
-    person_names: list[str],
-    cc_name_map: dict[str, str],
-) -> None:
-    """Attribute unnamed (>>) turns using the primary speaker heuristic.
-
-    If there's one dominant speaker (from person links or cc_name labels),
-    assign long unnamed turns to them and short question turns to
-    "Reporter".
-
-    Modifies turns in place.
-    """
-    if not person_names:
-        return
-
-    # Determine the primary speaker: if only one person is listed, use them.
-    # If multiple, check if one dominates the named turns.
-    named_counts: dict[str, int] = {}
-    for turn in turns:
-        if turn.speaker not in ("Unknown", "Reporter"):
-            named_counts[turn.speaker] = named_counts.get(turn.speaker, 0) + 1
-
-    # Candidates: person link names + anyone who already has named turns
-    primary = None
-    if len(person_names) == 1:
-        primary = person_names[0]
-    elif named_counts:
-        # Use the most frequently named speaker
-        top_speaker = max(named_counts, key=named_counts.get)
-        total_named = sum(named_counts.values())
-        # Only use as primary if they dominate (>60% of named turns)
-        if named_counts[top_speaker] / total_named > 0.6:
-            primary = top_speaker
-
-    if not primary:
-        return
-
-    unknown_count = sum(1 for t in turns if t.speaker == "Unknown")
-    if unknown_count == 0:
-        return
-
-    log.info(logger, MODULE, "speaker_attribution",
-             "Attributing unnamed turns",
-             primary_speaker=primary, unnamed_count=unknown_count)
-
-    for turn in turns:
-        if turn.speaker != "Unknown":
-            continue
-        words = len(turn.text.split())
-        has_question = "?" in turn.text
-        if words <= _REPORTER_MAX_WORDS and has_question:
-            turn.speaker = "Reporter"
-        else:
-            turn.speaker = primary
 
 
 # ---------------------------------------------------------------------------
@@ -478,14 +419,19 @@ async def fetch_cspan_transcript(url_or_id: str) -> TranscriptData:
     if not raw_turns:
         raise ValueError(f"No transcript turns parsed for program {program_id}")
 
-    # Attribute unnamed turns using primary speaker heuristic
-    _attribute_unnamed_turns(raw_turns, person_names, cc_name_map)
+    # Do NOT normalize (merge consecutive same-speaker) here.
+    # Raw caption segments are returned as-is so that the attribute_speakers
+    # activity sees granular >> boundaries — each is a potential speaker change.
+    # Normalization happens once AFTER LLM attribution in the activity.
+    turns = raw_turns
 
-    # Merge consecutive same-speaker caption fragments
-    turns = normalize_turns(raw_turns)
-
-    # Build speaker list from what's actually in the turns now
+    # Build speaker list: turn speakers + person names from HTML links.
+    # Person names may not appear in turns when all cc_names are ">>"
+    # but the LLM attribution activity needs them to know who to attribute to.
     turn_speakers = list(dict.fromkeys(t.speaker for t in turns))
+    for pn in person_names:
+        if pn not in turn_speakers:
+            turn_speakers.append(pn)
 
     # Build aliases: cc_name → proper name (or honorific-stripped)
     aliases: dict[str, list[str]] = {}

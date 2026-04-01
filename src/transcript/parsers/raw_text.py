@@ -18,7 +18,7 @@ import re
 from difflib import SequenceMatcher
 
 from src.transcript.parsers import (
-    SpeakerTurn, TranscriptData, normalize_turns, register_parser,
+    SpeakerTurn, TranscriptData, register_parser,
 )
 
 # Honorifics to strip for canonical name matching
@@ -343,8 +343,8 @@ def parse_raw_text(
             section_header=raw_seg["section_header"],
         ))
 
-    # Merge consecutive same-speaker turns (no-op for raw_text usually)
-    turns = normalize_turns(turns)
+    # Raw turns returned as-is — normalization (merging consecutive
+    # same-speaker turns) happens in the attribute_speakers activity
 
     # Deduplicated canonical speaker list (preserving order)
     speakers = list(dict.fromkeys(

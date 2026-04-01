@@ -45,6 +45,7 @@ from src.activities.verify_activities import (  # noqa: E402
 from src.activities.transcript_activities import (  # noqa: E402
     fetch_transcript,
     fetch_raw_transcript,
+    attribute_speakers,
     extract_chunk_activity,
     classify_claims_activity,
     dedup_claims_activity,
@@ -106,6 +107,7 @@ async def main():
             # Transcript extraction
             fetch_transcript,
             fetch_raw_transcript,
+            attribute_speakers,
             extract_chunk_activity,
             classify_claims_activity,
             dedup_claims_activity,
@@ -133,7 +135,7 @@ async def main():
     )
 
     log.info(logger, MODULE, "ready", "Worker listening",
-             task_queue=TASK_QUEUE, activity_count=25, workflow_count=7)
+             task_queue=TASK_QUEUE, activity_count=26, workflow_count=7)
     try:
         await worker.run()
     finally:

@@ -22,7 +22,7 @@ import re
 import httpx
 from bs4 import BeautifulSoup, Tag
 
-from src.transcript.parsers import TranscriptData, SpeakerTurn, normalize_turns
+from src.transcript.parsers import TranscriptData, SpeakerTurn
 from src.utils.logging import log, get_logger
 
 MODULE = "rev"
@@ -200,8 +200,9 @@ async def fetch_rev_transcript(url: str) -> TranscriptData:
     if not raw_turns:
         raise ValueError(f"No transcript turns parsed from {url}")
 
-    # Merge consecutive same-speaker turns
-    turns = normalize_turns(raw_turns)
+    # Raw turns returned as-is — normalization (merging consecutive
+    # same-speaker turns) happens in the attribute_speakers activity
+    turns = raw_turns
 
     # Build speaker list from turns
     speakers = list(dict.fromkeys(t.speaker for t in turns))

@@ -4,8 +4,9 @@ All transcript parsers produce the same TranscriptData structure regardless of
 source format (C-SPAN JSON, raw text, etc.).  The registry dispatches URL or
 content to the appropriate parser.
 
-Parsers produce SpeakerTurn lists which are normalized via normalize_turns(),
-then chunked by the thesis_extractor for LLM consumption.
+Parsers produce raw SpeakerTurn lists (no same-speaker merging). Normalization
+happens once in the attribute_speakers activity — after any LLM attribution of
+Unknown turns — via the normalize_turns() utility defined here.
 """
 
 from __future__ import annotations
@@ -13,6 +14,17 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from typing import Callable, Awaitable
+
+
+def clean_speaker_name(name: str) -> str:
+    """Strip quoted nicknames/callsigns from speaker names.
+
+    Some transcript sources include nicknames in speaker labels:
+        Dan "Raizin" Caine → Dan Caine
+        James "Mad Dog" Mattis → James Mattis
+    """
+    cleaned = re.sub(r'\s*"[^"]*"\s*', ' ', name)
+    return " ".join(cleaned.split())
 
 
 # ---------------------------------------------------------------------------

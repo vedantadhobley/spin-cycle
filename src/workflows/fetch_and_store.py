@@ -12,10 +12,15 @@ with workflow.unsafe.imports_passed_through():
     from src.activities.transcript_activities import (
         fetch_transcript,
         fetch_raw_transcript,
+        attribute_speakers,
         store_transcript,
     )
     from src.utils.logging import log
-    from src.config import TIMEOUT_FETCH_TRANSCRIPT, TIMEOUT_STORE_CLAIMS
+    from src.config import (
+        TIMEOUT_FETCH_TRANSCRIPT,
+        TIMEOUT_STORE_CLAIMS,
+        TIMEOUT_ATTRIBUTE_SPEAKERS,
+    )
 
 MODULE = "fetch_and_store"
 
@@ -52,6 +57,14 @@ class FetchAndStoreWorkflow:
             )
             if "source_format" not in transcript_data:
                 transcript_data["source_format"] = "rev"
+
+        # Step 1.5: Attribute unknown speakers (LLM call, skips if none)
+        transcript_data = await workflow.execute_activity(
+            attribute_speakers,
+            args=[transcript_data],
+            start_to_close_timeout=timedelta(seconds=TIMEOUT_ATTRIBUTE_SPEAKERS),
+            retry_policy=RetryPolicy(maximum_attempts=2),
+        )
 
         # Step 2: Store + enrich speakers
         store_result = await workflow.execute_activity(

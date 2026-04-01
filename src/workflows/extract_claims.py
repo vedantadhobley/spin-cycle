@@ -102,8 +102,16 @@ class ExtractClaimsWorkflow:
                  transcript_id=transcript_id,
                  thesis_count=len(all_theses))
 
-        # Tag theses for storage
+        # Tag theses for storage (deduplicates exact cross-chunk duplicates)
         tagged = _tag_theses_for_storage(all_theses)
+        dupes_dropped = len(all_theses) - len(tagged)
+        if dupes_dropped:
+            log.info(workflow.logger, MODULE, "cross_chunk_dedup",
+                     "Exact cross-chunk duplicates dropped before storage",
+                     transcript_id=transcript_id,
+                     raw_count=len(all_theses),
+                     unique_count=len(tagged),
+                     dropped=dupes_dropped)
 
         # Store once (INSERT)
         tc_ids: list[str] = []
@@ -126,11 +134,21 @@ class ExtractClaimsWorkflow:
 
 
 def _tag_theses_for_storage(all_theses: list[dict]) -> list[dict]:
-    """Tag raw theses with storage fields. Returns new list of dicts."""
+    """Tag raw theses with storage fields. Returns new list of dicts.
+
+    Deduplicates by exact claim_text — overlapping chunks can cause the LLM
+    to extract the same claim from context regions of adjacent chunks.
+    First occurrence (earlier chunk) wins.
+    """
     tagged = []
+    seen_texts: set[str] = set()
     for t in all_theses:
+        text = t["thesis_statement"]
+        if text in seen_texts:
+            continue
+        seen_texts.add(text)
         tagged.append({
-            "claim_text": t["thesis_statement"],
+            "claim_text": text,
             "original_quote": t.get("original_quote", ""),
             "speaker": (
                 t["speakers"][0] if t.get("speakers") else "Unknown"
