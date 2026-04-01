@@ -20,7 +20,7 @@ from src.llm.embeddings import embed_texts
 from src.utils.logging import log, get_logger
 
 MODULE = "claim_dedup"
-logger = get_logger()
+_default_logger = get_logger()
 
 
 class UnionFind:
@@ -105,6 +105,7 @@ def _numeric_divergence_blocks_merge(a: str, b: str) -> bool:
 async def dedup_speaker_claims(
     theses: list[dict],
     speaker: str,
+    logger=None,
 ) -> dict:
     """Deduplicate claims for one speaker using embedding cosine similarity.
 
@@ -121,6 +122,7 @@ async def dedup_speaker_claims(
             - checkable: bool — any member checkable
             - topic: str — from representative
     """
+    logger = logger or _default_logger
     n = len(theses)
     if n == 0:
         return {"clusters": []}
@@ -137,7 +139,7 @@ async def dedup_speaker_claims(
     statements = [t["thesis_statement"] for t in theses]
 
     log.info(logger, MODULE, "embedding_start",
-             f"Embedding {n} claims for {speaker}",
+             "Embedding claims for speaker",
              speaker=speaker, count=n)
 
     embeddings = await embed_texts(statements)
@@ -155,7 +157,7 @@ async def dedup_speaker_claims(
                 if _numeric_divergence_blocks_merge(statements[i], statements[j]):
                     blocked_count += 1
                     log.info(logger, MODULE, "numeric_divergence_block",
-                             f"Blocked merge: numbers differ in structurally similar claims",
+                             "Blocked merge due to numeric divergence",
                              claim_a=statements[i][:80],
                              claim_b=statements[j][:80],
                              similarity=float(sim_matrix[i, j]))
@@ -193,9 +195,7 @@ async def dedup_speaker_claims(
     multi_member = sum(1 for c in clusters if len(c["member_indices"]) > 1)
 
     log.info(logger, MODULE, "dedup_done",
-             f"Deduped {n} claims → {len(clusters)} clusters "
-             f"({multi_member} multi-member, {merge_count} merges, "
-             f"{blocked_count} blocked) for {speaker}",
+             "Dedup complete for speaker",
              speaker=speaker,
              input_count=n,
              cluster_count=len(clusters),

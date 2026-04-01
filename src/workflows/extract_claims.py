@@ -60,10 +60,11 @@ class ExtractClaimsWorkflow:
             )
             for t in turns
         ]
-        chunks = build_chunks(speaker_turns)
+        chunks = build_chunks(speaker_turns, logger=workflow.logger)
 
         log.info(workflow.logger, MODULE, "chunks_planned",
-                 f"Planned {len(chunks)} chunks",
+                 "Chunk plan ready",
+                 transcript_id=transcript_id,
                  chunk_count=len(chunks))
 
         # Execute chunks with semaphore — keeps both LLM slots busy
@@ -97,8 +98,9 @@ class ExtractClaimsWorkflow:
             all_theses.extend(theses)
 
         log.info(workflow.logger, MODULE, "extraction_done",
-                 f"Extracted {len(all_theses)} claims",
-                 total=len(all_theses))
+                 "Extraction complete",
+                 transcript_id=transcript_id,
+                 thesis_count=len(all_theses))
 
         # Tag theses for storage
         tagged = _tag_theses_for_storage(all_theses)
@@ -113,8 +115,9 @@ class ExtractClaimsWorkflow:
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
             log.info(workflow.logger, MODULE, "stored",
-                     f"Stored {len(tc_ids)} claims",
-                     transcript_id=transcript_id)
+                     "Claims stored",
+                     transcript_id=transcript_id,
+                     claim_count=len(tc_ids))
 
         return {
             "all_theses": all_theses,

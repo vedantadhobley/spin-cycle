@@ -2,7 +2,7 @@
 
 Every LLM invocation in the verification pipeline, with prompt locations,
 structured output schemas, forcing fields, validation, and scoring/ranking
-behavior. Updated 2026-03-25 (calibration rules restoration, relay detection, Wikidata aliases, designation loophole, 6 judge checks, thinking mode tested and reverted).
+behavior. Updated 2026-04-01 (classification replaces LLM review, embedding dedup replaces LLM grouping, transcript context threading, `extracted` claim status).
 
 ---
 
@@ -12,8 +12,9 @@ behavior. Updated 2026-03-25 (calibration rules restoration, relay detection, Wi
 flowchart TD
     T[Transcript] --> CHUNK["CHUNK — word-based splits (~2500w, ~500w overlap)"]
     CHUNK --> EXT["EXTRACT — 1 LLM call per chunk (thesis extraction)"]
-    EXT --> REVIEW["REVIEW — classify + group per speaker (batches of ~25)"]
-    REVIEW --> SYNTH_C["SYNTHESIZE CLAIMS — 1 LLM call per group"]
+    EXT --> CLASS["CLASSIFY — 1 LLM call per batch of 50 (rubric classification)"]
+    CLASS --> DEDUP["DEDUP — embedding cosine similarity (no LLM)"]
+    DEDUP --> SYNTH_C["SYNTHESIZE CLAIMS — 1 LLM call per multi-member group"]
     SYNTH_C --> RAW[Checkable Claim]
     RAW --> NORM["NORMALIZE — 1 LLM call"]
     NORM --> DEC["DECOMPOSE — 1 LLM call\n+ programmatic dedup + Wikidata expansion + aliases"]
@@ -74,43 +75,68 @@ ThesisExtractionOutput
   context sections or with fabricated quotes.
 - Drops quotes shorter than 10 characters.
 
-## Call 1b: Claim Review (Phase 2)
+## Call 1b: Classify Claims (Phase 2)
 
-**When**: After all chunks are extracted. Per-speaker sequential batches of ~25 claims.
+**When**: After all chunks are extracted. Batch classification — up to 50 claims per LLM call.
 
 **Files**:
-- Prompts: `src/prompts/claim_review.py` — `REVIEW_BATCH_SYSTEM`, `REVIEW_BATCH_USER`
-- Invoker: `src/transcript/claim_reviewer.py` — `review_batch()`
-- Schema: `src/schemas/llm_outputs.py` — `ReviewBatchOutput`, `ClaimDisposition`, `NewGroup`
-- Validator: `src/llm/validators.py` — `validate_review_batch()`
+- Prompts: `src/prompts/classification.py` — `CLASSIFY_CLAIMS_SYSTEM`, `CLASSIFY_CLAIMS_USER`
+- Invoker: `src/transcript/claim_classifier.py` — `classify_claims_batch()`
+- Schema: `src/schemas/llm_outputs.py` — `ClassifyClaimsOutput`, `ClaimClassification`
+- Activity: `src/activities/transcript_activities.py` — `classify_claims_activity`
 
-**Temperature**: 0.0. **Retries**: 2. **Max tokens**: 16384.
+**Temperature**: 0.7 (general profile). **Retries**: 2. **Max tokens**: `CLASSIFY_MAX_TOKENS` (from config).
+
+**Placeholders**: `{claims_list}` (numbered list of thesis statements)
 
 ### What it does
 
-Classifies each claim (verifiable_fact / future_prediction / subjective_opinion / procedural /
-vague_rhetoric) and assigns to groups. Sequential batches with accumulating group context.
+Rubric-based classification: for each claim, the LLM first identifies the **factual anchor** (the specific fact, number, or event that makes the claim checkable), then classifies it. This "anchor-first" approach forces the LLM to ground its checkability decision before labeling.
 
-**Known issue**: The LLM does not effectively use `add_to_group` — it creates a new group per claim,
-causing context to grow unboundedly until validation failures crash the pipeline. Planned replacement
-with embedding-based dedup (see ARCHITECTURE.md § Deduplication Strategy).
+Classification operates on decontextualized claim text only — no transcript context needed.
+
+### Structured output
+
+```
+ClassifyClaimsOutput
+  classifications: list[ClaimClassification]
+    index: int                  ← position in input list
+    factual_anchor: str         ← "The specific fact that makes this checkable" or "none"
+    classification: str         ← verifiable_fact | future_prediction | subjective_opinion | procedural | vague_rhetoric
+    checkable: bool             ← could independent data confirm or deny?
+    check_rationale: str        ← why checkable or not
+```
+
+### Post-LLM: Embedding Dedup (no LLM call)
+
+After classification, per-speaker embedding-based deduplication runs as a separate activity (`dedup_claims_activity`). This is NOT an LLM call — it uses the Qwen3-Embedding-8B model (port 3103) to embed thesis statements and cluster by cosine similarity (threshold 0.85).
+
+A **numeric-skeleton guard** (Jaccard threshold 0.7) prevents merging claims with different numbers (e.g., "lasted 34 years" vs "lasted 22 years" score 0.98 similarity but have different numeric content).
+
+Within each cluster, the claim with the longest `original_quote` is the representative. Non-representatives are flagged `is_duplicate=TRUE`.
 
 ## Call 1c: Claim Synthesis (Phase 2b)
 
-**When**: After review, for each multi-member group.
+**When**: After classify + dedup, for each multi-member dedup cluster. Single-member clusters use the original thesis_statement directly (no LLM call).
 
 **Files**:
 - Prompts: `src/prompts/claim_review.py` — `SYNTHESIZE_CLAIM_SYSTEM`, `SYNTHESIZE_CLAIM_USER`
-- Invoker: `src/transcript/claim_synthesizer.py` — `synthesize_claim()`
-- Schema: `src/schemas/llm_outputs.py` — `SynthesizedClaimOutput`
+- Invoker: `src/transcript/claim_synthesizer.py` — `synthesize_group_claim()`
+- Schema: `src/schemas/llm_outputs.py` — `SynthesizedClaim`
 - Validator: `src/llm/validators.py` — `validate_synthesized_claim()`
 
-**Temperature**: 0.0. **Retries**: 2. **Max tokens**: 4096.
+**Temperature**: 0.7 (general profile). **Retries**: 2. **Max tokens**: 4096.
+
+**Placeholders**: `{speaker_name}`, `{topic}`, `{transcript_context}`, `{member_claims_list}`
 
 ### What it does
 
-Produces a single clean verifiable statement for groups with multiple member claims.
-Resolves pronouns, adds necessary context. Parallel execution (2 at a time).
+Produces a single clean verifiable statement for dedup clusters with multiple member claims. Resolves pronouns, adds necessary context from the transcript (title, description, date). Parallel execution (2 at a time via semaphore).
+
+Three-step rubric:
+1. **Identify contributions** — what unique specifics does each member add?
+2. **Check distinctness** — do members have genuinely different verifiable specifics?
+3. **Synthesize** — preserve all specifics, don't generalize away numbers/dates/names
 
 ---
 
@@ -638,12 +664,15 @@ Typically 10-20 unique items after deduplication across sub-claims.
 
 | # | Stage | Prompt Constants | Mode | Schema | Validator |
 |---|-------|-----------------|------|--------|-----------|
-| 1 | Extract | EXTRACTION_SYSTEM + _USER | instruct (0→0.3) | ExtractionOutput | validate_extraction |
-| 2 | Normalize | NORMALIZE_SYSTEM + _USER | instruct (0) | NormalizeOutput | validate_normalize |
-| 3 | Decompose | DECOMPOSE_SYSTEM + _USER | instruct (0→0.1) | DecomposeOutput | validate_decompose |
+| 1 | Extract | THESIS_EXTRACTION_SYSTEM + _USER | instruct (0.7) | ThesisExtractionOutput | validate_thesis_extraction |
+| 1b | Classify | CLASSIFY_CLAIMS_SYSTEM + _USER | instruct (0.7) | ClassifyClaimsOutput | — |
+| — | Dedup | (embedding similarity — no LLM) | — | — | — |
+| 1c | Synthesize Claims | SYNTHESIZE_CLAIM_SYSTEM + _USER | instruct (0.7) | SynthesizedClaim | validate_synthesized_claim |
+| 2 | Normalize | NORMALIZE_SYSTEM + _USER | instruct (0.7) | NormalizeOutput | validate_normalize |
+| 3 | Decompose | DECOMPOSE_SYSTEM + _USER | instruct (0.7) | DecomposeOutput | validate_decompose |
 | — | Quality Check | (programmatic only — no LLM call) | — | — | — |
-| — | Research | RESEARCH_SYSTEM + _USER | instruct (0) | (none — agent) | — |
-| 5 | Judge | JUDGE_SYSTEM + _USER | instruct (0) | JudgeOutput | validate_judge |
-| 6 | Synthesize | SYNTHESIZE_SYSTEM + _USER | instruct (0) | SynthesizeOutput | validate_synthesize |
+| — | Research | RESEARCH_SYSTEM + _USER | instruct (0.7) | (none — agent) | — |
+| 5 | Judge | JUDGE_SYSTEM + _USER | instruct (0.7) | JudgeOutput | validate_judge |
+| 6 | Synthesize Verdict | SYNTHESIZE_SYSTEM + _USER | instruct (0.7) | SynthesizeOutput | validate_synthesize |
 
-All prompts live in `src/prompts/verification.py` (verification pipeline) and `src/prompts/extraction.py` (transcript extraction).
+Prompts live in `src/prompts/extraction.py` (thesis extraction), `src/prompts/classification.py` (classification), `src/prompts/claim_review.py` (claim synthesis), and `src/prompts/verification.py` (normalize, decompose, research, judge, synthesize verdict).

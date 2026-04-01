@@ -69,7 +69,7 @@ class VerifyAllClaimsWorkflow:
         failed_ids: list[str] = []
 
         log.info(workflow.logger, MODULE, "started",
-                 f"Verifying {len(claims)} claims sequentially",
+                 "Starting sequential verification",
                  total=len(claims))
 
         for i, claim in enumerate(claims):
@@ -77,8 +77,9 @@ class VerifyAllClaimsWorkflow:
             self._current_claim = claim_id
 
             log.info(workflow.logger, MODULE, "claim_start",
-                     f"Verifying claim {i + 1}/{len(claims)}",
+                     "Verifying claim",
                      claim_id=claim_id,
+                     index=i + 1, total=len(claims),
                      speaker=claim.get("speaker"))
 
             try:
@@ -103,14 +104,13 @@ class VerifyAllClaimsWorkflow:
                 self._failed += 1
                 failed_ids.append(claim_id)
                 log.warning(workflow.logger, MODULE, "claim_failed",
-                            f"Claim {claim_id} failed, skipping",
+                            "Claim verification failed, skipping",
                             claim_id=claim_id, error=str(e))
 
         self._current_claim = ""
 
         log.info(workflow.logger, MODULE, "complete",
-                 f"Verification complete: {self._verified} verified, "
-                 f"{self._failed} failed",
+                 "Verification complete",
                  verified=self._verified, failed=self._failed)
 
         return {

@@ -54,8 +54,9 @@ class ClassifyAndDedupWorkflow:
             enriched_speakers = enriched_speakers or loaded["enriched_speakers"]
 
         log.info(workflow.logger, MODULE, "started",
-                 f"Classifying {len(all_theses)} claims",
-                 transcript_id=transcript_id)
+                 "Starting classify and dedup",
+                 transcript_id=transcript_id,
+                 claim_count=len(all_theses))
 
         # --- Phase 1: Batch classification (parallel pairs) ---
         sem = asyncio.Semaphore(MAX_CONCURRENT)
@@ -111,7 +112,9 @@ class ClassifyAndDedupWorkflow:
             )
 
         log.info(workflow.logger, MODULE, "classify_done",
-                 f"Classification complete for {len(all_theses)} claims")
+                 "Classification complete",
+                 transcript_id=transcript_id,
+                 claim_count=len(all_theses))
 
         # --- Phase 2: Per-speaker embedding dedup ---
         speaker_theses: dict[str, list[tuple[int, dict]]] = {}
@@ -170,8 +173,8 @@ class ClassifyAndDedupWorkflow:
             )
 
         log.info(workflow.logger, MODULE, "complete",
-                 f"Classify+dedup complete: {len(all_groups)} groups "
-                 f"({len(checkable_groups)} checkable)",
+                 "Classify+dedup complete",
+                 transcript_id=transcript_id,
                  total_groups=len(all_groups),
                  checkable=len(checkable_groups))
 

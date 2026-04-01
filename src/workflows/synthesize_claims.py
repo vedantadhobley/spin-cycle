@@ -19,7 +19,7 @@ with workflow.unsafe.imports_passed_through():
     from src.utils.logging import log
     from src.config import MAX_CONCURRENT, TIMEOUT_SYNTHESIZE_CLAIM, TIMEOUT_STORE_CLAIMS
 
-MODULE = "synthesize_claims_workflow"
+MODULE = "synthesize_claims"
 
 
 @workflow.defn
@@ -62,8 +62,9 @@ class SynthesizeClaimsWorkflow:
         checkable_groups = [g for g in dedup_groups if g["checkable"]]
 
         log.info(workflow.logger, MODULE, "started",
-                 f"Synthesizing {len(checkable_groups)} checkable groups",
+                 "Starting synthesis",
                  transcript_id=transcript_id,
+                 checkable_groups=len(checkable_groups),
                  total_groups=len(dedup_groups))
 
         if not checkable_groups:
@@ -102,9 +103,10 @@ class SynthesizeClaimsWorkflow:
                 })
 
             log.info(workflow.logger, MODULE, "synth_multi",
-                     f"Synthesizing {len(synth_groups)} multi-member groups "
-                     f"({len(single_member)} single-member skipped)",
-                     multi=len(synth_groups), single=len(single_member))
+                     "Synthesizing multi-member groups",
+                     transcript_id=transcript_id,
+                     multi=len(synth_groups),
+                     single=len(single_member))
 
             sem = asyncio.Semaphore(MAX_CONCURRENT)
             synth_results: dict[str, dict] = {}
@@ -142,7 +144,8 @@ class SynthesizeClaimsWorkflow:
                                 group_id=g["local_group_id"])
 
         log.info(workflow.logger, MODULE, "synthesis_done",
-                 f"Synthesis complete: {len(checkable_groups)} claims",
+                 "Synthesis complete",
+                 transcript_id=transcript_id,
                  checkable=len(checkable_groups))
 
         # Create Claim records and link TranscriptClaim FKs
@@ -172,7 +175,8 @@ class SynthesizeClaimsWorkflow:
             )
 
             log.info(workflow.logger, MODULE, "claims_created",
-                     f"Created {len(claim_ids)} Claim records",
+                     "Claim records created",
+                     transcript_id=transcript_id,
                      claim_count=len(claim_ids))
 
         return {

@@ -14,10 +14,10 @@ from src.schemas.llm_outputs import ClassifyClaimsOutput
 from src.utils.logging import log, get_logger
 
 MODULE = "claim_classifier"
-logger = get_logger()
+_default_logger = get_logger()
 
 
-async def classify_claims_batch(claims: list[dict]) -> list[dict]:
+async def classify_claims_batch(claims: list[dict], logger=None) -> list[dict]:
     """Classify a batch of claims. Returns same dicts with classification fields added.
 
     Args:
@@ -26,6 +26,7 @@ async def classify_claims_batch(claims: list[dict]) -> list[dict]:
     Returns:
         Same list with classification, checkable, check_rationale added to each.
     """
+    logger = logger or _default_logger
     if not claims:
         return claims
 
@@ -36,7 +37,7 @@ async def classify_claims_batch(claims: list[dict]) -> list[dict]:
     claims_list = "\n".join(lines)
 
     log.info(logger, MODULE, "classify_start",
-             f"Classifying {len(claims)} claims",
+             "Classifying claims",
              count=len(claims))
 
     result = await invoke_llm(
@@ -73,7 +74,7 @@ async def classify_claims_batch(claims: list[dict]) -> list[dict]:
         classified.append(updated)
 
     log.info(logger, MODULE, "classify_done",
-             f"Classified {len(claims)} claims ({matched} matched)",
+             "Classification complete",
              count=len(claims), matched=matched)
 
     return classified

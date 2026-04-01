@@ -698,6 +698,7 @@ erDiagram
         text structure_justification
         text interested_parties_reasoning
         text wikidata_context
+        jsonb supporting_quotes
         timestamptz created_at
         timestamptz updated_at
     }
@@ -763,10 +764,14 @@ erDiagram
         varchar date
         jsonb speakers
         integer word_count
-        integer segment_count "stores turn count (no migration)"
-        jsonb segments_data "SpeakerTurn dicts (no migration)"
+        integer segment_count "turn count"
+        jsonb segments_data "SpeakerTurn dicts"
         text display_text
         varchar status
+        varchar source_format
+        jsonb speaker_aliases
+        jsonb enriched_speakers
+        text description
         timestamptz created_at
     }
 
@@ -777,13 +782,14 @@ erDiagram
         text claim_text
         text original_quote
         varchar speaker
-        varchar claim_type
-        boolean worth_checking
-        varchar skip_reason
+        varchar classification
+        varchar topic
         boolean checkable
         text checkability_rationale
-        boolean is_restatement
-        text segment_gist
+        boolean worth_checking
+        boolean is_duplicate
+        text factual_anchor
+        varchar dedup_group_id
         timestamptz created_at
     }
 
@@ -825,7 +831,7 @@ The top-level entity. One row per claim submitted (manually or via transcript ex
 | `speaker_description` | `VARCHAR(512)` | nullable | Wikidata role/title (e.g., "45th president of the United States") |
 | `claim_date` | `VARCHAR(64)` | nullable | When the claim was made (from transcript, article, etc.) |
 | `transcript_title` | `VARCHAR(512)` | nullable | Source transcript title for topic context |
-| `status` | `ENUM('queued','pending','processing','verified','flagged')` | NOT NULL, default 'pending' | Workflow state |
+| `status` | `ENUM('queued','pending','processing','verified','flagged','extracted')` | NOT NULL, default 'pending' | Workflow state — `extracted` for transcript-sourced claims before verification |
 | `normalized_claim` | `TEXT` | nullable | Claim after bias-neutralization normalization |
 | `normalization_changes` | `JSONB` | nullable | List of changes made during normalization |
 | `thesis` | `TEXT` | nullable | One-sentence thesis: what is the speaker arguing? |
@@ -835,6 +841,7 @@ The top-level entity. One row per claim submitted (manually or via transcript ex
 | `structure_justification` | `TEXT` | nullable | Decompose rubric step 1: why this structure type |
 | `interested_parties_reasoning` | `TEXT` | nullable | Why these entities have stake in the claim |
 | `wikidata_context` | `TEXT` | nullable | Wikidata-derived relationship context |
+| `supporting_quotes` | `JSONB` | nullable | Original speaker quotes from transcript (for display) |
 | `created_at` | `TIMESTAMPTZ` | default now() | When the claim was submitted |
 | `updated_at` | `TIMESTAMPTZ` | default now(), on update | Last modification time |
 
@@ -843,7 +850,9 @@ The top-level entity. One row per claim submitted (manually or via transcript ex
 - Has one `verdict` (cascade delete)
 - Has many `interested_parties` (cascade delete)
 
-**Status lifecycle:** `queued` → `pending` → `processing` → `verified` (or `flagged`). Claims submitted while another is running start as `queued`; `start_next_queued_claim` promotes them to `pending`.
+**Status lifecycle:**
+- Manual claims: `queued` → `pending` → `processing` → `verified` (or `flagged`). Claims submitted while another is running start as `queued`; `start_next_queued_claim` promotes them to `pending`.
+- Transcript claims: `extracted` → `queued` → `pending` → `processing` → `verified`. Claims are created as `extracted` (inert) during synthesis. The orchestrator flips them to `queued` via `queue_claims_for_verification` only when entering the verify phase. This prevents stray verification workflows during testing or partial pipeline runs.
 
 ### Table: `sub_claims`
 
@@ -977,6 +986,10 @@ Stored transcripts with cleaned display text. One row per unique URL.
 | `segment_count` | `INTEGER` | NOT NULL | Number of speaker turns (column name kept, stores turn count) |
 | `segments_data` | `JSONB` | nullable | Serialized `SpeakerTurn` dicts (speaker, text, section_header) |
 | `display_text` | `TEXT` | NOT NULL | Screenplay-formatted text (Speaker: text) |
+| `source_format` | `VARCHAR(32)` | nullable | Parser format: `rev`, `cspan`, `raw_text` |
+| `speaker_aliases` | `JSONB` | nullable | Parser-detected aliases (e.g., "Trump" → "Donald Trump") |
+| `enriched_speakers` | `JSONB` | nullable | Wikidata-enriched speaker list (name + description) |
+| `description` | `TEXT` | nullable | Transcript description/summary |
 | `status` | `VARCHAR(32)` | NOT NULL, default 'queued' | `queued` → `extracting` → `verifying` → `complete` / `failed` |
 | `created_at` | `TIMESTAMPTZ` | default now() | When the transcript was stored |
 
@@ -985,34 +998,35 @@ Stored transcripts with cleaned display text. One row per unique URL.
 
 ### Table: `transcript_claims`
 
-Claims extracted from transcripts, linking extraction to verification. Stores ALL claims including skipped ones with extraction metadata.
+Claims extracted from transcripts, linking extraction to verification. Stores ALL claims including non-checkable ones with classification metadata.
 
 | Column | Type | Constraints | Description |
 |--------|------|-------------|-------------|
 | `id` | `UUID` | PK, default uuid4 | Unique identifier |
 | `transcript_id` | `UUID` | FK → transcripts.id, NOT NULL | Parent transcript |
-| `claim_id` | `UUID` | FK → claims.id, nullable | Set when sent to verification (NULL for skipped claims) |
+| `claim_id` | `UUID` | FK → claims.id, nullable | Set when sent to verification (NULL for non-checkable claims) |
 | `claim_text` | `TEXT` | NOT NULL | Decontextualized claim — pronouns resolved, stands alone |
 | `original_quote` | `TEXT` | NOT NULL | Speaker's exact words (for inline highlighting) |
 | `speaker` | `VARCHAR(256)` | NOT NULL | Speaker name |
-| `claim_type` | `VARCHAR(64)` | nullable | Legacy field, no longer populated |
-| `worth_checking` | `BOOLEAN` | NOT NULL, default TRUE | Whether this claim was sent for verification (computed: checkable AND NOT restatement AND NOT future_prediction) |
-| `skip_reason` | `VARCHAR(64)` | nullable | Why not worth checking (not_checkable, restatement, future_prediction) |
+| `classification` | `VARCHAR(64)` | nullable | Claim type: verifiable_fact, subjective_opinion, vague_rhetoric, procedural, future_prediction |
+| `topic` | `VARCHAR(128)` | nullable | Topic area (military, economic, political, etc.) |
 | `checkable` | `BOOLEAN` | nullable | Could independent data confirm or deny? |
 | `checkability_rationale` | `TEXT` | nullable | Why checkable or not |
-| `is_restatement` | `BOOLEAN` | nullable, default FALSE | True if speaker repeats a claim already extracted |
-| `segment_gist` | `TEXT` | nullable | What the speaker is arguing in this segment |
+| `worth_checking` | `BOOLEAN` | NOT NULL, default TRUE | Computed: checkable AND in a dedup group that's worth verifying |
+| `is_duplicate` | `BOOLEAN` | NOT NULL, default FALSE | True if this claim is a duplicate within its dedup group (not the representative) |
+| `factual_anchor` | `TEXT` | nullable | The specific factual element that makes this claim checkable |
+| `dedup_group_id` | `VARCHAR(128)` | nullable | Cluster ID from embedding-based dedup (e.g., "Donald Trump_C0") |
 | `created_at` | `TIMESTAMPTZ` | default now() | When the claim was extracted |
 
 **Relationships:**
 - Belongs to one `transcript`
-- Optionally belongs to one `claim` (set when verification starts)
+- Optionally belongs to one `claim` (set when synthesis creates Claim records for checkable groups)
 
 ### Enums
 
 | Enum Name | Values | Used By |
 |-----------|--------|---------|
-| `claim_status` | queued, pending, processing, verified, flagged | claims.status |
+| `claim_status` | queued, pending, processing, verified, flagged, extracted | claims.status |
 | `sub_claim_verdict` | true, false, partially_true, unverifiable, mostly_true, mixed, mostly_false | sub_claims.verdict |
 | `evidence_source_type` | web, wikipedia, news_api | evidence.source_type |
 | `verdict_type` | true, mostly_true, mixed, mostly_false, false, unverifiable | verdicts.verdict |
@@ -1036,7 +1050,7 @@ One unified model running via llama.cpp (`--parallel 2 --ctx-size 131072`), all 
 | Port | Model | Mode | Used By |
 |------|-------|------|--------|
 | `:3101` | Qwen3.5-122B-A10B | `enable_thinking=False` | all pipeline steps (instruct mode) |
-| `:3103` | Qwen3-Embedding-8B | — | disabled via Docker profiles (not currently used) |
+| `:3103` | Qwen3-Embedding-8B | — | per-speaker claim dedup (cosine similarity clustering) |
 
 122B MoE, 10B active params per token, Q4_K_M quantization (~76.5GB). 2 slots x 65K context each. The model's hybrid architecture (2 KV heads, 12 attention layers of 48 total — rest are recurrent/SSM) makes KV cache very cheap (~3 GB for both slots). Thinking mode can be toggled via `chat_template_kwargs` in the request body but is currently disabled for all steps — see [Thinking Mode Experiment](#thinking-mode-experiment).
 
@@ -1178,7 +1192,7 @@ Production (spin-cycle-prod-*) uses ports 3500-3502 with the same topology.
 ### External Services
 
 - `LLAMA_URL` — LLM API (llama.cpp Qwen3.5-122B-A10B, via Tailscale)
-- `LLAMA_EMBED_URL` — LLM embeddings API (llama.cpp, via Tailscale)
+- `LLAMA_EMBED_URL` — Embedding API (Qwen3-Embedding-8B via llama.cpp, used for claim dedup)
 - Serper — primary search (Google results via API, requires `SERPER_API_KEY`)
 - DuckDuckGo — fallback search (free, always available)
 - Brave Search — optional (independent index, requires `BRAVE_API_KEY`)
@@ -1246,7 +1260,7 @@ Every log line has these fields, which Promtail promotes to Loki labels:
 |-------|-------------|---------|
 | `ts` | ISO 8601 UTC timestamp | `2025-01-15T12:00:00.123Z` |
 | `level` | Log level | `INFO`, `WARNING`, `ERROR`, `DEBUG` |
-| `module` | Source module | `decompose`, `research`, `judge`, `synthesize`, `store`, `workflow`, `worker`, `api`, `claims`, `tools`, `db`, `llm` |
+| `module` | Source module | `decompose`, `research`, `judge`, `synthesize`, `store`, `verify`, `worker`, `api`, `claims`, `tools`, `db`, `llm`, `fetch`, `extract`, `classify`, `dedup`, `queue`, `load`, `status`, `thesis_extractor`, `claim_classifier`, `claim_dedup`, `claim_synthesizer` |
 | `action` | What happened | `start`, `done`, `failed`, `parse_failed`, `no_evidence`, `fallback_start` |
 | `msg` | Human-readable message | `"Claim decomposed"` |
 
@@ -1333,7 +1347,7 @@ Config: `~/workspace/monitor/promtail/promtail.yml`
 | PostgreSQL schema | **Done** | 9 tables: claims (+ decompose rubric), sub_claims (+ categories, judge_rubric), evidence (+ quality metadata), verdicts (+ synthesis_rubric), interested_parties, transcripts, transcript_claims (+ extraction metadata), source_ratings, wikidata_cache |
 | FastAPI API | **Done** | POST/GET claims, health check, lifespan management |
 | Temporal workflows | **Done** | 7 workflows: TranscriptPipelineWorkflow (orchestrator), FetchAndStore, ExtractClaims, ClassifyAndDedup, SynthesizeClaims, VerifyAllClaims, VerifyClaim |
-| Temporal worker | **Done** | Registers 7 workflows + 20 activities, max_concurrent_activities=2, structured logging |
+| Temporal worker | **Done** | Registers 7 workflows + 25 activities, max_concurrent_activities=2, structured logging |
 | `decompose_claim` | **Done** | LLM decomposes text into flat facts (guided by 15 extraction rules) + thesis (structure, key_test) in one pass |
 | `research_subclaim` | **Done** | LangGraph ReAct agent with Serper (primary) + DuckDuckGo (fallback) + Brave (optional) + Wikipedia + page_fetcher |
 | `judge_subclaim` | **Done** | LLM evaluates evidence, returns structured verdict |
@@ -1568,7 +1582,8 @@ spin-cycle/
 │   ├── prompts/                    # All LLM prompts with documentation
 │   │   ├── verification.py         # Normalize, Decompose, Research, Judge, Synthesize
 │   │   ├── extraction.py           # Thesis extraction (Phase 1)
-│   │   └── claim_review.py         # Claim review + synthesis (Phase 2/2b)
+│   │   ├── classification.py       # Batch claim classification (Phase 2)
+│   │   └── claim_review.py         # Claim synthesis (Phase 2b)
 │   │
 │   ├── workflows/                  # Temporal workflow definitions
 │   │   ├── transcript_pipeline.py  # TranscriptPipelineWorkflow (orchestrator)

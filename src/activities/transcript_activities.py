@@ -41,15 +41,20 @@ async def fetch_transcript(url: str) -> dict:
     from src.transcript.cspan import fetch_cspan_transcript, is_cspan_url
     from src.transcript.rev import fetch_rev_transcript, is_rev_url
 
-    log.info(activity.logger, "transcript", "fetch_start", "Fetching transcript",
+    log.info(activity.logger, "fetch", "start", "Fetching transcript",
              url=url)
 
-    if is_cspan_url(url):
-        td = await fetch_cspan_transcript(url)
-    elif is_rev_url(url):
-        td = await fetch_rev_transcript(url)
-    else:
-        raise ValueError(f"Unsupported transcript URL: {url}")
+    try:
+        if is_cspan_url(url):
+            td = await fetch_cspan_transcript(url)
+        elif is_rev_url(url):
+            td = await fetch_rev_transcript(url)
+        else:
+            raise ValueError(f"Unsupported transcript URL: {url}")
+    except Exception as e:
+        log.error(activity.logger, "fetch", "failed", "Transcript fetch failed",
+                  url=url, error=str(e))
+        raise
 
     result = {
         "url": td.url,
@@ -71,7 +76,7 @@ async def fetch_transcript(url: str) -> dict:
         ],
     }
 
-    log.info(activity.logger, "transcript", "fetch_done", "Transcript fetched",
+    log.info(activity.logger, "fetch", "done", "Transcript fetched",
              url=url, title=td.title,
              word_count=td.word_count,
              turn_count=td.turn_count,
@@ -93,7 +98,7 @@ async def fetch_raw_transcript(
     """
     from src.transcript.parsers.raw_text import parse_raw_text
 
-    log.info(activity.logger, "transcript", "parse_raw_start",
+    log.info(activity.logger, "fetch", "raw_start",
              "Parsing raw text transcript",
              title=title, content_length=len(content))
 
@@ -119,7 +124,7 @@ async def fetch_raw_transcript(
         ],
     }
 
-    log.info(activity.logger, "transcript", "parse_raw_done",
+    log.info(activity.logger, "fetch", "raw_done",
              "Raw text parsed",
              title=td.title,
              word_count=td.word_count,
@@ -158,13 +163,19 @@ async def extract_chunk_activity(
     )
     chunk = Chunk(**chunk_dict)
 
-    log.info(activity.logger, "transcript", "chunk_extraction_start",
+    log.info(activity.logger, "extract", "chunk_start",
              "Starting chunk extraction",
              title=td.title,
              chunk_index=chunk.chunk_index,
              total_chunks=chunk.total_chunks)
 
-    theses = await extract_chunk(td, chunk, enriched_speakers)
+    try:
+        theses = await extract_chunk(td, chunk, enriched_speakers, logger=activity.logger)
+    except Exception as e:
+        log.error(activity.logger, "extract", "chunk_failed",
+                  "Chunk extraction failed",
+                  chunk_index=chunk.chunk_index, error=str(e))
+        raise
 
     # Serialize for Temporal transport
     result = []
@@ -176,7 +187,7 @@ async def extract_chunk_activity(
             "topic": t.topic,
         })
 
-    log.info(activity.logger, "transcript", "chunk_extraction_done",
+    log.info(activity.logger, "extract", "chunk_done",
              "Chunk extraction complete",
              chunk_index=chunk.chunk_index,
              thesis_count=len(result))
@@ -196,16 +207,22 @@ async def dedup_claims_activity(
     """
     from src.transcript.claim_dedup import dedup_speaker_claims
 
-    log.info(activity.logger, "transcript", "dedup_start",
+    log.info(activity.logger, "dedup", "start",
              "Starting embedding dedup",
              speaker=speaker, claim_count=len(claims))
 
-    result = await dedup_speaker_claims(claims, speaker)
+    try:
+        result = await dedup_speaker_claims(claims, speaker, logger=activity.logger)
+    except Exception as e:
+        log.error(activity.logger, "dedup", "failed",
+                  "Embedding dedup failed",
+                  speaker=speaker, error=str(e))
+        raise
 
     cluster_count = len(result["clusters"])
     multi = sum(1 for c in result["clusters"] if len(c["member_indices"]) > 1)
 
-    log.info(activity.logger, "transcript", "dedup_done",
+    log.info(activity.logger, "dedup", "done",
              "Embedding dedup complete",
              speaker=speaker,
              cluster_count=cluster_count,
@@ -219,13 +236,19 @@ async def classify_claims_activity(claims: list[dict]) -> list[dict]:
     """Classify a batch of claims. Returns claims with classification fields added."""
     from src.transcript.claim_classifier import classify_claims_batch
 
-    log.info(activity.logger, "transcript", "classify_start",
+    log.info(activity.logger, "classify", "start",
              "Starting claim classification",
              claim_count=len(claims))
 
-    result = await classify_claims_batch(claims)
+    try:
+        result = await classify_claims_batch(claims, logger=activity.logger)
+    except Exception as e:
+        log.error(activity.logger, "classify", "failed",
+                  "Claim classification failed",
+                  claim_count=len(claims), error=str(e))
+        raise
 
-    log.info(activity.logger, "transcript", "classify_done",
+    log.info(activity.logger, "classify", "done",
              "Claim classification complete",
              claim_count=len(result))
 
@@ -247,19 +270,26 @@ async def synthesize_claim_activity(
     """
     from src.transcript.claim_synthesizer import synthesize_group_claim
 
-    log.info(activity.logger, "transcript", "synthesize_start",
+    log.info(activity.logger, "synthesize", "start",
              "Starting claim synthesis",
              speaker=speaker, topic=topic,
              member_count=len(member_statements))
 
-    output = await synthesize_group_claim(
-        member_statements, topic, speaker,
-        transcript_title=transcript_title,
-        transcript_description=transcript_description,
-        transcript_date=transcript_date,
-    )
+    try:
+        output = await synthesize_group_claim(
+            member_statements, topic, speaker,
+            transcript_title=transcript_title,
+            transcript_description=transcript_description,
+            transcript_date=transcript_date,
+            logger=activity.logger,
+        )
+    except Exception as e:
+        log.error(activity.logger, "synthesize", "failed",
+                  "Claim synthesis failed",
+                  speaker=speaker, topic=topic, error=str(e))
+        raise
 
-    log.info(activity.logger, "transcript", "synthesize_done",
+    log.info(activity.logger, "synthesize", "done",
              "Claim synthesis complete",
              speaker=speaker, topic=topic,
              claim_preview=output.overarching_claim[:80])
@@ -295,7 +325,7 @@ async def update_transcript_claims_classification(
                 tc.factual_anchor = u.get("factual_anchor")
         await session.commit()
 
-    log.info(activity.logger, "transcript", "classification_updated",
+    log.info(activity.logger, "classify", "updated",
              "Classification updated on transcript_claims",
              transcript_id=transcript_id, count=len(updates))
 
@@ -326,7 +356,7 @@ async def update_transcript_claims_dedup(
                 tc.dedup_group_id = u["dedup_group_id"]
         await session.commit()
 
-    log.info(activity.logger, "transcript", "dedup_updated",
+    log.info(activity.logger, "dedup", "updated",
              "Dedup flags updated on transcript_claims",
              transcript_id=transcript_id, count=len(updates))
 
@@ -345,13 +375,19 @@ async def store_transcript(transcript_data: dict) -> dict:
     from src.transcript.speakers import _enrich_speakers
 
     url = transcript_data["url"]
-    log.info(activity.logger, "transcript", "store_start", "Storing transcript",
+    log.info(activity.logger, "store", "start", "Storing transcript",
              url=url, title=transcript_data.get("title"))
 
-    # Enrich speakers with Wikidata descriptions before storing
-    raw_speakers = transcript_data.get("speakers", [])
-    enriched_speakers = await _enrich_speakers(raw_speakers)
-    transcript_data["speakers"] = enriched_speakers
+    try:
+        # Enrich speakers with Wikidata descriptions before storing
+        raw_speakers = transcript_data.get("speakers", [])
+        enriched_speakers = await _enrich_speakers(raw_speakers)
+        transcript_data["speakers"] = enriched_speakers
+    except Exception as e:
+        log.error(activity.logger, "store", "enrich_failed",
+                  "Speaker enrichment failed",
+                  url=url, error=str(e))
+        raise
 
     async with async_session() as session:
         result = await session.execute(
@@ -398,7 +434,7 @@ async def store_transcript(transcript_data: dict) -> dict:
         await session.commit()
         record_id = str(record.id)
 
-    log.info(activity.logger, "transcript", "stored",
+    log.info(activity.logger, "store", "done",
              "Transcript stored in database",
              url=url, transcript_id=record_id,
              enriched_speakers=len(enriched_speakers))
@@ -449,7 +485,7 @@ async def store_transcript_claims(
 
         await session.commit()
 
-    log.info(activity.logger, "transcript", "claims_stored",
+    log.info(activity.logger, "store", "claims_stored",
              "Transcript claims stored",
              transcript_id=transcript_id, claim_count=len(claims))
 
@@ -489,8 +525,8 @@ async def create_claims_for_transcript(
 
     speaker_descriptions = speaker_descriptions or {}
     claim_ids: list[str] = []
-    log.info(activity.logger, "transcript", "create_claims_start",
-             "Creating Claim records for verification (group-based)",
+    log.info(activity.logger, "claims", "create_start",
+             "Creating Claim records for verification",
              transcript_id=transcript_id, group_count=len(groups))
 
     async with async_session() as session:
@@ -521,8 +557,8 @@ async def create_claims_for_transcript(
                     tc = result.scalar_one()
                     tc.claim_id = claim.id
 
-    log.info(activity.logger, "transcript", "claims_created",
-             "Created Claim records (group-based) and linked FKs",
+    log.info(activity.logger, "claims", "created",
+             "Claim records created and FKs linked",
              transcript_id=transcript_id, claim_count=len(claim_ids))
 
     return claim_ids
@@ -552,7 +588,7 @@ async def queue_claims_for_verification(claim_ids: list[str]) -> int:
                 count += 1
         await session.commit()
 
-    log.info(activity.logger, "transcript", "claims_queued",
+    log.info(activity.logger, "claims", "queued",
              "Claims queued for verification",
              count=count, total=len(claim_ids))
     return count
@@ -566,10 +602,6 @@ async def update_transcript_status(transcript_id: str, status: str) -> None:
     from src.db.models import TranscriptRecord
 
     tid = _uuid_mod.UUID(transcript_id)
-    log.info(activity.logger, "transcript", "status_update",
-             "Updating transcript status",
-             transcript_id=transcript_id, status=status)
-
     async with async_session() as session:
         result = await session.execute(
             select(TranscriptRecord).where(TranscriptRecord.id == tid)
@@ -578,7 +610,7 @@ async def update_transcript_status(transcript_id: str, status: str) -> None:
         record.status = status
         await session.commit()
 
-    log.info(activity.logger, "transcript", "status_updated",
+    log.info(activity.logger, "status", "updated",
              "Transcript status updated",
              transcript_id=transcript_id, status=status)
 
@@ -622,7 +654,7 @@ async def finish_transcript_and_start_next() -> str | None:
 
             if total_count > 0 and total_count == verified_count:
                 transcript.status = "complete"
-                log.info(activity.logger, "transcript", "complete",
+                log.info(activity.logger, "queue", "transcript_complete",
                          "Transcript verification complete",
                          transcript_id=str(transcript.id),
                          verified_claims=verified_count)
@@ -641,7 +673,7 @@ async def finish_transcript_and_start_next() -> str | None:
         queued = result.scalar_one_or_none()
 
         if not queued:
-            log.info(activity.logger, "transcript", "queue_empty",
+            log.info(activity.logger, "queue", "empty",
                      "No queued transcripts")
             return None
 
@@ -661,7 +693,7 @@ async def finish_transcript_and_start_next() -> str | None:
         task_queue=TASK_QUEUE,
     )
 
-    log.info(activity.logger, "transcript", "next_started",
+    log.info(activity.logger, "queue", "next_started",
              "Started next queued transcript",
              transcript_id=transcript_id, url=url)
 
@@ -698,7 +730,7 @@ async def load_extract_inputs(transcript_id: str) -> dict:
         enriched_speakers = record.enriched_speakers or record.speakers or []
         turns = record.segments_data or []
 
-    log.info(activity.logger, "transcript", "load_extract",
+    log.info(activity.logger, "load", "extract_inputs",
              "Loaded extract inputs from DB",
              transcript_id=transcript_id,
              turn_count=len(turns))
@@ -754,7 +786,7 @@ async def load_classify_inputs(transcript_id: str) -> dict:
                 "is_duplicate": tc.is_duplicate,
             })
 
-    log.info(activity.logger, "transcript", "load_classify",
+    log.info(activity.logger, "load", "classify_inputs",
              "Loaded classify inputs from DB",
              transcript_id=transcript_id,
              claim_count=len(tc_ids))
@@ -853,7 +885,7 @@ async def load_synthesize_inputs(transcript_id: str) -> dict:
                 "original_quotes": original_quotes,
             })
 
-    log.info(activity.logger, "transcript", "load_synthesize",
+    log.info(activity.logger, "load", "synthesize_inputs",
              "Loaded synthesize inputs from DB",
              transcript_id=transcript_id,
              group_count=len(dedup_groups))
@@ -931,7 +963,7 @@ async def load_verify_inputs(transcript_id: str) -> list[dict]:
                 "supporting_quotes": claim.supporting_quotes or [],
             })
 
-    log.info(activity.logger, "transcript", "load_verify",
+    log.info(activity.logger, "load", "verify_inputs",
              "Loaded verify inputs from DB",
              transcript_id=transcript_id,
              claim_count=len(verify_claims))

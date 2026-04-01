@@ -46,7 +46,7 @@ with workflow.unsafe.imports_passed_through():
     )
     from src.utils.logging import log
 
-MODULE = "workflow"
+MODULE = "verify"
 
 with workflow.unsafe.imports_passed_through():
     from src.config import (

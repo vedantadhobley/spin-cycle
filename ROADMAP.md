@@ -29,8 +29,8 @@ A working end-to-end claim verification pipeline with **flat fact extraction + t
 - **Date-aware prompts** — all prompts include `Today's date: {current_date}` so the LLM references current data
 - Results stored in Postgres with sub-claims, evidence, and reasoning chains
 - **Full intermediate data persistence** — decompose rubric (thesis, structure, claim_analysis), judge rubric (5-step assessment), synthesis rubric (thesis_survives, subclaim_weights), interested parties table. All stored in DB for debugging and frontend display.
-- Temporal orchestrates everything with retries and durability (15 activities, 2 workflows)
-- **Transcript extraction pipeline** — fetches transcripts from C-SPAN (Playwright) or raw text, extracts verifiable claims via word-based chunking (~2500 words/chunk, ~500 words overlap), three-phase pipeline: thesis extraction → claim review/classification → per-group synthesis. Stores ALL claims with extraction metadata. One-pipeline-at-a-time constraint matches LLM server capacity. LLM-based grouping has scaling issues — embedding-based dedup planned.
+- Temporal orchestrates everything with retries and durability (25 activities, 7 workflows)
+- **Transcript extraction pipeline** — `TranscriptPipelineWorkflow` orchestrates 5 child workflows: fetch → extract (word-based chunking ~2500w/chunk, ~500w overlap) → classify (LLM rubric classification) + dedup (embedding cosine similarity, threshold 0.85, numeric divergence guard) → synthesize → verify. INSERT once, UPDATE twice pattern. Stores ALL claims with extraction metadata. One-pipeline-at-a-time constraint matches LLM server capacity. Claims created as `extracted` status (inert), only flipped to `queued` when verify phase begins.
 - **Transcript → verification bridge** — extracted claims auto-submit to verification queue with FK linking `transcript_claims → claims → sub_claims → evidence → verdicts`
 - **Grafana dashboard** — provisioned Loki dashboard (28 panels) for pipeline status, verdict distribution, LLM latency, evidence quality, transcript progress, error monitoring
 - Production-grade structured JSON logging (for Grafana Loki, pretty format for dev) — INFO for pipeline milestones, DEBUG for per-query tool noise
@@ -345,19 +345,22 @@ Right now you manually POST claims. To actually audit politicians and pundits at
 **Status:** ✅ Implemented — full transcript extraction pipeline
 
 **What was implemented:**
-- Rev.com transcript fetcher + parser (`src/transcript/fetcher.py`)
-- Simplified claim extraction with segment batching (`src/transcript/extractor.py`) — segments batched by word count, 3-segment overlap at boundaries
-- Extraction fields: `checkable`, `checkability_rationale`, `context_insertions`, `is_restatement`, `segment_gist` per claim. `worth_checking` computed programmatically (checkable AND NOT restatement AND NOT future_prediction). No editorial judgment at extraction time.
-- ALL claims stored (checked + skipped) with extraction metadata in `transcript_claims` table
-- Speaker attribution on every claim, timestamps (MM:SS + seconds), original quotes for highlighting
-- Temporal workflow (`ExtractTranscriptWorkflow`) with visible per-batch activities
-- Auto-submission to verification queue with FK linking
-- One-pipeline-at-a-time constraint (extraction OR verification, not both)
+- C-SPAN Playwright fetcher + raw text parser (`src/transcript/cspan.py`, `src/transcript/parsers/`)
+- SpeakerTurn-based architecture: parsers → `normalize_turns()` → `build_chunks()` (word-based, ~2500w target, ~500w overlap)
+- `TranscriptPipelineWorkflow` orchestrator with 5 child workflows: FetchAndStore → ExtractClaims → ClassifyAndDedup → SynthesizeClaims → VerifyAllClaims
+- Exhaustive thesis extraction per chunk — no skip rules except greetings/filler (downstream classifier handles checkability)
+- Rubric-based classification: factual_anchor → classification → checkable flag (via `classify_claims_batch()`)
+- Embedding-based per-speaker dedup: cosine similarity (threshold 0.85) with numeric-skeleton divergence guard (Jaccard 0.7)
+- Per-group claim synthesis for multi-member dedup clusters (parallel, semaphore=2)
+- ALL claims stored with extraction + classification metadata in `transcript_claims` (INSERT once, UPDATE twice pattern)
+- Claims created as `extracted` status (inert); orchestrator flips to `queued` only at verify phase
+- Quote-based attribution (`original_quote` substring match for frontend highlighting)
+- Wikidata speaker enrichment at fetch time, passed to all downstream workflows
+- One-pipeline-at-a-time constraint (LLM server has 2 inference slots)
 - `POST /transcripts` API endpoint for submission
-- See `docs/transcript-pipeline-plan.md` for full design doc
 
 **Remaining:**
-- Daily cron job for automated transcript discovery
+- Daily cron job for automated transcript discovery (`cspan_discovery.py` stub exists)
 - Transcript relevance filter (which transcripts are worth processing)
 - Frontend: transcript view with inline claim highlighting
 

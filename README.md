@@ -45,7 +45,30 @@ flowchart TD
 
 ## How It Works
 
-### 1. Claim Submission
+### 1. Transcript Extraction (primary intake)
+
+Submit a transcript URL or raw text. The pipeline extracts, classifies, deduplicates, and synthesizes verifiable claims automatically:
+
+```bash
+curl -X POST http://localhost:4500/transcripts \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://www.c-span.org/...", "title": "Press Conference", "date": "2026-03-31"}'
+```
+
+```mermaid
+flowchart TD
+    POST["POST /transcripts"] --> PIPE["TranscriptPipelineWorkflow\n(orchestrator)"]
+
+    PIPE --> FETCH["FetchAndStoreWorkflow\n(C-SPAN Playwright / raw text parser\n→ Wikidata speaker enrichment)"]
+    FETCH --> EXTRACT["ExtractClaimsWorkflow\n(word-based chunking ~2500w\n→ parallel LLM extraction)"]
+    EXTRACT --> CLASSIFY["ClassifyAndDedupWorkflow\n(LLM classification + embedding dedup)"]
+    CLASSIFY --> SYNTH["SynthesizeClaimsWorkflow\n(multi-member LLM synthesis\n→ create Claim records)"]
+    SYNTH --> VERIFY["VerifyAllClaimsWorkflow\n(sequential verification)"]
+```
+
+### 2. Manual Claim Submission
+
+Individual claims can also be submitted directly:
 
 ```bash
 curl -X POST http://localhost:4500/claims \
@@ -53,9 +76,9 @@ curl -X POST http://localhost:4500/claims \
   -d '{"text": "Bitcoin was created by Satoshi Nakamoto in 2009"}'
 ```
 
-### 2. Verification Pipeline (Temporal workflow)
+### 3. Verification Pipeline (per claim)
 
-The claim triggers `VerifyClaimWorkflow` — a flat pipeline of 7 activities:
+Each claim (from transcript or manual) goes through `VerifyClaimWorkflow`:
 
 ```mermaid
 flowchart TD
@@ -89,7 +112,7 @@ flowchart TD
     STORE --> NEXT["start_next_queued_claim"]
 ```
 
-Only one claim verifies at a time (to avoid LLM contention). When a claim finishes, the workflow starts the next queued one. Submitting while a claim is running queues it as a DB row.
+Only one claim verifies at a time (to avoid LLM contention). When a claim finishes, the workflow starts the next queued one.
 
 The **flat facts** approach (matching Google SAFE and FActScore) means the LLM outputs facts directly as strings, guided by 15 extraction rules that catch presuppositions, quantifier scope, temporal boundaries, causation types, and more.
 
@@ -241,16 +264,25 @@ Watch the verification pipeline in real-time:
 docker logs -f spin-cycle-dev-worker
 
 # With LOG_FORMAT=pretty (default in dev), you'll see:
+
+# --- Startup ---
 # I [WORKER    ] starting: Connecting to Temporal | temporal_host=... task_queue=spin-cycle-verify
-# I [WORKER    ] ready: Worker listening | task_queue=spin-cycle-verify activity_count=7
-# I [DECOMPOSE ] normalized: Claim normalized | changes=[...]
-# I [DECOMPOSE ] quality_ok: Subclaim quality check passed
-#   — or —
-# I [DECOMPOSE ] quality_issues: Subclaim quality issues detected | issue_count=1 ...
-# I [DECOMPOSE ] decompose_retry_success: Decompose retry succeeded | fact_count=1
+# I [WORKER    ] ready: Worker listening | task_queue=spin-cycle-verify activity_count=25 workflow_count=7
+
+# --- Transcript extraction pipeline ---
+# I [FETCH     ] start: Fetching transcript | url=...
+# I [EXTRACT   ] chunk_start: Starting chunk extraction | chunk_index=0 total_chunks=5
+# I [THESIS_EXT] chunk_extracted: Theses extracted from chunk | count=12 chunk_index=0
+# I [CLASSIFY  ] start: Starting claim classification | claim_count=33
+# I [CLAIM_CLAS] classify_done: Classification complete | count=33 matched=33
+# I [DEDUP     ] start: Starting embedding dedup | speaker=... claim_count=33
+# I [CLAIM_DEDU] dedup_done: Dedup complete for speaker | cluster_count=28 multi_member=2
+# I [SYNTHESIZE] synth_multi: Synthesizing multi-member groups | multi=2 single=19
+# I [SYNTHESIZE] claims_created: Created 21 Claim records | claim_count=21
+
+# --- Claim verification pipeline ---
 # I [DECOMPOSE ] done: Claim decomposed | sub_count=3 thesis=...
-# I [WORKFLOW  ] decomposed: Claim decomposed into atomic facts | fact_count=3
-# I [RESEARCH  ] start: Starting research agent | sub_claim=...
+# I [VERIFY    ] decomposed: Claim decomposed into atomic facts | fact_count=3
 # I [RESEARCH  ] done: Research complete | evidence_count=16
 # I [JUDGE     ] done: Sub-claim judged | verdict=true confidence=0.95
 # I [SYNTHESIZE] done: Verdict synthesized | verdict=mostly_true confidence=0.85
@@ -264,7 +296,7 @@ docker logs -f spin-cycle-dev-worker
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `LLAMA_URL` | (required) | LLM endpoint (Qwen3.5-122B-A10B via llama.cpp) |
-| `LLAMA_EMBED_URL` | (optional) | Embeddings endpoint (not yet used) |
+| `LLAMA_EMBED_URL` | (optional) | Embeddings endpoint (Qwen3-Embedding-8B, used for claim dedup) |
 | `POSTGRES_PASSWORD` | `spin-cycle-dev` | Application Postgres password |
 | `LOG_FORMAT` | `json` (prod) / `pretty` (dev) | Log output format — `json` for Grafana Loki, `pretty` for terminal |
 | `LOG_LEVEL` | `INFO` | Log level — `DEBUG`, `INFO`, `WARNING`, `ERROR` |
@@ -290,8 +322,8 @@ Nine tables in PostgreSQL, all with UUID primary keys (except cache tables which
 | `evidence` | Research results per sub-claim | source_type, content, URL, bias, factual, tier, assessment, is_independent |
 | `verdicts` | Overall claim verdict | verdict, confidence, reasoning, reasoning_chain (JSONB), synthesis_rubric (JSONB) |
 | `interested_parties` | Entities with conflicts of interest | entity_name, role (direct/institutional/affiliated_media), source (llm/ner/wikidata) |
-| `transcripts` | Stored transcript records | url, title, date, speakers, word_count, display_text, status |
-| `transcript_claims` | Claims extracted from transcripts | claim_text, original_quote, speaker, worth_checking, skip_reason, checkable, is_restatement, segment_gist |
+| `transcripts` | Stored transcript records | url, title, date, speakers, word_count, display_text, status, enriched_speakers, description |
+| `transcript_claims` | Claims extracted from transcripts | claim_text, original_quote, speaker, classification, topic, checkable, worth_checking, is_duplicate, factual_anchor, dedup_group_id |
 | `source_ratings` | Cached MBFC ratings | domain (PK), bias, factual_reporting, ownership, country |
 | `wikidata_cache` | Cached Wikidata entity data | entity_name (PK), qid, relationships (JSONB), 7-day TTL |
 
@@ -358,7 +390,8 @@ spin-cycle/
 │   ├── prompts/                    # LLM prompts (heavily documented)
 │   │   ├── verification.py         # Normalize, Decompose, Research, Judge, Synthesize
 │   │   ├── extraction.py           # Thesis extraction (Phase 1)
-│   │   └── claim_review.py         # Claim review + synthesis (Phase 2/2b)
+│   │   ├── classification.py       # Batch claim classification (Phase 2)
+│   │   └── claim_review.py         # Claim synthesis (Phase 2b)
 │   │
 │   ├── schemas/                    # Data schemas
 │   │   ├── api.py                  # Pydantic API request/response models
@@ -384,18 +417,21 @@ spin-cycle/
 │   │   │   └── raw_text.py         # Raw text parser
 │   │   ├── cspan.py                # C-SPAN Playwright fetcher + parser
 │   │   ├── thesis_extractor.py     # Word-based chunking + extraction (Phase 1)
-│   │   ├── claim_reviewer.py       # Sequential batch review (Phase 2)
+│   │   ├── claim_classifier.py     # Rubric-based checkability classification (Phase 2)
+│   │   ├── claim_dedup.py          # Embedding-based per-speaker dedup (Phase 2)
 │   │   ├── claim_synthesizer.py    # Per-group overarching claim (Phase 2b)
-│   │   └── speakers.py             # Wikidata speaker enrichment
+│   │   ├── speakers.py             # Wikidata speaker enrichment
+│   │   └── cspan_discovery.py      # C-SPAN transcript auto-discovery (stub)
 │   │
 │   └── db/
 │       ├── models.py               # SQLAlchemy models (9 tables)
 │       └── session.py              # Async DB sessions
 │
 └── tests/
-    ├── test_health.py
-    ├── test_schemas.py
-    ├── test_evidence_ranker.py
+    ├── test_health.py               # Health endpoint tests
+    ├── test_schemas.py              # Schema validation tests
+    ├── test_evidence_ranker.py      # Evidence ranking tests
+    ├── test_extraction_fii.py       # Transcript pipeline integration tests
     ├── regression_claims.py         # Known-answer regression suite
     └── stress_claims.py             # Load/stress testing
 ```
@@ -415,9 +451,9 @@ Data flows via structured JSON logs → Promtail → Loki → Grafana.
 
 ## What's Next
 
-1. **Embedding-based dedup** — Replace LLM-based claim grouping with embedding similarity clustering. The current sequential batch review doesn't scale (see ARCHITECTURE.md § Deduplication Strategy). Local embedding model (Qwen3-Embedding-8B) already configured.
-2. **Alembic migrations** — proper database schema versioning (currently using `_migrate()` with raw SQL ALTER TABLE)
-3. **Calibration test suite** — benchmark against known claims to measure accuracy
-4. **LangFuse** — self-hosted LLM observability for prompt debugging
+1. **Alembic migrations** — proper database schema versioning (currently using `_migrate()` with raw SQL ALTER TABLE)
+2. **Calibration test suite** — benchmark against known claims to measure accuracy
+3. **C-SPAN auto-discovery cron** — daily discovery of new transcripts from C-SPAN
+4. **Frontend** — transcript view with inline claim highlighting, claims-only toggle, verdict detail panels
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full technical deep dive.

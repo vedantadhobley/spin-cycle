@@ -29,7 +29,7 @@ from src.transcript.parsers import TranscriptData, SpeakerTurn
 from src.utils.logging import log, get_logger
 
 MODULE = "thesis_extractor"
-logger = get_logger()
+_default_logger = get_logger()
 
 from src.transcript.speakers import _enrich_speakers  # noqa: F401
 
@@ -189,13 +189,14 @@ def _collect_overlap_after(
     return turns[start:end]
 
 
-def build_chunks(turns: list[SpeakerTurn]) -> list[Chunk]:
+def build_chunks(turns: list[SpeakerTurn], logger=None) -> list[Chunk]:
     """Split transcript turns into overlapping word-based chunks.
 
     Targets ~2500 words per chunk with ~500 words overlap on each side.
     Long monologues are split at paragraph/sentence boundaries first.
     Small transcripts → single chunk, no markers.
     """
+    logger = logger or _default_logger
     total_words = sum(_word_count(t.text) for t in turns)
 
     # Explode long monologues so we have fine-grained split points
@@ -278,8 +279,10 @@ def build_chunks(turns: list[SpeakerTurn]) -> list[Chunk]:
             chunk.full_text = "\n\n".join(parts)
 
     log.info(logger, MODULE, "chunks_built",
-             f"Built {len(chunks)} chunks from {len(turns)} turns ({total_words} words)",
+             "Chunks built from turns",
              chunk_count=len(chunks),
+             turn_count=len(turns),
+             total_words=total_words,
              chunk_words=[_word_count(c.target_text) for c in chunks])
 
     return chunks
@@ -305,6 +308,7 @@ async def extract_chunk(
     transcript: TranscriptData,
     chunk: Chunk,
     enriched_speakers: list[dict],
+    logger=None,
 ) -> list[ExtractedThesis]:
     """Extract claims from a single chunk of a transcript.
 
@@ -316,7 +320,7 @@ async def extract_chunk(
     Returns:
         List of ExtractedThesis from this chunk (post-processed).
     """
-    is_multi_chunk = chunk.total_chunks > 1
+    logger = logger or _default_logger
 
     desc_line = f" Description: {transcript.description}." if transcript.description else ""
     context_note = (
@@ -327,13 +331,10 @@ async def extract_chunk(
         f"Speakers: {', '.join(transcript.speakers)}."
     )
 
-    chunk_label = (
-        f"chunk {chunk.chunk_index + 1}/{chunk.total_chunks}"
-        if is_multi_chunk else "full transcript"
-    )
     log.info(logger, MODULE, "chunk_extracting",
-             f"Extracting from {chunk_label}",
+             "Extracting from chunk",
              chunk_index=chunk.chunk_index,
+             total_chunks=chunk.total_chunks,
              target_words=_word_count(chunk.target_text))
 
     output = await invoke_llm(
@@ -354,8 +355,9 @@ async def extract_chunk(
     theses = output.theses
 
     log.info(logger, MODULE, "chunk_extracted",
-             f"Extracted {len(theses)} theses from {chunk_label}",
+             "Theses extracted from chunk",
              count=len(theses),
+             chunk_index=chunk.chunk_index,
              topics=[t.topic for t in theses])
 
     return theses

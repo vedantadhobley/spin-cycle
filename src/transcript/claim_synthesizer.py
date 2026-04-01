@@ -16,7 +16,7 @@ from src.schemas.llm_outputs import SynthesizedClaim
 from src.utils.logging import log, get_logger
 
 MODULE = "claim_synthesizer"
-logger = get_logger()
+_default_logger = get_logger()
 
 
 async def synthesize_group_claim(
@@ -26,6 +26,7 @@ async def synthesize_group_claim(
     transcript_title: str = "",
     transcript_description: str = "",
     transcript_date: str = "",
+    logger=None,
 ) -> SynthesizedClaim:
     """Generate an overarching claim for a group of related claims.
 
@@ -40,6 +41,7 @@ async def synthesize_group_claim(
     Returns:
         SynthesizedClaim with overarching_claim and rationale.
     """
+    logger = logger or _default_logger
     member_claims_list = "\n".join(
         f"{i+1}. \"{stmt}\"" for i, stmt in enumerate(member_statements)
     )
@@ -55,7 +57,7 @@ async def synthesize_group_claim(
     transcript_context = "\n".join(ctx_parts)
 
     log.info(logger, MODULE, "synthesize_start",
-             f"Synthesizing {len(member_statements)} claims for {speaker}",
+             "Synthesizing claims for speaker",
              speaker=speaker, topic=topic,
              member_count=len(member_statements))
 
@@ -74,7 +76,8 @@ async def synthesize_group_claim(
     )
 
     log.info(logger, MODULE, "synthesize_done",
-             f"Synthesized claim: {output.overarching_claim[:80]}...",
-             speaker=speaker, topic=topic)
+             "Claim synthesized",
+             speaker=speaker, topic=topic,
+             claim_preview=output.overarching_claim[:80])
 
     return output
