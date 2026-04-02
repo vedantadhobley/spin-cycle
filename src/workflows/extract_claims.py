@@ -1,7 +1,7 @@
 """Chunked claim extraction — Phase 2 of the pipeline.
 
-Builds chunks deterministically, extracts claims in parallel pairs
-(2 LLM slots), stores all claims once via INSERT.
+Sentencizes the transcript, builds sentence-based chunks, extracts claims
+in parallel pairs (2 LLM slots), stores all claims once via INSERT.
 """
 
 import asyncio
@@ -11,13 +11,12 @@ from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
     from src.activities.transcript_activities import (
+        sentencize_and_chunk_activity,
         extract_chunk_activity,
         store_transcript_claims,
         load_extract_inputs,
     )
     from src.utils.logging import log
-    from src.transcript.thesis_extractor import build_chunks
-    from src.transcript.parsers import SpeakerTurn
     from src.config import MAX_CONCURRENT, TIMEOUT_EXTRACT_CHUNK, TIMEOUT_STORE_CLAIMS
 
 MODULE = "extract_claims"
@@ -48,49 +47,42 @@ class ExtractClaimsWorkflow:
             turns = turns or loaded["turns"]
 
         log.info(workflow.logger, MODULE, "started",
-                 "Starting chunked extraction",
+                 "Starting sentence-level extraction",
                  transcript_id=transcript_id,
                  title=transcript_meta["title"])
 
-        # Build chunks (deterministic, pure function — safe in workflow)
-        speaker_turns = [
-            SpeakerTurn(
-                speaker=t["speaker"], text=t["text"],
-                section_header=t.get("section_header"),
-            )
-            for t in turns
-        ]
-        chunks = build_chunks(speaker_turns, logger=workflow.logger)
+        # Sentencize and build chunks (activity — SpaCy can't run in workflow sandbox)
+        sentencize_result = await workflow.execute_activity(
+            sentencize_and_chunk_activity,
+            args=[turns],
+            start_to_close_timeout=timedelta(seconds=60),
+            retry_policy=RetryPolicy(maximum_attempts=2),
+        )
+        chunk_dicts = sentencize_result["chunk_dicts"]
+        sentences_dict = sentencize_result["sentences_dict"]
 
         log.info(workflow.logger, MODULE, "chunks_planned",
-                 "Chunk plan ready",
+                 "Sentence chunk plan ready",
                  transcript_id=transcript_id,
-                 chunk_count=len(chunks))
+                 sentence_count=sentencize_result["sentence_count"],
+                 chunk_count=len(chunk_dicts))
 
         # Execute chunks with semaphore — keeps both LLM slots busy
         sem = asyncio.Semaphore(MAX_CONCURRENT)
-        chunk_results: list[list[dict]] = [[] for _ in chunks]
+        chunk_results: list[list[dict]] = [[] for _ in chunk_dicts]
 
-        async def extract_with_sem(idx: int, chunk):
+        async def extract_with_sem(idx: int, chunk_dict: dict):
             async with sem:
-                chunk_dict = {
-                    "target_text": chunk.target_text,
-                    "context_before": chunk.context_before,
-                    "context_after": chunk.context_after,
-                    "full_text": chunk.full_text,
-                    "chunk_index": chunk.chunk_index,
-                    "total_chunks": chunk.total_chunks,
-                }
                 result = await workflow.execute_activity(
                     extract_chunk_activity,
-                    args=[transcript_meta, chunk_dict, enriched_speakers],
+                    args=[transcript_meta, chunk_dict, enriched_speakers, sentences_dict],
                     start_to_close_timeout=timedelta(seconds=TIMEOUT_EXTRACT_CHUNK),
                     retry_policy=RetryPolicy(maximum_attempts=2),
                 )
                 chunk_results[idx] = result
 
         await asyncio.gather(*(
-            extract_with_sem(i, chunk) for i, chunk in enumerate(chunks)
+            extract_with_sem(i, cd) for i, cd in enumerate(chunk_dicts)
         ))
 
         all_theses: list[dict] = []

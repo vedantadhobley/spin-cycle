@@ -1,13 +1,14 @@
-"""Prompts for transcript claim extraction (Phase 1).
+"""Prompts for sentence-level transcript claim extraction (Phase 1).
 
-The extraction LLM receives a chunk of transcript (screenplay-formatted
-speaker turns) and extracts EVERY verifiable factual claim with a verbatim
-original_quote from the speaker.
+The extraction LLM receives numbered transcript sentences and must account
+for EVERY sentence — either extract a claim from it or mark it "not a claim".
+A programmatic coverage validator checks that all sentence indices are covered.
 
 Key design:
-- Extract every distinct claim, decompose sentences into independent assertions
-- Deduplication is handled downstream (embedding-based), NOT by the LLM
-- original_quote must be verbatim words from the transcript
+- Sentences are globally numbered [S0], [S1], ..., [Sn]
+- Each sentence appears in exactly ONE place: a claim or not_claims
+- A claim can span 1-3 consecutive sentences
+- original_quote is derived programmatically from sentence text (not LLM output)
 - Classification is deferred to a separate batch LLM phase (claim_classifier)
 """
 
@@ -15,7 +16,7 @@ Key design:
 # System prompt
 # ---------------------------------------------------------------------------
 
-THESIS_EXTRACTION_SYSTEM = """\
+SENTENCE_EXTRACTION_SYSTEM = """\
 You are a fact-check analyst extracting verifiable factual claims from \
 a transcript so a newsroom can verify them.
 
@@ -23,8 +24,13 @@ Today's date: {current_date}
 
 ## Your Task
 
-You receive transcript text formatted as "Speaker: text". Extract every \
-distinct factual claim that speakers make. Be exhaustive — miss nothing.
+You receive numbered transcript sentences: [S42] Speaker: text
+For every sentence in the EXTRACT range, you must either:
+- Include its index in a claim's sentence_indices, OR
+- Include its index in not_claims
+
+A programmatic validator checks that every sentence is accounted for. \
+Missing sentences trigger a retry.
 
 ## What Is a Claim?
 
@@ -32,9 +38,10 @@ A claim is a factual assertion that could be checked against evidence. \
 Two assertions that could independently be true or false are SEPARATE \
 claims, even if they appear in the same sentence.
 
-A single sentence often contains multiple claims buried in subordinate \
-clauses, causal phrases, and parenthetical asides. Decompose every \
-sentence — do not let a smaller claim hide inside a larger one.
+A claim can span 1-3 consecutive sentences when they express a single \
+assertion (e.g. a sentence states a fact and the next gives a supporting \
+figure). Multi-assertion sentences become one claim entry — a downstream \
+step handles decomposition.
 
 EXTRACT:
 - Quantitative claims (amounts, percentages, rankings)
@@ -49,54 +56,42 @@ EXTRACT:
 SKIP only greetings, pleasantries, and filler ("Thank you for being here"). \
 Extract everything else — a downstream classifier decides what is checkable.
 
-## Step 1 — Extract Claims
+## How to Write thesis_statement
 
-Work through the transcript paragraph by paragraph. For each sentence, \
-extract every factual assertion as its own claim. Write a thesis_statement that:
+For each claim, write a thesis_statement that:
 - Is NEUTRAL and DECONTEXTUALIZED (no pronouns, no "we", no "they")
 - Replaces ALL pronouns with specific entities
 - Could be understood by someone who hasn't read the transcript
-- Captures the complete assertion (may need multiple sentences for context)
+- Captures the complete assertion
 - Does NOT bundle multiple independent assertions into one claim
 
-## Step 2 — Copy Original Quote
+## How to Write not_claims
 
-For each claim, copy the VERBATIM words from the speaker that express \
-the claim. This must be an exact substring of the transcript text — \
-the system verifies this programmatically.
+Group consecutive non-claim sentences when they share the same reason. \
+Valid reasons: "greeting", "filler", "rhetorical", "procedural", \
+"applause/reaction", "transition".
 
-## Step 3 — Classify Topic
+## Topic
 
 Assign one topic label: economic, military, political, legal, social, \
 diplomatic, technological, environmental, health, or other.
 
-## Step 4 — Verify Completeness
-
-Re-read the transcript sentence by sentence. For each sentence, check \
-that every factual assertion in it has its own claim — including those \
-in subordinate clauses and asides. Missing a claim is worse than \
-extracting too many.
-
 ## Output Rules
 
-1. [Section: ...] headers in the transcript are editorial context, NOT spoken words
+1. Every sentence index in the EXTRACT range must appear exactly once
 2. Extract every factual claim — err on the side of MORE claims, not fewer
-3. When in doubt whether two assertions are the same claim, extract both — \
-a downstream step handles deduplication
-4. Every claim needs a verbatim original_quote from the transcript
-5. If sections are marked "Context (do not extract claims from this section)", \
-only extract from the section marked for extraction\
+3. [Section: ...] headers are editorial context, NOT spoken words
+4. Sentences in Context sections are for reference only — do not extract from them\
 """
 
 # ---------------------------------------------------------------------------
 # User prompt
 # ---------------------------------------------------------------------------
 
-THESIS_EXTRACTION_USER = """\
-Extract every factual claim from this transcript.
+SENTENCE_EXTRACTION_USER = """\
+Extract every factual claim from sentences S{target_range_start} through S{target_range_end}.
 
-## Transcript
-{transcript_text}
+{numbered_sentences}
 
 ## Context
 {context_note}
@@ -106,13 +101,16 @@ Extract every factual claim from this transcript.
 
 Return JSON:
 {{
-  "theses": [
+  "claims": [
     {{
+      "sentence_indices": [37, 38],
       "thesis_statement": "Neutral, decontextualized claim statement",
       "speakers": ["Speaker Name"],
-      "original_quote": "Exact verbatim words from the speaker in the transcript",
       "topic": "military"
     }}
+  ],
+  "not_claims": [
+    {{"sentence_indices": [40], "reason": "filler"}}
   ]
 }}\
 """

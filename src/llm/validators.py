@@ -23,6 +23,7 @@ from src.schemas.llm_outputs import (
     ThesisExtractionOutput,
     SynthesizedClaim,
     AttributeSpeakersOutput,
+    SentenceExtractionOutput,
 )
 from src.utils.logging import log, get_logger
 
@@ -295,6 +296,118 @@ def validate_thesis_extraction(output: ThesisExtractionOutput) -> tuple[bool, st
         log.info(logger, MODULE, "thesis_extraction_filtered",
                  f"Filtered {dropped} malformed theses",
                  dropped=dropped)
+
+    return True, ""
+
+
+def validate_sentence_extraction(
+    output: SentenceExtractionOutput,
+    target_range: tuple[int, int],
+) -> tuple[bool, str]:
+    """Validate and clean sentence-level extraction for full coverage.
+
+    The model does the semantic extraction work. This validator does the
+    bookkeeping cleanup — the model is bad at precise index accounting
+    over 100+ items. All fixable issues are resolved programmatically;
+    only truly missing coverage triggers a retry.
+
+    Programmatic fixes (in order):
+    1. Drop malformed claims (short thesis, no speakers)
+    2. Strip out-of-range indices (context bleed)
+    3. Enforce consecutive indices per claim
+    4. Deduplicate: first claim wins, strip index from later claims
+    5. Deduplicate: claims win over not_claims
+    6. Check coverage — missing indices is the only hard failure
+    """
+    expected = set(range(target_range[0], target_range[1]))
+
+    # --- Fix 1: Drop malformed claims ---
+    good_claims = []
+    for claim in output.claims:
+        if not claim.thesis_statement or len(claim.thesis_statement.strip()) < 15:
+            log.warning(logger, MODULE, "sentence_claim_dropped",
+                        "Dropped claim with short/empty thesis_statement",
+                        indices=claim.sentence_indices)
+            continue
+        if not claim.speakers:
+            log.warning(logger, MODULE, "sentence_claim_dropped",
+                        "Dropped claim with no speakers",
+                        indices=claim.sentence_indices)
+            continue
+        good_claims.append(claim)
+    output.claims = good_claims
+
+    # --- Fix 2: Strip out-of-range indices (context bleed) ---
+    stripped_oor = set()
+    for claim in output.claims:
+        oor = [i for i in claim.sentence_indices if i not in expected]
+        if oor:
+            stripped_oor.update(oor)
+            claim.sentence_indices = [i for i in claim.sentence_indices if i in expected]
+    for nc in output.not_claims:
+        oor = [i for i in nc.sentence_indices if i not in expected]
+        if oor:
+            stripped_oor.update(oor)
+            nc.sentence_indices = [i for i in nc.sentence_indices if i in expected]
+    output.claims = [c for c in output.claims if c.sentence_indices]
+    output.not_claims = [nc for nc in output.not_claims if nc.sentence_indices]
+    if stripped_oor:
+        log.warning(logger, MODULE, "out_of_range_stripped",
+                    "Stripped out-of-range sentence indices",
+                    count=len(stripped_oor), target_range=target_range)
+
+    # --- Fix 3: Enforce consecutive indices per claim ---
+    # A claim should only span consecutive sentences. If indices are
+    # non-consecutive, keep only the longest consecutive run.
+    for claim in output.claims:
+        if len(claim.sentence_indices) <= 1:
+            continue
+        indices = sorted(claim.sentence_indices)
+        # Find longest consecutive run
+        runs: list[list[int]] = [[indices[0]]]
+        for i in range(1, len(indices)):
+            if indices[i] == runs[-1][-1] + 1:
+                runs[-1].append(indices[i])
+            else:
+                runs.append([indices[i]])
+        best = max(runs, key=len)
+        if len(best) < len(indices):
+            log.warning(logger, MODULE, "non_consecutive_fixed",
+                        "Trimmed non-consecutive indices to longest run",
+                        original=indices, kept=best)
+            claim.sentence_indices = best
+
+    # --- Fix 4: Cross-claim dedup (first claim wins) ---
+    seen_indices: set[int] = set()
+    deduped_count = 0
+    for claim in output.claims:
+        dupes = [i for i in claim.sentence_indices if i in seen_indices]
+        if dupes:
+            deduped_count += len(dupes)
+            claim.sentence_indices = [i for i in claim.sentence_indices if i not in seen_indices]
+        seen_indices.update(claim.sentence_indices)
+    output.claims = [c for c in output.claims if c.sentence_indices]
+    if deduped_count:
+        log.warning(logger, MODULE, "cross_claim_dedup",
+                    "Stripped duplicate indices from later claims (first wins)",
+                    count=deduped_count)
+
+    # --- Fix 5: Claims win over not_claims ---
+    claim_indices = set()
+    for claim in output.claims:
+        claim_indices.update(claim.sentence_indices)
+    for nc in output.not_claims:
+        nc.sentence_indices = [i for i in nc.sentence_indices if i not in claim_indices]
+    output.not_claims = [nc for nc in output.not_claims if nc.sentence_indices]
+
+    # --- Check coverage (only hard failure) ---
+    covered = claim_indices.copy()
+    for nc in output.not_claims:
+        covered.update(nc.sentence_indices)
+
+    missing = expected - covered
+    if missing:
+        return False, f"Missing sentence indices (not in claims or not_claims): {sorted(missing)}"
 
     return True, ""
 

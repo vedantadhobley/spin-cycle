@@ -59,6 +59,42 @@ class ThesisExtractionOutput(BaseModel):
 
 
 # =============================================================================
+# SENTENCE-LEVEL EXTRACTION OUTPUT (forced accountability)
+# =============================================================================
+
+class SentenceClaim(BaseModel):
+    """A claim extracted from one or more numbered transcript sentences."""
+    sentence_indices: list[int] = Field(
+        ..., description="Global sentence indices this claim spans, e.g. [37, 38]"
+    )
+    thesis_statement: str = Field(
+        ..., description="Neutral, decontextualized statement of the claim"
+    )
+    speakers: list[str] = Field(
+        default_factory=list, description="Who advances this claim"
+    )
+    topic: str = Field(
+        default="", description="Topic area: economic, military, political, legal, social, etc."
+    )
+
+
+class SentenceNotClaim(BaseModel):
+    """Sentences explicitly marked as not containing a claim."""
+    sentence_indices: list[int] = Field(
+        ..., description="Global sentence indices, can group consecutive: [40, 41, 42]"
+    )
+    reason: str = Field(
+        ..., description="Why not a claim: greeting, filler, rhetorical, procedural"
+    )
+
+
+class SentenceExtractionOutput(BaseModel):
+    """Output from sentence-level forced extraction."""
+    claims: list[SentenceClaim] = Field(default_factory=list)
+    not_claims: list[SentenceNotClaim] = Field(default_factory=list)
+
+
+# =============================================================================
 # CLAIM CLASSIFICATION OUTPUT (batch classification of extracted claims)
 # =============================================================================
 

@@ -1,29 +1,31 @@
-"""Claim extraction from parsed transcripts (Phase 1: chunked extraction).
+"""Sentence-level claim extraction from parsed transcripts (Phase 1).
 
 Takes a TranscriptData (from parser registry) and extracts every verifiable
-factual claim with original_quote attribution via overlapping word-based chunks.
+factual claim via sentence-level forced accountability.
 
-Chunking operates directly on SpeakerTurn lists — no intermediate segment
-indexing. Overlap is word-based (~500 words each side), consistent regardless
-of source format.
+Flow:
+  SpeakerTurn[] → sentencize → NumberedSentence[] → build_sentence_chunks
+  → SentenceChunk[] → [per chunk] extract_chunk (LLM + coverage validator)
+  → SentenceExtractionOutput → convert_to_theses → ExtractedThesis[]
 
-Post-processing:
-- Quote validation: original_quote must appear in chunk target text
-- Deduplication: handled by Phase 2 (claim review), NOT here
+SpaCy splits each turn into sentences with global indices. The LLM must
+account for every sentence in the target range — either extract a claim
+or mark it not_claims. A programmatic validator enforces full coverage.
+original_quote is derived from sentence text, not LLM output.
 """
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from datetime import date
+from functools import partial
 
-from src.llm import invoke_llm, validate_thesis_extraction
+from src.llm import invoke_llm, validate_sentence_extraction
 from src.prompts.extraction import (
-    THESIS_EXTRACTION_SYSTEM, THESIS_EXTRACTION_USER,
+    SENTENCE_EXTRACTION_SYSTEM, SENTENCE_EXTRACTION_USER,
 )
 from src.schemas.llm_outputs import (
-    ExtractedThesis, ThesisExtractionOutput,
+    ExtractedThesis, SentenceExtractionOutput,
 )
 from src.transcript.parsers import TranscriptData, SpeakerTurn
 from src.utils.logging import log, get_logger
@@ -35,218 +37,159 @@ from src.transcript.speakers import _enrich_speakers  # noqa: F401
 
 
 # ---------------------------------------------------------------------------
-# Chunking
+# Data structures
 # ---------------------------------------------------------------------------
 
-from src.config import TARGET_WORDS_PER_CHUNK, OVERLAP_WORDS
+@dataclass
+class NumberedSentence:
+    """A single sentence with a global index across the whole transcript."""
+    global_index: int
+    speaker: str
+    text: str
+    section_header: str | None = None
 
 
 @dataclass
-class Chunk:
-    """A word-based chunk of transcript for extraction."""
-    target_text: str         # screenplay-formatted extraction target
-    context_before: str      # leading overlap context
-    context_after: str       # trailing overlap context
-    full_text: str           # all three concatenated with markers
+class SentenceChunk:
+    """A chunk of numbered sentences for extraction."""
+    target_sentences: list[NumberedSentence]
+    context_before: list[NumberedSentence]
+    context_after: list[NumberedSentence]
+    full_text: str                    # formatted with markers + sentence numbers
+    target_range: tuple[int, int]     # (start_inclusive, end_exclusive)
     chunk_index: int
     total_chunks: int
 
 
-def _format_turns_screenplay(turns: list[SpeakerTurn]) -> str:
-    """Format turns as screenplay text: 'Speaker: text' separated by blank lines."""
-    parts = []
+# ---------------------------------------------------------------------------
+# Sentencization
+# ---------------------------------------------------------------------------
+
+def _get_nlp():
+    """Get SpaCy model from shared NER module."""
+    from src.utils.ner import _get_nlp as ner_get_nlp
+    return ner_get_nlp()
+
+
+def sentencize_transcript(turns: list[SpeakerTurn]) -> list[NumberedSentence]:
+    """Split speaker turns into globally-numbered sentences via SpaCy.
+
+    Each turn's text is sentencized independently (speaker boundaries are
+    natural sentence boundaries). Global index runs continuously across
+    all turns.
+    """
+    nlp = _get_nlp()
+    sentences: list[NumberedSentence] = []
+    idx = 0
+
     for turn in turns:
-        header = ""
-        if turn.section_header:
-            header = f"[Section: {turn.section_header}]\n"
-        parts.append(f"{header}{turn.speaker}: {turn.text}")
-    return "\n\n".join(parts)
+        doc = nlp(turn.text)
+        for sent in doc.sents:
+            text = sent.text.strip()
+            if not text:
+                continue
+            sentences.append(NumberedSentence(
+                global_index=idx,
+                speaker=turn.speaker,
+                text=text,
+                section_header=turn.section_header if not sentences or sentences[-1].section_header != turn.section_header else None,
+            ))
+            idx += 1
+
+    return sentences
+
+
+# ---------------------------------------------------------------------------
+# Chunking (sentence-based)
+# ---------------------------------------------------------------------------
+
+from src.config import TARGET_WORDS_PER_CHUNK, OVERLAP_WORDS
 
 
 def _word_count(text: str) -> int:
     return len(text.split())
 
 
-def _split_turn_at_boundary(turn: SpeakerTurn, max_words: int) -> list[SpeakerTurn]:
-    """Split a long monologue into multiple turns at natural boundaries.
-
-    Split priority:
-    1. Paragraph break (\\n\\n)
-    2. Sentence boundary ('. ' followed by uppercase)
-
-    All resulting turns keep the same speaker. Only the first keeps section_header.
-    """
-    if _word_count(turn.text) <= max_words:
-        return [turn]
-
-    # Try paragraph splits first
-    paragraphs = re.split(r"\n\s*\n", turn.text)
-    if len(paragraphs) > 1:
-        chunks = _merge_text_pieces(paragraphs, max_words, "\n\n")
-        if len(chunks) > 1:
-            # Recursively split any chunks still over max_words (sentence fallback)
-            result = []
-            for i, c in enumerate(chunks):
-                if not c.strip():
-                    continue
-                sub = SpeakerTurn(
-                    speaker=turn.speaker,
-                    text=c.strip(),
-                    section_header=turn.section_header if i == 0 else None,
-                )
-                result.extend(_split_turn_at_boundary(sub, max_words))
-            return result
-
-    # Fall back to sentence splitting
-    sentences = re.split(r"(?<=\.\s)(?=[A-Z])", turn.text)
-    if len(sentences) > 1:
-        chunks = _merge_text_pieces(sentences, max_words, "")
-        if len(chunks) > 1:
-            return [
-                SpeakerTurn(
-                    speaker=turn.speaker,
-                    text=c.strip(),
-                    section_header=turn.section_header if i == 0 else None,
-                )
-                for i, c in enumerate(chunks) if c.strip()
-            ]
-
-    # Can't split further — return as-is
-    return [turn]
+def _sentence_words(sentence: NumberedSentence) -> int:
+    return _word_count(sentence.text)
 
 
-def _merge_text_pieces(pieces: list[str], max_words: int, joiner: str) -> list[str]:
-    """Merge text pieces into chunks targeting max_words each."""
-    chunks = []
-    current: list[str] = []
-    current_words = 0
+def build_sentence_chunks(
+    sentences: list[NumberedSentence],
+    logger=None,
+) -> list[SentenceChunk]:
+    """Build overlapping chunks from numbered sentences.
 
-    for piece in pieces:
-        piece = piece.strip()
-        if not piece:
-            continue
-        pw = _word_count(piece)
-
-        if current_words + pw > max_words and current:
-            chunks.append(joiner.join(current))
-            current = [piece]
-            current_words = pw
-        else:
-            current.append(piece)
-            current_words += pw
-
-    if current:
-        chunks.append(joiner.join(current))
-
-    return chunks
-
-
-def _collect_turns_for_words(
-    turns: list[SpeakerTurn], start: int, target_words: int,
-) -> int:
-    """Return the end index (exclusive) collecting ~target_words from turns[start:].
-
-    Always includes at least one turn. Stops before adding a turn that would
-    push the total significantly over target (>1.5x), unless it's the first turn.
-    """
-    collected = 0
-    end = start
-    while end < len(turns):
-        next_words = _word_count(turns[end].text)
-        # If adding this turn would push us well over target and we already have content, stop
-        if collected > 0 and collected + next_words > target_words:
-            break
-        collected += next_words
-        end += 1
-    return max(end, start + 1)  # always at least one turn
-
-
-def _collect_overlap_before(
-    turns: list[SpeakerTurn], end: int, overlap_words: int,
-) -> list[SpeakerTurn]:
-    """Collect turns before `end` totaling ~overlap_words."""
-    if end <= 0:
-        return []
-    collected = 0
-    start = end
-    while start > 0 and collected < overlap_words:
-        start -= 1
-        collected += _word_count(turns[start].text)
-    return turns[start:end]
-
-
-def _collect_overlap_after(
-    turns: list[SpeakerTurn], start: int, overlap_words: int,
-) -> list[SpeakerTurn]:
-    """Collect turns after `start` totaling ~overlap_words."""
-    if start >= len(turns):
-        return []
-    collected = 0
-    end = start
-    while end < len(turns) and collected < overlap_words:
-        collected += _word_count(turns[end].text)
-        end += 1
-    return turns[start:end]
-
-
-def build_chunks(turns: list[SpeakerTurn], logger=None) -> list[Chunk]:
-    """Split transcript turns into overlapping word-based chunks.
-
-    Targets ~2500 words per chunk with ~500 words overlap on each side.
-    Long monologues are split at paragraph/sentence boundaries first.
-    Small transcripts → single chunk, no markers.
+    Accumulates sentences by word budget. Overlap is whole sentences
+    (not partial words). Small transcripts → single chunk.
     """
     logger = logger or _default_logger
-    total_words = sum(_word_count(t.text) for t in turns)
+    total_words = sum(_sentence_words(s) for s in sentences)
 
-    # Explode long monologues so we have fine-grained split points
-    split_turns: list[SpeakerTurn] = []
-    for turn in turns:
-        split_turns.extend(_split_turn_at_boundary(turn, TARGET_WORDS_PER_CHUNK))
+    if not sentences:
+        return []
 
-    # Small transcript: single chunk, no section markers
+    # Small transcript: single chunk, no context markers
     if total_words <= TARGET_WORDS_PER_CHUNK:
-        text = _format_turns_screenplay(split_turns)
-        return [Chunk(
-            target_text=text,
-            context_before="",
-            context_after="",
+        text = _format_sentences_numbered(sentences)
+        return [SentenceChunk(
+            target_sentences=sentences,
+            context_before=[],
+            context_after=[],
             full_text=text,
+            target_range=(sentences[0].global_index, sentences[-1].global_index + 1),
             chunk_index=0,
             total_chunks=1,
         )]
 
-    # Build chunks with word-based boundaries
-    chunks: list[Chunk] = []
+    # Build chunks with word-budget accumulation
+    chunks: list[SentenceChunk] = []
     pos = 0
-    n = len(split_turns)
+    n = len(sentences)
 
     while pos < n:
-        # Collect target turns for this chunk
-        target_end = _collect_turns_for_words(split_turns, pos, TARGET_WORDS_PER_CHUNK)
+        # Accumulate target sentences up to word budget
+        target_end = pos
+        words_acc = 0
+        while target_end < n:
+            next_words = _sentence_words(sentences[target_end])
+            if words_acc > 0 and words_acc + next_words > TARGET_WORDS_PER_CHUNK:
+                break
+            words_acc += next_words
+            target_end += 1
 
-        # If remainder is small, absorb it
+        # Absorb small remainder
         remaining_words = sum(
-            _word_count(split_turns[i].text) for i in range(target_end, n)
+            _sentence_words(sentences[i]) for i in range(target_end, n)
         )
         if 0 < remaining_words <= OVERLAP_WORDS:
             target_end = n
 
-        target_turns = split_turns[pos:target_end]
+        target = sentences[pos:target_end]
 
-        # Collect overlap context
-        before_turns = _collect_overlap_before(split_turns, pos, OVERLAP_WORDS)
-        after_turns = _collect_overlap_after(split_turns, target_end, OVERLAP_WORDS)
+        # Collect overlap context (whole sentences)
+        ctx_before: list[NumberedSentence] = []
+        ctx_words = 0
+        scan = pos - 1
+        while scan >= 0 and ctx_words < OVERLAP_WORDS:
+            ctx_words += _sentence_words(sentences[scan])
+            ctx_before.insert(0, sentences[scan])
+            scan -= 1
 
-        target_text = _format_turns_screenplay(target_turns)
-        context_before = _format_turns_screenplay(before_turns)
-        context_after = _format_turns_screenplay(after_turns)
+        ctx_after: list[NumberedSentence] = []
+        ctx_words = 0
+        scan = target_end
+        while scan < n and ctx_words < OVERLAP_WORDS:
+            ctx_words += _sentence_words(sentences[scan])
+            ctx_after.append(sentences[scan])
+            scan += 1
 
-        chunks.append(Chunk(
-            target_text=target_text,
-            context_before=context_before,
-            context_after=context_after,
+        chunks.append(SentenceChunk(
+            target_sentences=target,
+            context_before=ctx_before,
+            context_after=ctx_after,
             full_text="",  # built below
+            target_range=(target[0].global_index, target[-1].global_index + 1),
             chunk_index=len(chunks),
             total_chunks=0,  # set below
         ))
@@ -255,42 +198,87 @@ def build_chunks(turns: list[SpeakerTurn], logger=None) -> list[Chunk]:
             break
         pos = target_end
 
-    # Set total_chunks and build full_text with section markers
+    # Set total_chunks and build full_text
     for chunk in chunks:
         chunk.total_chunks = len(chunks)
         if len(chunks) == 1:
-            chunk.full_text = chunk.target_text
+            chunk.full_text = _format_sentences_numbered(chunk.target_sentences)
         else:
             parts = []
             if chunk.context_before:
                 parts.append(
-                    "## Context (do not extract claims from this section)\n"
-                    + chunk.context_before
+                    "## Context (do not extract from this section)\n"
+                    + _format_sentences_numbered(chunk.context_before)
                 )
             parts.append(
-                "## Extract claims from this section\n"
-                + chunk.target_text
+                f"## Extract claims from sentences S{chunk.target_range[0]} through S{chunk.target_range[1] - 1}\n"
+                + _format_sentences_numbered(chunk.target_sentences)
             )
             if chunk.context_after:
                 parts.append(
-                    "## Context (do not extract claims from this section)\n"
-                    + chunk.context_after
+                    "## Context (do not extract from this section)\n"
+                    + _format_sentences_numbered(chunk.context_after)
                 )
             chunk.full_text = "\n\n".join(parts)
 
     log.info(logger, MODULE, "chunks_built",
-             "Chunks built from turns",
+             "Sentence chunks built",
              chunk_count=len(chunks),
-             turn_count=len(turns),
+             sentence_count=len(sentences),
              total_words=total_words,
-             chunk_words=[_word_count(c.target_text) for c in chunks])
+             chunk_words=[sum(_sentence_words(s) for s in c.target_sentences) for c in chunks])
 
     return chunks
 
 
+# ---------------------------------------------------------------------------
+# Formatting
+# ---------------------------------------------------------------------------
+
+def _format_sentences_numbered(sentences: list[NumberedSentence]) -> str:
+    """Format sentences as [Sn] Speaker: text, one per line."""
+    lines = []
+    for s in sentences:
+        header = ""
+        if s.section_header:
+            header = f"[Section: {s.section_header}]\n"
+        lines.append(f"{header}[S{s.global_index}] {s.speaker}: {s.text}")
+    return "\n".join(lines)
+
 
 # ---------------------------------------------------------------------------
-# Chunk-level extraction (Phase 1)
+# Bridge: SentenceExtractionOutput → ExtractedThesis[]
+# ---------------------------------------------------------------------------
+
+def _convert_to_theses(
+    output: SentenceExtractionOutput,
+    sentences_lookup: dict[int, NumberedSentence],
+) -> list[ExtractedThesis]:
+    """Convert sentence-level extraction output to ExtractedThesis format.
+
+    Derives original_quote by joining the text of referenced sentence indices.
+    """
+    theses = []
+    for claim in output.claims:
+        # Build original_quote from sentence texts
+        quote_parts = []
+        for idx in sorted(claim.sentence_indices):
+            sent = sentences_lookup.get(idx)
+            if sent:
+                quote_parts.append(sent.text)
+        original_quote = " ".join(quote_parts)
+
+        theses.append(ExtractedThesis(
+            thesis_statement=claim.thesis_statement,
+            speakers=claim.speakers,
+            original_quote=original_quote,
+            topic=claim.topic,
+        ))
+    return theses
+
+
+# ---------------------------------------------------------------------------
+# Chunk-level extraction
 # ---------------------------------------------------------------------------
 
 def _build_speaker_desc(enriched_speakers: list[dict]) -> str:
@@ -306,19 +294,17 @@ def _build_speaker_desc(enriched_speakers: list[dict]) -> str:
 
 async def extract_chunk(
     transcript: TranscriptData,
-    chunk: Chunk,
+    chunk: SentenceChunk,
     enriched_speakers: list[dict],
+    sentences_lookup: dict[int, NumberedSentence],
     logger=None,
 ) -> list[ExtractedThesis]:
-    """Extract claims from a single chunk of a transcript.
+    """Extract claims from a single sentence chunk.
 
-    Args:
-        transcript: Full parsed transcript (for metadata).
-        chunk: Chunk with target text and context.
-        enriched_speakers: Pre-resolved speaker descriptions.
+    Uses sentence-level forced extraction: the LLM must account for every
+    sentence in the target range. A coverage validator enforces this.
 
-    Returns:
-        List of ExtractedThesis from this chunk (post-processed).
+    Returns list of ExtractedThesis (bridged from sentence output).
     """
     logger = logger or _default_logger
 
@@ -332,33 +318,43 @@ async def extract_chunk(
     )
 
     log.info(logger, MODULE, "chunk_extracting",
-             "Extracting from chunk",
+             "Extracting from sentence chunk",
              chunk_index=chunk.chunk_index,
              total_chunks=chunk.total_chunks,
-             target_words=_word_count(chunk.target_text))
+             target_range=chunk.target_range,
+             target_sentences=len(chunk.target_sentences))
+
+    # Coverage validator closure — captures this chunk's target range
+    coverage_validator = partial(
+        validate_sentence_extraction,
+        target_range=chunk.target_range,
+    )
 
     output = await invoke_llm(
-        system_prompt=THESIS_EXTRACTION_SYSTEM.format(
+        system_prompt=SENTENCE_EXTRACTION_SYSTEM.format(
             current_date=date.today().isoformat(),
         ),
-        user_prompt=THESIS_EXTRACTION_USER.format(
-            transcript_text=chunk.full_text,
+        user_prompt=SENTENCE_EXTRACTION_USER.format(
+            numbered_sentences=chunk.full_text,
+            target_range_start=chunk.target_range[0],
+            target_range_end=chunk.target_range[1] - 1,
             context_note=context_note,
             speaker_descriptions=_build_speaker_desc(enriched_speakers),
         ),
-        schema=ThesisExtractionOutput,
-        semantic_validator=validate_thesis_extraction,
+        schema=SentenceExtractionOutput,
+        semantic_validator=coverage_validator,
         max_tokens=16384,
         presence_penalty=0,
         activity_name=f"extract_chunk_{chunk.chunk_index}",
     )
 
-    theses = output.theses
+    theses = _convert_to_theses(output, sentences_lookup)
 
     log.info(logger, MODULE, "chunk_extracted",
-             "Theses extracted from chunk",
+             "Claims extracted from sentence chunk",
              count=len(theses),
              chunk_index=chunk.chunk_index,
+             not_claims=len(output.not_claims),
              topics=[t.topic for t in theses])
 
     return theses

@@ -296,17 +296,104 @@ async def attribute_speakers(transcript_data: dict) -> dict:
 
 
 @activity.defn
+async def sentencize_and_chunk_activity(
+    turns: list[dict],
+) -> dict:
+    """Sentencize transcript turns and build sentence-based chunks.
+
+    Runs SpaCy sentencization (must happen in activity, not workflow sandbox)
+    and deterministic chunking. Returns serialized chunks + sentences lookup.
+    """
+    from src.transcript.thesis_extractor import (
+        sentencize_transcript, build_sentence_chunks, NumberedSentence,
+    )
+    from src.transcript.parsers import SpeakerTurn
+
+    speaker_turns = [
+        SpeakerTurn(
+            speaker=t["speaker"], text=t["text"],
+            section_header=t.get("section_header"),
+        )
+        for t in turns
+    ]
+
+    sentences = sentencize_transcript(speaker_turns)
+    chunks = build_sentence_chunks(sentences, logger=activity.logger)
+
+    # Serialize for Temporal transport
+    sentences_dict = {
+        s.global_index: {
+            "global_index": s.global_index,
+            "speaker": s.speaker,
+            "text": s.text,
+            "section_header": s.section_header,
+        }
+        for s in sentences
+    }
+
+    chunk_dicts = []
+    for chunk in chunks:
+        chunk_dicts.append({
+            "target_sentences": [
+                {
+                    "global_index": s.global_index,
+                    "speaker": s.speaker,
+                    "text": s.text,
+                    "section_header": s.section_header,
+                }
+                for s in chunk.target_sentences
+            ],
+            "context_before": [
+                {
+                    "global_index": s.global_index,
+                    "speaker": s.speaker,
+                    "text": s.text,
+                    "section_header": s.section_header,
+                }
+                for s in chunk.context_before
+            ],
+            "context_after": [
+                {
+                    "global_index": s.global_index,
+                    "speaker": s.speaker,
+                    "text": s.text,
+                    "section_header": s.section_header,
+                }
+                for s in chunk.context_after
+            ],
+            "full_text": chunk.full_text,
+            "target_range": list(chunk.target_range),
+            "chunk_index": chunk.chunk_index,
+            "total_chunks": chunk.total_chunks,
+        })
+
+    log.info(activity.logger, "sentencize", "done",
+             "Sentencization and chunking complete",
+             sentence_count=len(sentences),
+             chunk_count=len(chunks))
+
+    return {
+        "sentences_dict": sentences_dict,
+        "chunk_dicts": chunk_dicts,
+        "sentence_count": len(sentences),
+    }
+
+
+@activity.defn
 async def extract_chunk_activity(
     transcript_meta: dict,
     chunk_dict: dict,
     enriched_speakers: list[dict],
+    sentences_dict: dict,
 ) -> list[dict]:
-    """Extract claims from a single chunk of a transcript.
+    """Extract claims from a single sentence chunk of a transcript.
 
-    Takes slim transcript_meta (7 fields), Chunk dict, and enriched speakers.
-    Returns list of thesis dicts with original_quote.
+    Takes slim transcript_meta, SentenceChunk dict, enriched speakers,
+    and sentences lookup dict. Returns list of thesis dicts.
     """
-    from src.transcript.thesis_extractor import Chunk, extract_chunk
+    from src.transcript.thesis_extractor import (
+        SentenceChunk, NumberedSentence, extract_chunk,
+    )
     from src.transcript.parsers import TranscriptData
 
     # Reconstruct minimal TranscriptData from slim meta
@@ -322,16 +409,52 @@ async def extract_chunk_activity(
         _word_count_override=transcript_meta.get("word_count"),
         _turn_count_override=transcript_meta.get("turn_count"),
     )
-    chunk = Chunk(**chunk_dict)
+
+    # Reconstruct SentenceChunk from dict
+    def _rebuild_sentences(dicts: list[dict]) -> list[NumberedSentence]:
+        return [
+            NumberedSentence(
+                global_index=d["global_index"],
+                speaker=d["speaker"],
+                text=d["text"],
+                section_header=d.get("section_header"),
+            )
+            for d in dicts
+        ]
+
+    chunk = SentenceChunk(
+        target_sentences=_rebuild_sentences(chunk_dict["target_sentences"]),
+        context_before=_rebuild_sentences(chunk_dict["context_before"]),
+        context_after=_rebuild_sentences(chunk_dict["context_after"]),
+        full_text=chunk_dict["full_text"],
+        target_range=tuple(chunk_dict["target_range"]),
+        chunk_index=chunk_dict["chunk_index"],
+        total_chunks=chunk_dict["total_chunks"],
+    )
+
+    # Reconstruct sentences lookup
+    sentences_lookup = {
+        int(k): NumberedSentence(
+            global_index=v["global_index"],
+            speaker=v["speaker"],
+            text=v["text"],
+            section_header=v.get("section_header"),
+        )
+        for k, v in sentences_dict.items()
+    }
 
     log.info(activity.logger, "extract", "chunk_start",
-             "Starting chunk extraction",
+             "Starting sentence chunk extraction",
              title=td.title,
              chunk_index=chunk.chunk_index,
-             total_chunks=chunk.total_chunks)
+             total_chunks=chunk.total_chunks,
+             target_range=chunk.target_range)
 
     try:
-        theses = await extract_chunk(td, chunk, enriched_speakers, logger=activity.logger)
+        theses = await extract_chunk(
+            td, chunk, enriched_speakers, sentences_lookup,
+            logger=activity.logger,
+        )
     except Exception as e:
         log.error(activity.logger, "extract", "chunk_failed",
                   "Chunk extraction failed",
