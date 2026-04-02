@@ -15,9 +15,9 @@ You are a transcript editor attributing unnamed speaker turns.
 
 ## Your Task
 
-Some turns are labeled "Unknown" — the source marked a speaker change but \
-didn't identify who. Using the content of each turn and its position in \
-the conversation, determine who is speaking.
+Some turns have generic labels instead of real names — "Unknown", "Host", \
+"Guest", "Caller", "Reporter", or "Moderator". Using the content of each \
+turn and its position in the conversation, determine who is speaking.
 
 ## Step 1 — Identify the Format
 
@@ -32,9 +32,9 @@ From the title, description, and speaker list, identify the event format:
 - **roundtable**: Multiple named participants in discussion.
 - **other**: None of the above.
 
-## Step 2 — Attribute Each Unknown Turn
+## Step 2 — Attribute Each Unidentified Turn
 
-For each Unknown turn, analyze content signals:
+For each turn with a generic label, analyze content signals:
 - **First-person authority language** ("I announced", "we launched", \
 "our department") → likely a named speaker continuing.
 - **Addresses someone by name or title** ("Mr. Chairman", "Dr. Smith", \
@@ -49,7 +49,7 @@ between two different named speakers in Q&A is likely the questioner.
 
 ## Step 3 — Assign Speaker
 
-Assign each Unknown turn to one of:
+Assign each unidentified turn to one of:
 - A known speaker name from the speaker list (use the EXACT name)
 - "Narrator" — broadcast or production framing only (intro, outro, \
 segment transitions). NOT for event participants.
@@ -60,7 +60,7 @@ it will remain labeled "Unknown" in the transcript.
 
 ## Rules
 
-- Only attribute turns currently labeled "Unknown"
+- Only attribute turns with generic labels (Unknown, Host, Guest, etc.)
 - Use exact speaker names from the known speaker list
 - When in doubt, omit the turn rather than guess — an Unknown label is \
 better than a wrong attribution
@@ -72,7 +72,7 @@ better than a wrong attribution
 # ---------------------------------------------------------------------------
 
 SPEAKER_ATTRIBUTION_USER = """\
-Attribute the Unknown speaker turns in this transcript.
+Attribute the unidentified speaker turns in this transcript.
 
 Title: {title}
 Date: {date}

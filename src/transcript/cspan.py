@@ -1,19 +1,16 @@
-"""C-SPAN transcript fetcher.
+"""C-SPAN transcript fetcher — pure data extraction.
 
 Uses Playwright (headless Chromium) to solve CloudFront WAF JS challenges.
 Navigates to the program page, intercepts the transcript API response that
 the page loads automatically, and extracts metadata from HTML.
 
-The transcript API returns closed-caption data with speaker labels in the
-`cc_name` field (e.g. "GOV. ABBOT", "SEN. SCHUMER"). Some programs use ">>"
-as a generic caption marker without speaker attribution.
+The transcript API returns closed-caption data with speaker labels:
+  - ``speakername``: actual name (e.g. "Mimi Geerges") — not always present
+  - ``cc_name``: caption label (e.g. "HOST", "SEC. RUBIO", ">>")
 
-Speaker resolution (programmatic, in this module):
-  1. Extract proper names from HTML /person/ links on the program page
-  2. Map cc_name labels to proper names by last-name matching
-     (e.g. "SEC. RUBIO" → "Marco Rubio")
-  3. Unnamed (>>) segments are left as "Unknown" for LLM attribution
-     in the attribute_speakers activity (see FetchAndStoreWorkflow)
+This parser is a pure extractor — it returns raw speaker labels and metadata.
+Speaker name resolution (honorific stripping, cc_name mapping to proper names)
+happens in ``speaker_resolution.resolve_speakers()`` in the activity layer.
 
 Turns are returned as raw caption segments (no same-speaker merging).
 The attribute_speakers activity normalizes once after LLM attribution.
@@ -34,18 +31,6 @@ logger = get_logger()
 
 _PROGRAM_ID_RE = re.compile(r"/(\d+)(?:\?|$)")
 _CSPAN_DOMAIN = re.compile(r"(?:^|\.)c-span\.org$", re.IGNORECASE)
-
-# Honorific stripping for C-SPAN speaker names
-# Includes abbreviated forms C-SPAN captioners use (PRES., SEC., SEN., REP., GOV.)
-_HONORIFICS = re.compile(
-    r"^(?:Pres\.|President|Vice\s+Pres\.|Vice\s+President|"
-    r"Sec\.|Secretary|Sen\.|Senator|Rep\.|Representative|"
-    r"Congressman|Congresswoman|Governor|Gov\.|"
-    r"Mayor|Ambassador|Gen\.|General|Adm\.|Admiral|"
-    r"Director|Dir\.|Chairman|Chairwoman|Chair|"
-    r"Dr\.?|Mr\.?|Mrs\.?|Ms\.?|Speaker|Leader)\s+",
-    re.IGNORECASE,
-)
 
 # Module-level singleton
 _session: "CSpanSession | None" = None
@@ -199,14 +184,6 @@ def is_cspan_url(url: str) -> bool:
         return False
 
 
-def _strip_speaker_honorific(name: str) -> str:
-    """Strip common political honorifics and title-case ALL CAPS names."""
-    stripped = _HONORIFICS.sub("", name).strip()
-    if stripped == stripped.upper() and len(stripped) > 2:
-        stripped = stripped.title()
-    return stripped
-
-
 def _clean_caption_text(text: str) -> str:
     """Clean ALL CAPS closed-caption text into readable prose.
 
@@ -234,10 +211,6 @@ def _clean_caption_text(text: str) -> str:
     return collapsed
 
 
-# ---------------------------------------------------------------------------
-# Speaker attribution
-# ---------------------------------------------------------------------------
-
 def _extract_person_names(soup) -> list[str]:
     """Extract proper names from /person/ links on the program page."""
     names = []
@@ -249,41 +222,6 @@ def _extract_person_names(soup) -> list[str]:
                 names.append(name)
                 seen.add(name)
     return names
-
-
-def _build_cc_name_map(cc_names: list[str], person_names: list[str]) -> dict[str, str]:
-    """Map cc_name labels to proper names by last-name matching.
-
-    Examples:
-        cc_names=["SEC. RUBIO", "PRES. TRUMP"], person_names=["Marco Rubio", "Donald J. Trump"]
-        → {"SEC. RUBIO": "Marco Rubio", "PRES. TRUMP": "Donald J. Trump"}
-    """
-    mapping: dict[str, str] = {}
-
-    # Build last-name → proper-name lookup from person links
-    last_name_lookup: dict[str, str] = {}
-    for name in person_names:
-        parts = name.split()
-        if parts:
-            # Use the last word as the last name
-            last = parts[-1].lower()
-            last_name_lookup[last] = name
-
-    for cc in cc_names:
-        # Skip generic roles — these don't map to specific people
-        upper = cc.upper().strip()
-        if upper in (">>", "", "HOST", "GUEST", "CALLER", "REPORTER"):
-            continue
-
-        # Strip honorific to get the bare name, then match by last name
-        bare = _strip_speaker_honorific(cc)
-        bare_parts = bare.split()
-        if bare_parts:
-            last = bare_parts[-1].lower()
-            if last in last_name_lookup:
-                mapping[cc] = last_name_lookup[last]
-
-    return mapping
 
 
 # ---------------------------------------------------------------------------
@@ -375,24 +313,16 @@ async def fetch_cspan_transcript(url_or_id: str) -> TranscriptData:
     # Extract person names from HTML for speaker attribution
     person_names = _extract_person_names(soup)
 
-    # Parse transcript parts
+    # Parse transcript parts — raw extraction, no resolution
     parts = transcript_json["parts"]
     raw_turns: list[SpeakerTurn] = []
-    raw_speakers: list[str] = []
-
-    # Collect unique cc_names for mapping
-    unique_cc_names: list[str] = []
-    for part in parts:
-        cn = (part.get("cc_name") or "").strip()
-        if cn and cn != ">>" and cn not in unique_cc_names:
-            unique_cc_names.append(cn)
-
-    # Build cc_name → proper name mapping from person links
-    cc_name_map = _build_cc_name_map(unique_cc_names, person_names)
 
     for i, part in enumerate(parts):
-        # C-SPAN uses cc_name for speaker in caption data
-        speaker_raw = (part.get("cc_name") or part.get("speakername") or "").strip()
+        # C-SPAN provides speaker identity in two fields:
+        #   speakername: actual name (e.g. "Mimi Geerges") — not always present
+        #   cc_name: caption label (e.g. "HOST", "SEC. RUBIO", ">>")
+        # Prefer speakername when available; fall back to cc_name
+        speaker_raw = (part.get("speakername") or part.get("cc_name") or "").strip()
         text = (part.get("text") or "").strip()
         if not text:
             continue
@@ -400,15 +330,8 @@ async def fetch_cspan_transcript(url_or_id: str) -> TranscriptData:
         # ">>" is a generic caption speaker-change marker
         if speaker_raw in (">>", ""):
             speaker = "Unknown"
-        elif speaker_raw in cc_name_map:
-            # Map to proper name from person links
-            speaker = cc_name_map[speaker_raw]
-            if speaker_raw not in raw_speakers:
-                raw_speakers.append(speaker_raw)
         else:
-            speaker = _strip_speaker_honorific(speaker_raw)
-            if speaker_raw not in raw_speakers:
-                raw_speakers.append(speaker_raw)
+            speaker = speaker_raw  # raw label, resolution happens later
 
         text = _clean_caption_text(text)
         if not text:
@@ -419,13 +342,12 @@ async def fetch_cspan_transcript(url_or_id: str) -> TranscriptData:
     if not raw_turns:
         raise ValueError(f"No transcript turns parsed for program {program_id}")
 
-    # Do NOT normalize (merge consecutive same-speaker) here.
-    # Raw caption segments are returned as-is so that the attribute_speakers
-    # activity sees granular >> boundaries — each is a potential speaker change.
-    # Normalization happens once AFTER LLM attribution in the activity.
+    # Raw caption segments returned as-is — resolution and normalization
+    # happen in the activity layer (resolve_speakers -> attribute_speakers
+    # -> _normalize_transcript).
     turns = raw_turns
 
-    # Build speaker list: turn speakers + person names from HTML links.
+    # Build speaker list: raw turn speakers + person names from HTML links.
     # Person names may not appear in turns when all cc_names are ">>"
     # but the LLM attribution activity needs them to know who to attribute to.
     turn_speakers = list(dict.fromkeys(t.speaker for t in turns))
@@ -433,21 +355,10 @@ async def fetch_cspan_transcript(url_or_id: str) -> TranscriptData:
         if pn not in turn_speakers:
             turn_speakers.append(pn)
 
-    # Build aliases: cc_name → proper name (or honorific-stripped)
-    aliases: dict[str, list[str]] = {}
-    for raw in raw_speakers:
-        proper = cc_name_map.get(raw, _strip_speaker_honorific(raw))
-        if raw.strip() != proper:
-            if proper not in aliases:
-                aliases[proper] = []
-            if raw.strip() not in aliases[proper]:
-                aliases[proper].append(raw.strip())
-
     log.info(logger, MODULE, "fetch_done", "C-SPAN transcript fetched",
              program_id=program_id, title=title,
              turn_count=len(turns), speaker_count=len(turn_speakers),
-             person_names=person_names,
-             cc_name_mapping=cc_name_map)
+             person_names=person_names)
 
     return TranscriptData(
         url=url,
@@ -457,7 +368,8 @@ async def fetch_cspan_transcript(url_or_id: str) -> TranscriptData:
         speakers=turn_speakers,
         turns=turns,
         source_format="cspan",
-        speaker_aliases=aliases if aliases else {},
+        speaker_aliases={},
+        speaker_metadata={"person_names": person_names},
     )
 
 

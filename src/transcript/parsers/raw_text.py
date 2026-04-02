@@ -1,12 +1,13 @@
-"""Raw text transcript parser.
+"""Raw text transcript parser — pure data extraction.
 
 Handles copy-pasted transcripts with speaker labels in various formats:
   - "SPEAKER NAME: text..."
   - "**Speaker Name:** text..."
   - "Speaker Name: text..."
 
-Speaker normalization merges variants like "DONALD TRUMP", "PRESIDENT TRUMP",
-"President Donald Trump" into a single canonical form.
+This parser is a pure extractor — it returns raw speaker labels and metadata.
+Speaker normalization (merging variants like "DONALD TRUMP" / "PRESIDENT TRUMP")
+happens in ``speaker_resolution.resolve_speakers()`` in the activity layer.
 
 Editorial content (section headers, "ALSO READ:" lines, editor's notes) is
 detected and separated from spoken content.
@@ -15,20 +16,9 @@ detected and separated from spoken content.
 from __future__ import annotations
 
 import re
-from difflib import SequenceMatcher
 
 from src.transcript.parsers import (
     SpeakerTurn, TranscriptData, register_parser,
-)
-
-# Honorifics to strip for canonical name matching
-_HONORIFICS = re.compile(
-    r"^(?:President|Vice\s+President|Senator|Secretary|Representative|"
-    r"Congressman|Congresswoman|Governor|Mayor|Ambassador|General|Admiral|"
-    r"Colonel|Commander|Director|Chairman|Chairwoman|Chair|"
-    r"Dr\.?|Mr\.?|Mrs\.?|Ms\.?|Prof\.?|Justice|Judge|Chief|"
-    r"Prime\s+Minister|Chancellor|Minister|Speaker|Leader)\s+",
-    re.IGNORECASE,
 )
 
 # Speaker line patterns (order matters — most specific first)
@@ -61,98 +51,6 @@ _NOT_A_SPEAKER = re.compile(
     r"^(?:TRANSCRIPT|TRANSCRIPTION|NOTE|EDITOR|DISCLAIMER|SOURCE|CREDIT|PUBLISHED)\s*$",
     re.IGNORECASE,
 )
-
-
-# ---------------------------------------------------------------------------
-# Speaker normalization
-# ---------------------------------------------------------------------------
-
-def _strip_honorific(name: str) -> str:
-    """Remove leading honorific from a speaker name."""
-    return _HONORIFICS.sub("", name).strip()
-
-
-def _name_tokens(name: str) -> set[str]:
-    """Extract lowercase name tokens, stripping honorifics."""
-    stripped = _strip_honorific(name)
-    return {t.lower().strip(".,'") for t in stripped.split() if len(t) > 1}
-
-
-def _normalize_speaker_name(name: str) -> str:
-    """Normalize a raw speaker name: strip honorifics, title-case."""
-    stripped = _strip_honorific(name.strip())
-    # If the name is ALL CAPS, title-case it
-    if stripped == stripped.upper() and len(stripped) > 2:
-        stripped = stripped.title()
-    return stripped.strip()
-
-
-def _build_speaker_map(raw_names: list[str]) -> dict[str, str]:
-    """Build a mapping from raw speaker names to canonical forms.
-
-    Merges variants by token overlap: "DONALD TRUMP", "PRESIDENT TRUMP",
-    "President Donald Trump" all map to the longest variant (most tokens).
-
-    Returns:
-        Dict mapping each raw name to its canonical form.
-    """
-    # Group by overlapping tokens
-    canonical_groups: list[tuple[str, set[str]]] = []  # (canonical, tokens)
-
-    for raw in raw_names:
-        normalized = _normalize_speaker_name(raw)
-        tokens = _name_tokens(raw)
-        if not tokens:
-            continue
-
-        # Find matching group: share at least one significant token
-        matched = False
-        for i, (canon, canon_tokens) in enumerate(canonical_groups):
-            overlap = tokens & canon_tokens
-            # Need at least one non-trivial overlap
-            if overlap and len(overlap) >= 1:
-                # Keep the version with more tokens as canonical
-                merged_tokens = canon_tokens | tokens
-                if len(tokens) > len(canon_tokens):
-                    canonical_groups[i] = (normalized, merged_tokens)
-                else:
-                    canonical_groups[i] = (canon, merged_tokens)
-                matched = True
-                break
-
-        if not matched:
-            canonical_groups.append((normalized, tokens))
-
-    # Build raw → canonical map
-    result: dict[str, str] = {}
-    for raw in raw_names:
-        tokens = _name_tokens(raw)
-        if not tokens:
-            result[raw] = _normalize_speaker_name(raw)
-            continue
-        for canon, canon_tokens in canonical_groups:
-            if tokens & canon_tokens:
-                result[raw] = canon
-                break
-        else:
-            result[raw] = _normalize_speaker_name(raw)
-
-    return result
-
-
-def _build_alias_map(speaker_map: dict[str, str]) -> dict[str, list[str]]:
-    """Build canonical → list of variant names (excluding the canonical itself)."""
-    aliases: dict[str, set[str]] = {}
-    for raw, canon in speaker_map.items():
-        normalized_raw = _normalize_speaker_name(raw)
-        if canon not in aliases:
-            aliases[canon] = set()
-        if normalized_raw != canon:
-            aliases[canon].add(normalized_raw)
-        # Also add the raw form if different
-        if raw.strip() != canon:
-            aliases[canon].add(raw.strip())
-    return {k: sorted(v) for k, v in aliases.items() if v}
 
 
 # ---------------------------------------------------------------------------
@@ -329,27 +227,20 @@ def parse_raw_text(
 
     _flush()
 
-    # Build speaker normalization map
-    speaker_map = _build_speaker_map(raw_speaker_names)
-    alias_map = _build_alias_map(speaker_map)
-
-    # Build speaker turns from raw segments
+    # Build speaker turns with raw names — resolution happens in activity layer
     turns: list[SpeakerTurn] = []
     for raw_seg in raw_segments:
-        canonical = speaker_map.get(raw_seg["speaker"], raw_seg["speaker"])
         turns.append(SpeakerTurn(
-            speaker=canonical,
+            speaker=raw_seg["speaker"],
             text=raw_seg["text"],
             section_header=raw_seg["section_header"],
         ))
 
-    # Raw turns returned as-is — normalization (merging consecutive
-    # same-speaker turns) happens in the attribute_speakers activity
+    # Raw turns returned as-is — resolution and normalization happen in the
+    # activity layer (resolve_speakers -> attribute_speakers -> _normalize).
 
-    # Deduplicated canonical speaker list (preserving order)
-    speakers = list(dict.fromkeys(
-        speaker_map.get(n, n) for n in raw_speaker_names
-    ))
+    # Deduplicated raw speaker list (preserving order)
+    speakers = list(dict.fromkeys(raw_speaker_names))
 
     return TranscriptData(
         url=url,
@@ -358,6 +249,7 @@ def parse_raw_text(
         speakers=speakers,
         turns=turns,
         source_format="raw_text",
-        speaker_aliases=alias_map,
+        speaker_aliases={},
+        speaker_metadata={"raw_speaker_names": raw_speaker_names},
         description=description,
     )

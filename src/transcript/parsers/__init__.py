@@ -49,6 +49,7 @@ class TranscriptData:
     turns: list[SpeakerTurn]
     source_format: str                          # "raw_text", "rev", "cspan"
     speaker_aliases: dict[str, list[str]] = field(default_factory=dict)  # canonical → variants
+    speaker_metadata: dict = field(default_factory=dict)  # ephemeral: parser → resolution, dropped before DB
     description: str | None = None  # source-specific blurb: rev.com description, editor's note, og:description
     # Optional overrides — used when reconstructing from slim metadata (no turns)
     _word_count_override: int | None = field(default=None, repr=False)

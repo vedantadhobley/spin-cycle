@@ -66,6 +66,7 @@ async def fetch_transcript(url: str) -> dict:
         "display_text": td.display_text,
         "source_format": td.source_format,
         "speaker_aliases": td.speaker_aliases,
+        "speaker_metadata": td.speaker_metadata,
         "turns": [
             {
                 "speaker": t.speaker,
@@ -114,6 +115,7 @@ async def fetch_raw_transcript(
         "display_text": td.display_text,
         "source_format": td.source_format,
         "speaker_aliases": td.speaker_aliases,
+        "speaker_metadata": td.speaker_metadata,
         "turns": [
             {
                 "speaker": t.speaker,
@@ -139,8 +141,12 @@ def _normalize_transcript(transcript_data: dict) -> dict:
 
     This is the single normalization point for all transcript formats.
     Parsers return raw turns; this runs after any LLM attribution.
+    Drops ephemeral speaker_metadata before data reaches persistence.
     """
     from src.transcript.parsers import clean_speaker_name
+
+    # Drop ephemeral metadata (parser -> resolution only, not for DB)
+    transcript_data.pop("speaker_metadata", None)
 
     turns = transcript_data.get("turns", [])
     if not turns:
@@ -175,24 +181,33 @@ def _normalize_transcript(transcript_data: dict) -> dict:
 
 @activity.defn
 async def attribute_speakers(transcript_data: dict) -> dict:
-    """Attribute Unknown speaker turns using an LLM.
+    """Resolve speaker names deterministically, then attribute remaining
+    generic roles (Unknown, Host, Guest, etc.) using an LLM.
 
-    Receives the transcript_data dict from fetch_transcript, calls the LLM
-    to attribute any "Unknown" speaker turns based on content signals, then
-    returns the modified transcript_data with speakers filled in.
-
-    If no Unknown turns exist (e.g. Rev.com transcripts), returns unchanged.
+    Step 1: resolve_speakers() — fast, deterministic (cc_name mapping,
+            honorific stripping, token-overlap normalization).
+    Step 2: LLM attribution for turns that still have generic labels.
+    Step 3: _normalize_transcript() — merge same-speaker turns, rebuild
+            derived fields, drop ephemeral speaker_metadata.
     """
+    from src.transcript.speaker_resolution import resolve_speakers
+
+    # Step 1: Deterministic resolution (fast, no LLM)
+    transcript_data = resolve_speakers(transcript_data)
+
     turns = transcript_data.get("turns", [])
 
-    # Collect Unknown turn indices
+    # Generic role labels that need attribution just like "Unknown"
+    _GENERIC_ROLES = {"Unknown", "Host", "Guest", "Caller", "Reporter", "Moderator"}
+
+    # Collect turn indices that need attribution
     unknown_indices = [
-        i for i, t in enumerate(turns) if t.get("speaker") == "Unknown"
+        i for i, t in enumerate(turns) if t.get("speaker") in _GENERIC_ROLES
     ]
 
     if not unknown_indices:
         log.info(activity.logger, "attribution", "skip",
-                 "No Unknown turns — skipping speaker attribution")
+                 "No unattributed turns — skipping speaker attribution")
         return _normalize_transcript(transcript_data)
 
     log.info(activity.logger, "attribution", "start",
@@ -210,7 +225,7 @@ async def attribute_speakers(transcript_data: dict) -> dict:
 
     # Build known speaker list from named turns + transcript-level speakers
     # (C-SPAN extracts person names from HTML even when all cc_names are ">>")
-    skip = {"Unknown", "Narrator"}
+    skip = _GENERIC_ROLES | {"Narrator"}
     known_speakers: set[str] = set()
     for t in turns:
         speaker = t.get("speaker", "")
@@ -251,7 +266,7 @@ async def attribute_speakers(transcript_data: dict) -> dict:
         schema=AttributeSpeakersOutput,
         semantic_validator=_validator,
         max_retries=2,
-        max_tokens=4096,
+        max_tokens=16384,
         activity_name="attribute_speakers",
     )
 
@@ -259,7 +274,7 @@ async def attribute_speakers(transcript_data: dict) -> dict:
     attributed_indices: set[int] = set()
     for attr in output.attributions:
         idx = attr.turn_index
-        if 0 <= idx < len(turns) and turns[idx].get("speaker") == "Unknown":
+        if 0 <= idx < len(turns) and turns[idx].get("speaker") in _GENERIC_ROLES:
             if attr.speaker != "Unknown":
                 turns[idx]["speaker"] = attr.speaker
             attributed_indices.add(idx)
