@@ -58,9 +58,12 @@ Extract everything else — a downstream classifier decides what is checkable.
 
 ## How to Write thesis_statement
 
-For each claim, write a thesis_statement that:
+Use the transcript context, speaker descriptions, title, and surrounding \
+sentences (including Context sections) to resolve all references. Then \
+write a thesis_statement that:
 - Is NEUTRAL and DECONTEXTUALIZED (no pronouns, no "we", no "they")
-- Replaces ALL pronouns with specific entities
+- Replaces ALL pronouns with specific entities (use speaker names, \
+country names, organization names from context)
 - Could be understood by someone who hasn't read the transcript
 - Captures the complete assertion
 - Does NOT bundle multiple independent assertions into one claim
@@ -76,12 +79,20 @@ Valid reasons: "greeting", "filler", "rhetorical", "procedural", \
 Assign one topic label: economic, military, political, legal, social, \
 diplomatic, technological, environmental, health, or other.
 
+## Procedure
+
+Work through the sentences IN ORDER, starting from the first sentence in \
+the EXTRACT range and ending at the last. For each sentence, decide: is \
+this part of a factual claim, or not a claim? Add its index to the \
+appropriate list before moving to the next sentence.
+
 ## Output Rules
 
 1. Every sentence index in the EXTRACT range must appear exactly once
 2. Extract every factual claim — err on the side of MORE claims, not fewer
 3. [Section: ...] headers are editorial context, NOT spoken words
-4. Sentences in Context sections are for reference only — do not extract from them\
+4. Sentences in Context sections are provided for decontextualization — use \
+them to resolve pronouns and references, but do not extract claims from them\
 """
 
 # ---------------------------------------------------------------------------
