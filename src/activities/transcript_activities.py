@@ -40,6 +40,7 @@ async def fetch_transcript(url: str) -> dict:
     """
     from src.transcript.cspan import fetch_cspan_transcript, is_cspan_url
     from src.transcript.rev import fetch_rev_transcript, is_rev_url
+    from src.transcript.singjupost import fetch_singjupost_transcript, is_singjupost_url
 
     log.info(activity.logger, "fetch", "start", "Fetching transcript",
              url=url)
@@ -49,6 +50,8 @@ async def fetch_transcript(url: str) -> dict:
             td = await fetch_cspan_transcript(url)
         elif is_rev_url(url):
             td = await fetch_rev_transcript(url)
+        elif is_singjupost_url(url):
+            td = await fetch_singjupost_transcript(url)
         else:
             raise ValueError(f"Unsupported transcript URL: {url}")
     except Exception as e:

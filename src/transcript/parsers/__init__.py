@@ -145,4 +145,6 @@ def detect_format(url: str) -> str:
         return "cspan"
     if "rev.com" in url:
         return "rev"
+    if "singjupost.com" in url:
+        return "singjupost"
     return "rev"
