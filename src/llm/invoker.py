@@ -157,6 +157,7 @@ async def invoke_llm(
     max_retries: int = LLM_MAX_RETRIES,
     profile: LLMProfile = "general",
     max_tokens: int = 8192,
+    presence_penalty: float | None = None,
     semantic_validator: Optional[Callable[[T], tuple[bool, str]]] = None,
     activity_name: str = "invoke",
 ) -> T:
@@ -192,7 +193,7 @@ async def invoke_llm(
     for attempt in range(max_retries + 1):
         try:
             # Step 1: INVOKE (streaming with idle timeout)
-            llm = get_llm(profile=profile, max_tokens=max_tokens)
+            llm = get_llm(profile=profile, max_tokens=max_tokens, presence_penalty=presence_penalty)
             _t0 = time.monotonic()
             messages = [
                 SystemMessage(content=system_prompt),

@@ -55,8 +55,8 @@ LLM_RETRY_DELAY = 1
 # Transcript chunking (Phase 1)
 # ---------------------------------------------------------------------------
 
-TARGET_WORDS_PER_CHUNK = 2500
-OVERLAP_WORDS = 500
+TARGET_WORDS_PER_CHUNK = 1500
+OVERLAP_WORDS = 300
 
 # ---------------------------------------------------------------------------
 # Batch classification (between extraction and dedup)

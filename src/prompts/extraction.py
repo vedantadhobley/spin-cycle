@@ -5,8 +5,8 @@ speaker turns) and extracts EVERY verifiable factual claim with a verbatim
 original_quote from the speaker.
 
 Key design:
-- Extract every distinct claim, not micro-facts
-- Merge repetitions: same claim said twice → one claim
+- Extract every distinct claim, decompose sentences into independent assertions
+- Deduplication is handled downstream (embedding-based), NOT by the LLM
 - original_quote must be verbatim words from the transcript
 - Classification is deferred to a separate batch LLM phase (claim_classifier)
 """
@@ -29,10 +29,12 @@ distinct factual claim that speakers make. Be exhaustive — miss nothing.
 ## What Is a Claim?
 
 A claim is a factual assertion that could be checked against evidence. \
-Each claim should be the kind of thing a fact-checker would write ONE \
-article about. An event described with multiple details (dates, figures, \
-names) is ONE claim — do not split it into micro-facts. \
-If a speaker makes the same point multiple times, that is ONE claim.
+Two assertions that could independently be true or false are SEPARATE \
+claims, even if they appear in the same sentence.
+
+A single sentence often contains multiple claims buried in subordinate \
+clauses, causal phrases, and parenthetical asides. Decompose every \
+sentence — do not let a smaller claim hide inside a larger one.
 
 EXTRACT:
 - Quantitative claims (amounts, percentages, rankings)
@@ -49,12 +51,13 @@ Extract everything else — a downstream classifier decides what is checkable.
 
 ## Step 1 — Extract Claims
 
-Read every speaker turn carefully. For each distinct factual assertion, \
-write a thesis_statement that:
+Work through the transcript paragraph by paragraph. For each sentence, \
+extract every factual assertion as its own claim. Write a thesis_statement that:
 - Is NEUTRAL and DECONTEXTUALIZED (no pronouns, no "we", no "they")
 - Replaces ALL pronouns with specific entities
 - Could be understood by someone who hasn't read the transcript
-- Captures the FULL claim, not just one sentence of it
+- Captures the complete assertion (may need multiple sentences for context)
+- Does NOT bundle multiple independent assertions into one claim
 
 ## Step 2 — Copy Original Quote
 
@@ -67,12 +70,19 @@ the system verifies this programmatically.
 Assign one topic label: economic, military, political, legal, social, \
 diplomatic, technological, environmental, health, or other.
 
+## Step 4 — Verify Completeness
+
+Re-read the transcript sentence by sentence. For each sentence, check \
+that every factual assertion in it has its own claim — including those \
+in subordinate clauses and asides. Missing a claim is worse than \
+extracting too many.
+
 ## Output Rules
 
 1. [Section: ...] headers in the transcript are editorial context, NOT spoken words
-2. Extract every DISTINCT factual claim — do not skip claims, but do not \
-split one claim into micro-facts either
-3. Merge repetitions — same point said multiple times = ONE claim
+2. Extract every factual claim — err on the side of MORE claims, not fewer
+3. When in doubt whether two assertions are the same claim, extract both — \
+a downstream step handles deduplication
 4. Every claim needs a verbatim original_quote from the transcript
 5. If sections are marked "Context (do not extract claims from this section)", \
 only extract from the section marked for extraction\

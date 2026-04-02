@@ -31,6 +31,7 @@ logger = get_logger()
 
 _PROGRAM_ID_RE = re.compile(r"/(\d+)(?:\?|$)")
 _CSPAN_DOMAIN = re.compile(r"(?:^|\.)c-span\.org$", re.IGNORECASE)
+_GENERIC_SPEAKER_ID = re.compile(r"^spk_\d+$", re.IGNORECASE)
 
 # Module-level singleton
 _session: "CSpanSession | None" = None
@@ -321,14 +322,23 @@ async def fetch_cspan_transcript(url_or_id: str) -> TranscriptData:
         # C-SPAN provides speaker identity in two fields:
         #   speakername: actual name (e.g. "Mimi Geerges") — not always present
         #   cc_name: caption label (e.g. "HOST", "SEC. RUBIO", ">>")
-        # Prefer speakername when available; fall back to cc_name
-        speaker_raw = (part.get("speakername") or part.get("cc_name") or "").strip()
+        # Use both: prefer speakername when it's a real name, fall back to
+        # cc_name when speakername is absent or a generic ID (spk_0, spk_1)
+        speakername = (part.get("speakername") or "").strip()
+        cc_name = (part.get("cc_name") or "").strip()
+
+        if speakername and not _GENERIC_SPEAKER_ID.match(speakername):
+            speaker_raw = speakername
+        elif cc_name and cc_name != ">>" and not _GENERIC_SPEAKER_ID.match(cc_name):
+            speaker_raw = cc_name
+        else:
+            speaker_raw = ""
+
         text = (part.get("text") or "").strip()
         if not text:
             continue
 
-        # ">>" is a generic caption speaker-change marker
-        if speaker_raw in (">>", ""):
+        if not speaker_raw:
             speaker = "Unknown"
         else:
             speaker = speaker_raw  # raw label, resolution happens later

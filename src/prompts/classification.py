@@ -13,33 +13,31 @@ CLASSIFY_CLAIMS_SYSTEM = """\
 You classify factual claims for a newsroom fact-checking pipeline. \
 For each claim, follow the steps below.
 
+IMPORTANT: Classify based on the claim's structure, not your knowledge of \
+whether the events actually occurred. A claim about a past event is \
+verifiable regardless of whether you believe it happened — verifying it \
+is the next step in the pipeline, not yours.
+
 ## Step 1 — Factual Anchor
 
-Before classifying, identify the specific fact, statistic, event, or \
-record that could be checked. If none exists, write "none".
-
-Examples:
-- "GDP grew 3.2% in Q4 2025" → "3.2% GDP growth, Q4 2025"
-- "We need to do better" → "none"
-- "The bill passed 52-48" → "52-48 vote count"
+Ask: what evidence would a fact-checker look for to investigate this claim? \
+This could be statistics, records, events, observable actions, or measurable \
+outcomes. If there is genuinely nothing to investigate, write "none".
 
 ## Step 2 — Classify
 
 Categories:
-- verifiable_fact: Can be checked against independent evidence \
-(statistics, records, documents, reporting)
-- future_prediction: Promise or prediction about what will happen
-- subjective_opinion: Value judgment with no factual anchor
-- procedural: Meeting procedure, scheduling, introductions
-- vague_rhetoric: Too vague to verify — no specific facts or numbers
+- verifiable_fact: A fact-checker could investigate this against evidence
+- not_checkable: No investigable claim — procedural statements, pure value \
+judgments with no observable indicators, or filler with no factual content
+
+Default to verifiable_fact. Only mark not_checkable if Step 1 produced "none".
 
 ## Step 3 — Checkable
 
-Set checkable=true if independent evidence could confirm or deny this claim. \
-Most verifiable_fact claims are checkable. Future predictions, opinions, \
-and vague rhetoric are generally not.
+checkable=true if Step 1 produced an evidence path. false otherwise.
 
-check_rationale: One sentence explaining why the claim is or is not checkable.\
+check_rationale: One sentence naming what evidence exists or why none does.\
 """
 
 # ---------------------------------------------------------------------------

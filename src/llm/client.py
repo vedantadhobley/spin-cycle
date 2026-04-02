@@ -58,6 +58,7 @@ LLMProfile = Literal["general", "reasoning"]
 def get_llm(
     profile: LLMProfile = "general",
     max_tokens: int = 8192,
+    presence_penalty: float | None = None,
 ) -> ChatOpenAI:
     """Get the LLM client with Qwen3.5 recommended sampling.
 
@@ -65,8 +66,12 @@ def get_llm(
         profile: "general" for extraction/classification/routing,
             "reasoning" for decompose/judge/synthesize.
         max_tokens: Maximum output tokens. Default 8192.
+        presence_penalty: Override profile's presence_penalty.
+            Use 0 for exhaustive enumeration tasks (extraction)
+            where the default 1.5 suppresses repeated semantic tokens.
     """
     params = _PROFILES[profile]
+    pp = presence_penalty if presence_penalty is not None else params["presence_penalty"]
     client = ChatOpenAI(
         base_url=f"{LLAMA_URL}/v1",
         api_key="not-needed",
@@ -74,7 +79,7 @@ def get_llm(
         temperature=params["temperature"],
         max_tokens=max_tokens,
         top_p=params["top_p"],
-        presence_penalty=params["presence_penalty"],
+        presence_penalty=pp,
         extra_body={
             "chat_template_kwargs": {"enable_thinking": False},
             "top_k": params["top_k"],
@@ -82,5 +87,6 @@ def get_llm(
     )
     log.debug(logger, MODULE, "llm_init", f"LLM client created ({profile})",
               base_url=LLAMA_URL, model=MODEL,
-              temperature=params["temperature"], max_tokens=max_tokens)
+              temperature=params["temperature"], max_tokens=max_tokens,
+              presence_penalty=pp)
     return client

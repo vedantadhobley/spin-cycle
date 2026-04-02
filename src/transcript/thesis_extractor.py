@@ -349,6 +349,7 @@ async def extract_chunk(
         schema=ThesisExtractionOutput,
         semantic_validator=validate_thesis_extraction,
         max_tokens=16384,
+        presence_penalty=0,
         activity_name=f"extract_chunk_{chunk.chunk_index}",
     )
 

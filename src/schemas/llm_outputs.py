@@ -47,8 +47,7 @@ class ExtractedThesis(BaseModel):
         default="", description="Topic area: economic, military, political, legal, social, etc."
     )
     classification: Literal[
-        "verifiable_fact", "future_prediction",
-        "subjective_opinion", "procedural", "vague_rhetoric"
+        "verifiable_fact", "not_checkable"
     ] = Field(default="verifiable_fact")
     checkable: bool = Field(default=True)
     check_rationale: str = Field(default="")
@@ -68,13 +67,11 @@ class ClaimClassification(BaseModel):
     index: int
     factual_anchor: str = Field(
         default="",
-        description="The specific fact, number, or event that makes this "
-        "checkable — or 'none' if no factual anchor exists. "
-        "Identify this BEFORE classifying."
+        description="What evidence would a fact-checker look for? "
+        "'none' only if genuinely nothing to investigate."
     )
     classification: Literal[
-        "verifiable_fact", "future_prediction",
-        "subjective_opinion", "procedural", "vague_rhetoric"
+        "verifiable_fact", "not_checkable"
     ] = Field(default="verifiable_fact")
     checkable: bool = Field(default=True)
     check_rationale: str = Field(default="")
