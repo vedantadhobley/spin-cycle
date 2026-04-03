@@ -25,6 +25,7 @@ Today's date: {current_date}
 ## Your Task
 
 You receive numbered transcript sentences: [S42] Speaker: text
+
 For every sentence in the EXTRACT range, you must either:
 - Include its index in a claim's sentence_indices, OR
 - Include its index in not_claims
@@ -32,18 +33,9 @@ For every sentence in the EXTRACT range, you must either:
 A programmatic validator checks that every sentence is accounted for. \
 Missing sentences trigger a retry.
 
-## What Is a Claim?
+## What to Extract
 
-A claim is a factual assertion that could be checked against evidence. \
-Two assertions that could independently be true or false are SEPARATE \
-claims, even if they appear in the same sentence.
-
-A claim can span 1-3 consecutive sentences when they express a single \
-assertion (e.g. a sentence states a fact and the next gives a supporting \
-figure). Multi-assertion sentences become one claim entry — a downstream \
-step handles decomposition.
-
-EXTRACT:
+A claim is a factual assertion that could be checked against evidence:
 - Quantitative claims (amounts, percentages, rankings)
 - Historical events (operations, votes, agreements, dates)
 - Attribution (who said or did what)
@@ -53,31 +45,40 @@ EXTRACT:
 - Superlative claims (biggest, strongest, best, most)
 - Claims about past promises, commitments, or actions taken
 
-SKIP only greetings, pleasantries, and filler ("Thank you for being here"). \
-Extract everything else — a downstream classifier decides what is checkable.
+A claim can span 1-3 consecutive sentences when they express a single \
+assertion (e.g. a sentence states a fact and the next gives a supporting \
+figure). If a sentence contains multiple independent assertions, treat it \
+as one claim — a downstream step handles decomposition.
+
+## What to Skip (not_claims)
+
+- Greetings and pleasantries ("Thank you", "Good evening")
+- Filler and transitions ("Now let me turn to...", "As I was saying...")
+- Rhetorical questions and exclamations ("Can you believe it?")
+- Procedural statements ("Let's take a recess")
+- Applause, audience reactions
+
+When in doubt whether something is a claim, extract it — a downstream \
+classifier decides what is checkable.
 
 ## How to Write thesis_statement
 
-Use the transcript context, speaker descriptions, title, and surrounding \
-sentences (including Context sections) to resolve all references. Then \
-write a thesis_statement that:
+Use the transcript metadata (title, date, description), speaker \
+descriptions, and surrounding sentences (including Context sections) \
+to resolve all references. Then write a thesis_statement that:
 - Is NEUTRAL and DECONTEXTUALIZED (no pronouns, no "we", no "they")
-- Replaces ALL pronouns with specific entities (use speaker names, \
-country names, organization names from context)
+- Replaces ALL pronouns with specific entities (speaker names, countries, \
+organizations — use the metadata and context to identify them)
 - Could be understood by someone who hasn't read the transcript
-- Captures the complete assertion
-- Does NOT bundle multiple independent assertions into one claim
+- Captures the factual content, not the speaker's subjective framing \
+(e.g. "Iran's strategy was so obvious" → extract what the strategy was, \
+not the opinion that it was obvious)
 
 ## How to Write not_claims
 
 Group consecutive non-claim sentences when they share the same reason. \
 Valid reasons: "greeting", "filler", "rhetorical", "procedural", \
 "applause/reaction", "transition".
-
-## Topic
-
-Assign one topic label: economic, military, political, legal, social, \
-diplomatic, technological, environmental, health, or other.
 
 ## Procedure
 
@@ -89,10 +90,10 @@ appropriate list before moving to the next sentence.
 ## Output Rules
 
 1. Every sentence index in the EXTRACT range must appear exactly once
-2. Extract every factual claim — err on the side of MORE claims, not fewer
-3. [Section: ...] headers are editorial context, NOT spoken words
-4. Sentences in Context sections are provided for decontextualization — use \
-them to resolve pronouns and references, but do not extract claims from them\
+2. Assign one topic per claim: economic, military, political, legal, \
+social, diplomatic, technological, environmental, health, or other
+3. Sentences in Context sections are provided for decontextualization — \
+use them to resolve pronouns and references, but do not extract from them\
 """
 
 # ---------------------------------------------------------------------------
@@ -104,7 +105,7 @@ Extract every factual claim from sentences S{target_range_start} through S{targe
 
 {numbered_sentences}
 
-## Context
+## Transcript Metadata
 {context_note}
 
 ## Speaker Descriptions
