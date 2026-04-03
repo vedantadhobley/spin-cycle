@@ -57,7 +57,7 @@ LLMProfile = Literal["general", "reasoning"]
 
 def get_llm(
     profile: LLMProfile = "general",
-    max_tokens: int = 8192,
+    max_tokens: int = 16384,
     presence_penalty: float | None = None,
 ) -> ChatOpenAI:
     """Get the LLM client with Qwen3.5 recommended sampling.

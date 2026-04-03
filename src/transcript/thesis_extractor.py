@@ -100,18 +100,12 @@ def sentencize_transcript(turns: list[SpeakerTurn]) -> list[NumberedSentence]:
 
 
 # ---------------------------------------------------------------------------
-# Chunking (sentence-based)
+# Chunking (sentence-count-based)
 # ---------------------------------------------------------------------------
 
-from src.config import TARGET_WORDS_PER_CHUNK, OVERLAP_WORDS
-
-
-def _word_count(text: str) -> int:
-    return len(text.split())
-
-
-def _sentence_words(sentence: NumberedSentence) -> int:
-    return _word_count(sentence.text)
+from src.config import (
+    TARGET_SENTENCES_PER_CHUNK, OVERLAP_SENTENCES, SPEAKER_CUTOFF_WINDOW,
+)
 
 
 def build_sentence_chunks(
@@ -120,17 +114,20 @@ def build_sentence_chunks(
 ) -> list[SentenceChunk]:
     """Build overlapping chunks from numbered sentences.
 
-    Accumulates sentences by word budget. Overlap is whole sentences
-    (not partial words). Small transcripts → single chunk.
+    Accumulates by sentence count (~45 target). Prefers to cut at speaker
+    boundaries — if the target cutoff lands mid-speaker-turn, extends up
+    to SPEAKER_CUTOFF_WINDOW sentences to hit the next speaker change.
+    Absorbs small remainders (< OVERLAP_SENTENCES) into the last chunk.
     """
     logger = logger or _default_logger
-    total_words = sum(_sentence_words(s) for s in sentences)
 
     if not sentences:
         return []
 
+    n = len(sentences)
+
     # Small transcript: single chunk, no context markers
-    if total_words <= TARGET_WORDS_PER_CHUNK:
+    if n <= TARGET_SENTENCES_PER_CHUNK:
         text = _format_sentences_numbered(sentences)
         return [SentenceChunk(
             target_sentences=sentences,
@@ -142,47 +139,35 @@ def build_sentence_chunks(
             total_chunks=1,
         )]
 
-    # Build chunks with word-budget accumulation
+    # Build chunks with sentence-count accumulation
     chunks: list[SentenceChunk] = []
     pos = 0
-    n = len(sentences)
 
     while pos < n:
-        # Accumulate target sentences up to word budget
-        target_end = pos
-        words_acc = 0
-        while target_end < n:
-            next_words = _sentence_words(sentences[target_end])
-            if words_acc > 0 and words_acc + next_words > TARGET_WORDS_PER_CHUNK:
-                break
-            words_acc += next_words
-            target_end += 1
+        target_end = min(pos + TARGET_SENTENCES_PER_CHUNK, n)
 
-        # Absorb small remainder
-        remaining_words = sum(
-            _sentence_words(sentences[i]) for i in range(target_end, n)
-        )
-        if 0 < remaining_words <= OVERLAP_WORDS:
+        # Speaker-turn-aware cutoff: if we landed mid-speaker, extend up to
+        # SPEAKER_CUTOFF_WINDOW sentences to reach the next speaker boundary
+        if target_end < n:
+            current_speaker = sentences[target_end - 1].speaker
+            for i in range(target_end, min(target_end + SPEAKER_CUTOFF_WINDOW, n)):
+                if sentences[i].speaker != current_speaker:
+                    target_end = i
+                    break
+
+        # Absorb small remainder into this chunk
+        remaining = n - target_end
+        if 0 < remaining <= OVERLAP_SENTENCES:
             target_end = n
 
         target = sentences[pos:target_end]
 
-        # Collect overlap context (whole sentences)
-        ctx_before: list[NumberedSentence] = []
-        ctx_words = 0
-        scan = pos - 1
-        while scan >= 0 and ctx_words < OVERLAP_WORDS:
-            ctx_words += _sentence_words(sentences[scan])
-            ctx_before.insert(0, sentences[scan])
-            scan -= 1
+        # Overlap context: whole sentences before and after
+        ctx_start = max(0, pos - OVERLAP_SENTENCES)
+        ctx_before = sentences[ctx_start:pos]
 
-        ctx_after: list[NumberedSentence] = []
-        ctx_words = 0
-        scan = target_end
-        while scan < n and ctx_words < OVERLAP_WORDS:
-            ctx_words += _sentence_words(sentences[scan])
-            ctx_after.append(sentences[scan])
-            scan += 1
+        ctx_end = min(n, target_end + OVERLAP_SENTENCES)
+        ctx_after = sentences[target_end:ctx_end]
 
         chunks.append(SentenceChunk(
             target_sentences=target,
@@ -221,12 +206,13 @@ def build_sentence_chunks(
                 )
             chunk.full_text = "\n\n".join(parts)
 
+    total_words = sum(len(s.text.split()) for s in sentences)
     log.info(logger, MODULE, "chunks_built",
              "Sentence chunks built",
              chunk_count=len(chunks),
-             sentence_count=len(sentences),
+             sentence_count=n,
              total_words=total_words,
-             chunk_words=[sum(_sentence_words(s) for s in c.target_sentences) for c in chunks])
+             chunk_sentences=[len(c.target_sentences) for c in chunks])
 
     return chunks
 
@@ -254,25 +240,38 @@ def _convert_to_theses(
     output: SentenceExtractionOutput,
     sentences_lookup: dict[int, NumberedSentence],
 ) -> list[ExtractedThesis]:
-    """Convert sentence-level extraction output to ExtractedThesis format.
+    """Convert one-per-sentence extraction output to ExtractedThesis format.
 
-    Derives original_quote by joining the text of referenced sentence indices.
+    Groups dispositions by claim_group, looks up the corresponding
+    ClaimGroupThesis, and derives original_quote from sentence texts.
     """
+    # Index groups by claim_group for fast lookup
+    group_lookup = {g.claim_group: g for g in output.groups}
+
+    # Collect sentence indices per claim_group
+    group_indices: dict[int, list[int]] = {}
+    for d in output.dispositions:
+        if d.claim_group > 0:
+            group_indices.setdefault(d.claim_group, []).append(d.index)
+
     theses = []
-    for claim in output.claims:
+    for gid, indices in sorted(group_indices.items()):
+        group = group_lookup.get(gid)
+        if not group:
+            continue
+
         # Build original_quote from sentence texts
         quote_parts = []
-        for idx in sorted(claim.sentence_indices):
+        for idx in sorted(indices):
             sent = sentences_lookup.get(idx)
             if sent:
                 quote_parts.append(sent.text)
         original_quote = " ".join(quote_parts)
 
         theses.append(ExtractedThesis(
-            thesis_statement=claim.thesis_statement,
-            speakers=claim.speakers,
+            thesis_statement=group.thesis_statement,
+            speakers=group.speakers,
             original_quote=original_quote,
-            topic=claim.topic,
         ))
     return theses
 
@@ -330,31 +329,33 @@ async def extract_chunk(
         target_range=chunk.target_range,
     )
 
+    start = chunk.target_range[0]
     output = await invoke_llm(
         system_prompt=SENTENCE_EXTRACTION_SYSTEM.format(
             current_date=date.today().isoformat(),
         ),
         user_prompt=SENTENCE_EXTRACTION_USER.format(
             numbered_sentences=chunk.full_text,
-            target_range_start=chunk.target_range[0],
+            target_range_start=start,
             target_range_end=chunk.target_range[1] - 1,
             context_note=context_note,
             speaker_descriptions=_build_speaker_desc(enriched_speakers),
+            next_index=start + 1,
+            next_next_index=start + 2,
         ),
         schema=SentenceExtractionOutput,
         semantic_validator=coverage_validator,
         max_tokens=16384,
-        presence_penalty=0,
         activity_name=f"extract_chunk_{chunk.chunk_index}",
     )
 
     theses = _convert_to_theses(output, sentences_lookup)
 
+    not_claim_count = sum(1 for d in output.dispositions if d.disposition == "not_claim")
     log.info(logger, MODULE, "chunk_extracted",
              "Claims extracted from sentence chunk",
              count=len(theses),
              chunk_index=chunk.chunk_index,
-             not_claims=len(output.not_claims),
-             topics=[t.topic for t in theses])
+             not_claims=not_claim_count)
 
     return theses

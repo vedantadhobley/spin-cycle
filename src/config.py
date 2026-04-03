@@ -42,11 +42,9 @@ LLM_REASONING_PRESENCE_PENALTY = 2.0
 
 LLM_MAX_RETRIES = 2
 
-# Per-step max_tokens (extraction/review/judge need large output windows)
-EXTRACTION_MAX_TOKENS = 16384
-DECOMPOSE_MAX_TOKENS = 16384
-JUDGE_MAX_TOKENS = 16384
-SYNTHESIZE_MAX_TOKENS = 16384
+# Max output tokens for all LLM calls. Set once, used everywhere.
+# Adjust if the local model's --ctx-size or available memory changes.
+LLM_MAX_TOKENS = 16384
 
 # Retry pause between LLM attempts (seconds)
 LLM_RETRY_DELAY = 1
@@ -55,15 +53,15 @@ LLM_RETRY_DELAY = 1
 # Transcript chunking (Phase 1)
 # ---------------------------------------------------------------------------
 
-TARGET_WORDS_PER_CHUNK = 1500
-OVERLAP_WORDS = 300
+TARGET_SENTENCES_PER_CHUNK = 45   # ~45 sentences — well within 10B active model's reliable range
+OVERLAP_SENTENCES = 15            # context sentences before/after target range
+SPEAKER_CUTOFF_WINDOW = 5        # max sentences to extend past target to hit a speaker boundary
 
 # ---------------------------------------------------------------------------
 # Batch classification (between extraction and dedup)
 # ---------------------------------------------------------------------------
 
 CLASSIFY_BATCH_SIZE = 50       # claims per classification LLM call
-CLASSIFY_MAX_TOKENS = 4096    # generous for ~50 claims × 25 tokens each
 
 # ---------------------------------------------------------------------------
 # Embedding-based dedup (Phase 2)

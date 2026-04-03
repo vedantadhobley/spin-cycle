@@ -62,36 +62,25 @@ class ThesisExtractionOutput(BaseModel):
 # SENTENCE-LEVEL EXTRACTION OUTPUT (forced accountability)
 # =============================================================================
 
-class SentenceClaim(BaseModel):
-    """A claim extracted from one or more numbered transcript sentences."""
-    sentence_indices: list[int] = Field(
-        ..., description="Global sentence indices this claim spans, e.g. [37, 38]"
-    )
-    thesis_statement: str = Field(
-        ..., description="Neutral, decontextualized statement of the claim"
-    )
-    speakers: list[str] = Field(
-        default_factory=list, description="Who advances this claim"
-    )
-    topic: str = Field(
-        default="", description="Topic area: economic, military, political, legal, social, etc."
-    )
+class SentenceDisposition(BaseModel):
+    """One entry per target sentence — claim or not_claim."""
+    index: int
+    disposition: Literal["claim", "not_claim"]
+    claim_group: int = 0       # 0 = not_claim, 1+ = claim group
+    not_claim_reason: str = ""  # greeting, interjection, procedural, applause/reaction
 
 
-class SentenceNotClaim(BaseModel):
-    """Sentences explicitly marked as not containing a claim."""
-    sentence_indices: list[int] = Field(
-        ..., description="Global sentence indices, can group consecutive: [40, 41, 42]"
-    )
-    reason: str = Field(
-        ..., description="Why not a claim: greeting, filler, rhetorical, procedural"
-    )
+class ClaimGroupThesis(BaseModel):
+    """Thesis for one claim group."""
+    claim_group: int
+    thesis_statement: str
+    speakers: list[str] = Field(default_factory=list)
 
 
 class SentenceExtractionOutput(BaseModel):
     """Output from sentence-level forced extraction."""
-    claims: list[SentenceClaim] = Field(default_factory=list)
-    not_claims: list[SentenceNotClaim] = Field(default_factory=list)
+    dispositions: list[SentenceDisposition] = Field(default_factory=list)
+    groups: list[ClaimGroupThesis] = Field(default_factory=list)
 
 
 # =============================================================================
@@ -111,6 +100,11 @@ class ClaimClassification(BaseModel):
     ] = Field(default="verifiable_fact")
     checkable: bool = Field(default=True)
     check_rationale: str = Field(default="")
+    topic: str = Field(
+        default="",
+        description="Topic area: economic, military, political, legal, social, "
+        "diplomatic, technological, environmental, health, or other"
+    )
 
 
 class ClassifyClaimsOutput(BaseModel):

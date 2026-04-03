@@ -25,6 +25,7 @@ from src.llm.client import get_llm, LLMProfile
 from src.llm.parser import extract_json, JSONExtractionError
 from src.config import (
     LLM_MAX_RETRIES,
+    LLM_MAX_TOKENS,
     LLM_RETRY_DELAY,
 )
 from src.utils.logging import log, get_logger
@@ -156,7 +157,7 @@ async def invoke_llm(
     *,
     max_retries: int = LLM_MAX_RETRIES,
     profile: LLMProfile = "general",
-    max_tokens: int = 8192,
+    max_tokens: int = LLM_MAX_TOKENS,
     presence_penalty: float | None = None,
     semantic_validator: Optional[Callable[[T], tuple[bool, str]]] = None,
     activity_name: str = "invoke",

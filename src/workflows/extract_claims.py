@@ -119,6 +119,17 @@ class ExtractClaimsWorkflow:
                      transcript_id=transcript_id,
                      claim_count=len(tc_ids))
 
+        # Return deduped theses to keep indices in sync with tc_ids
+        if dupes_dropped:
+            seen_texts: set[str] = set()
+            deduped_theses = []
+            for t in all_theses:
+                text = t["thesis_statement"]
+                if text not in seen_texts:
+                    seen_texts.add(text)
+                    deduped_theses.append(t)
+            all_theses = deduped_theses
+
         return {
             "all_theses": all_theses,
             "tc_ids": tc_ids,
@@ -145,7 +156,6 @@ def _tag_theses_for_storage(all_theses: list[dict]) -> list[dict]:
             "speaker": (
                 t["speakers"][0] if t.get("speakers") else "Unknown"
             ),
-            "topic": t.get("topic"),
             "worth_checking": True,
             "is_duplicate": False,
         })

@@ -85,7 +85,7 @@ ThesisExtractionOutput
 - Schema: `src/schemas/llm_outputs.py` — `ClassifyClaimsOutput`, `ClaimClassification`
 - Activity: `src/activities/transcript_activities.py` — `classify_claims_activity`
 
-**Temperature**: 0.7 (general profile). **Retries**: 2. **Max tokens**: `CLASSIFY_MAX_TOKENS` (from config).
+**Temperature**: 0.7 (general profile). **Retries**: 2. **Max tokens**: 8192 (default).
 
 **Placeholders**: `{claims_list}` (numbered list of thesis statements)
 

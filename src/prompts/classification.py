@@ -37,7 +37,12 @@ Default to verifiable_fact. Only mark not_checkable if Step 1 produced "none".
 
 checkable=true if Step 1 produced an evidence path. false otherwise.
 
-check_rationale: One sentence naming what evidence exists or why none does.\
+check_rationale: One sentence naming what evidence exists or why none does.
+
+## Step 4 — Topic
+
+Assign one topic: economic, military, political, legal, social, diplomatic, \
+technological, environmental, health, or other.\
 """
 
 # ---------------------------------------------------------------------------
@@ -58,7 +63,8 @@ Return JSON:
       "factual_anchor": "Budget figures for FY2026",
       "classification": "verifiable_fact",
       "checkable": true,
-      "check_rationale": "Budget figures can be verified against public records."
+      "check_rationale": "Budget figures can be verified against public records.",
+      "topic": "economic"
     }}
   ]
 }}\

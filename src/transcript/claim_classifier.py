@@ -7,7 +7,6 @@ no transcript context needed.
 
 from __future__ import annotations
 
-from src.config import CLASSIFY_MAX_TOKENS
 from src.llm import invoke_llm
 from src.prompts.classification import CLASSIFY_CLAIMS_SYSTEM, CLASSIFY_CLAIMS_USER
 from src.schemas.llm_outputs import ClassifyClaimsOutput
@@ -44,7 +43,6 @@ async def classify_claims_batch(claims: list[dict], logger=None) -> list[dict]:
         system_prompt=CLASSIFY_CLAIMS_SYSTEM,
         user_prompt=CLASSIFY_CLAIMS_USER.format(claims_list=claims_list),
         schema=ClassifyClaimsOutput,
-        max_tokens=CLASSIFY_MAX_TOKENS,
         activity_name="classify_claims",
     )
 
@@ -56,6 +54,7 @@ async def classify_claims_batch(claims: list[dict], logger=None) -> list[dict]:
             "classification": c.classification,
             "checkable": c.checkable,
             "check_rationale": c.check_rationale,
+            "topic": c.topic,
         }
 
     # Apply classifications to claims, falling back to defaults

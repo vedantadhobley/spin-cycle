@@ -610,6 +610,8 @@ async def update_transcript_claims_classification(
             tc.checkability_rationale = u.get("checkability_rationale")
             if "factual_anchor" in u:
                 tc.factual_anchor = u.get("factual_anchor")
+            if u.get("topic"):
+                tc.topic = u["topic"]
         await session.commit()
 
     log.info(activity.logger, "classify", "updated",

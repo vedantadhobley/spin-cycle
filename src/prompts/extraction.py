@@ -1,13 +1,14 @@
 """Prompts for sentence-level transcript claim extraction (Phase 1).
 
-The extraction LLM receives numbered transcript sentences and must account
-for EVERY sentence — either extract a claim from it or mark it "not a claim".
-A programmatic coverage validator checks that all sentence indices are covered.
+The extraction LLM receives numbered transcript sentences and must produce
+one disposition per sentence — either "claim" or "not_claim". Multi-sentence
+claims share a claim_group integer; theses are written once per group.
 
 Key design:
 - Sentences are globally numbered [S0], [S1], ..., [Sn]
-- Each sentence appears in exactly ONE place: a claim or not_claims
-- A claim can span 1-3 consecutive sentences
+- Each sentence gets exactly one disposition entry (sequential, ordered)
+- claim_group 0 = not_claim; 1+ = claim group ID
+- Consecutive sentences with same claim_group = multi-sentence claim
 - original_quote is derived programmatically from sentence text (not LLM output)
 - Classification is deferred to a separate batch LLM phase (claim_classifier)
 """
@@ -17,8 +18,8 @@ Key design:
 # ---------------------------------------------------------------------------
 
 SENTENCE_EXTRACTION_SYSTEM = """\
-You are a fact-check analyst extracting verifiable factual claims from \
-a transcript so a newsroom can verify them.
+You are a fact-check analyst extracting claims from a transcript so a \
+newsroom can verify them.
 
 Today's date: {current_date}
 
@@ -26,74 +27,53 @@ Today's date: {current_date}
 
 You receive numbered transcript sentences: [S42] Speaker: text
 
-For every sentence in the EXTRACT range, you must either:
-- Include its index in a claim's sentence_indices, OR
-- Include its index in not_claims
+For every sentence in the EXTRACT range, emit one disposition object \
+with "claim" or "not_claim". A programmatic validator checks that every \
+sentence has exactly one entry. Missing or duplicate entries trigger a retry.
 
-A programmatic validator checks that every sentence is accounted for. \
-Missing sentences trigger a retry.
+## The Decision Rule
 
-## What to Extract
+A sentence is "claim" if it makes any assertion about the world that \
+could be checked — a fact, characterization, number, attribution, \
+comparison, or description of events, capabilities, or intent. \
+Sentence length does not matter.
 
-A claim is a factual assertion that could be checked against evidence:
-- Quantitative claims (amounts, percentages, rankings)
-- Historical events (operations, votes, agreements, dates)
-- Attribution (who said or did what)
-- Policy descriptions (what a law does, what a program costs)
-- Comparisons with specific metrics
-- Causal claims (X caused Y)
-- Superlative claims (biggest, strongest, best, most)
-- Claims about past promises, commitments, or actions taken
+A sentence is "not_claim" ONLY if it contains zero propositional \
+content — pure greetings, applause, procedural mechanics, or \
+contentless interjections.
 
-A claim can span 1-3 consecutive sentences when they express a single \
-assertion (e.g. a sentence states a fact and the next gives a supporting \
-figure). If a sentence contains multiple independent assertions, treat it \
-as one claim — a downstream step handles decomposition.
-
-## What to Skip (not_claims)
-
-- Greetings and pleasantries ("Thank you", "Good evening")
-- Filler and transitions ("Now let me turn to...", "As I was saying...")
-- Rhetorical questions and exclamations ("Can you believe it?")
-- Procedural statements ("Let's take a recess")
-- Applause, audience reactions
-
-When in doubt whether something is a claim, extract it — a downstream \
-classifier decides what is checkable.
-
-## How to Write thesis_statement
-
-Use the transcript metadata (title, date, description), speaker \
-descriptions, and surrounding sentences (including Context sections) \
-to resolve all references. Then write a thesis_statement that:
-- Is NEUTRAL and DECONTEXTUALIZED (no pronouns, no "we", no "they")
-- Replaces ALL pronouns with specific entities (speaker names, countries, \
-organizations — use the metadata and context to identify them)
-- Could be understood by someone who hasn't read the transcript
-- Captures the factual content, not the speaker's subjective framing \
-(e.g. "Iran's strategy was so obvious" → extract what the strategy was, \
-not the opinion that it was obvious)
-
-## How to Write not_claims
-
-Group consecutive non-claim sentences when they share the same reason. \
-Valid reasons: "greeting", "filler", "rhetorical", "procedural", \
-"applause/reaction", "transition".
+A downstream classifier decides what is worth checking. Your job is \
+to not lose factual content. When in doubt, "claim".
 
 ## Procedure
 
-Work through the sentences IN ORDER, starting from the first sentence in \
-the EXTRACT range and ending at the last. For each sentence, decide: is \
-this part of a factual claim, or not a claim? Add its index to the \
-appropriate list before moving to the next sentence.
+For each sentence from S{{start}} through S{{end}}, in order:
+1. Read the sentence.
+2. Does it assert anything about the world? → "claim". \
+Zero propositional content? → "not_claim".
+3. If "claim": does it continue the same assertion as the previous \
+sentence? Use the same claim_group. Otherwise increment claim_group.
+4. Emit the disposition and move to the next sentence.
+
+After all dispositions, write one entry in "groups" per unique \
+claim_group with thesis_statement, speakers, and topic.
+
+## How to Write thesis_statement
+
+Use the transcript metadata, speaker descriptions, and surrounding \
+sentences (including Context sections) to resolve all references:
+- NEUTRAL and DECONTEXTUALIZED — no pronouns, no "we", no "they"
+- Replace ALL pronouns with specific entities
+- Understandable by someone who hasn't read the transcript
+- Extract the checkable kernel from opinion-laden language
 
 ## Output Rules
 
-1. Every sentence index in the EXTRACT range must appear exactly once
-2. Assign one topic per claim: economic, military, political, legal, \
-social, diplomatic, technological, environmental, health, or other
-3. Sentences in Context sections are provided for decontextualization — \
-use them to resolve pronouns and references, but do not extract from them\
+1. "dispositions" has exactly one entry per sentence in the EXTRACT \
+range, in order
+2. claim_group 0 = not_claim; 1+ = claim group (increment for new claims)
+3. Context sections are for reference only — do not emit dispositions \
+for them\
 """
 
 # ---------------------------------------------------------------------------
@@ -113,16 +93,14 @@ Extract every factual claim from sentences S{target_range_start} through S{targe
 
 Return JSON:
 {{
-  "claims": [
-    {{
-      "sentence_indices": [37, 38],
-      "thesis_statement": "Neutral, decontextualized claim statement",
-      "speakers": ["Speaker Name"],
-      "topic": "military"
-    }}
+  "dispositions": [
+    {{"index": {target_range_start}, "disposition": "claim", "claim_group": 1}},
+    {{"index": {next_index}, "disposition": "claim", "claim_group": 1}},
+    {{"index": {next_next_index}, "disposition": "claim", "claim_group": 2}}
   ],
-  "not_claims": [
-    {{"sentence_indices": [40], "reason": "filler"}}
+  "groups": [
+    {{"claim_group": 1, "thesis_statement": "Decontextualized claim statement", "speakers": ["Speaker Name"]}},
+    {{"claim_group": 2, "thesis_statement": "Another claim statement", "speakers": ["Speaker Name"]}}
   ]
 }}\
 """

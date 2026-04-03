@@ -87,6 +87,8 @@ class ClassifyAndDedupWorkflow:
                     )
                     if "factual_anchor" in c:
                         all_theses[idx]["factual_anchor"] = c["factual_anchor"]
+                    if c.get("topic"):
+                        all_theses[idx]["topic"] = c["topic"]
 
         await asyncio.gather(*(
             classify_batch(bs, b) for bs, b in batches
@@ -103,6 +105,7 @@ class ClassifyAndDedupWorkflow:
                         "checkable": t.get("checkable"),
                         "checkability_rationale": t.get("check_rationale", ""),
                         "factual_anchor": t.get("factual_anchor"),
+                        "topic": t.get("topic", ""),
                     })
             await workflow.execute_activity(
                 update_transcript_claims_classification,
