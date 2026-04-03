@@ -579,7 +579,7 @@ flowchart TD
 
     PIPE --> FETCH["FetchAndStoreWorkflow\n(C-SPAN Playwright / raw text parser\n→ store + Wikidata speaker enrichment)"]
 
-    FETCH --> EXTRACT["ExtractClaimsWorkflow\n(build_chunks → extract_chunk_activity × N\nsemaphore=2, parallel pairs → INSERT once)"]
+    FETCH --> EXTRACT["ExtractClaimsWorkflow\n(build_chunks → Pass 1: group+classify × N\n→ Pass 2: context inject × N\nsemaphore=2, parallel pairs → INSERT once)"]
 
     EXTRACT --> CLASSIFY["ClassifyAndDedupWorkflow\n(batch classify → UPDATE\n→ per-speaker embedding dedup → UPDATE)"]
 
@@ -648,7 +648,7 @@ Multi-member dedup clusters get a synthesized overarching claim via LLM. Single-
 | `src/transcript/parsers/__init__.py` | `SpeakerTurn`, `TranscriptData`, `normalize_turns()` |
 | `src/transcript/parsers/raw_text.py` | Raw text → `SpeakerTurn` list (editorial headers preserved) |
 | `src/transcript/cspan.py` | C-SPAN Playwright fetcher → `SpeakerTurn` list |
-| `src/transcript/thesis_extractor.py` | `build_chunks()`, `extract_chunk()`, `_validate_quotes_in_target()` |
+| `src/transcript/thesis_extractor.py` | `build_sentence_chunks()`, `extract_dispositions()`, `inject_context()`, `_build_theses()` |
 | `src/transcript/claim_classifier.py` | `classify_claims_batch()` — rubric-based checkability classification |
 | `src/transcript/claim_dedup.py` | `dedup_speaker_claims()` — embedding-based per-speaker dedup |
 | `src/transcript/claim_synthesizer.py` | `synthesize_claim()` — per-group overarching claim |

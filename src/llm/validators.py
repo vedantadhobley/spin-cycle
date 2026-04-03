@@ -23,7 +23,8 @@ from src.schemas.llm_outputs import (
     ThesisExtractionOutput,
     SynthesizedClaim,
     AttributeSpeakersOutput,
-    SentenceExtractionOutput,
+    GroupingOutput,
+    ContextInjectionOutput,
 )
 from src.utils.logging import log, get_logger
 
@@ -300,69 +301,73 @@ def validate_thesis_extraction(output: ThesisExtractionOutput) -> tuple[bool, st
     return True, ""
 
 
-def _downgrade_group(output: SentenceExtractionOutput, group_id: int) -> None:
-    """Downgrade all dispositions in a claim group to not_claim."""
-    for d in output.dispositions:
-        if d.claim_group == group_id:
-            d.disposition = "not_claim"
-            d.claim_group = 0
-            d.not_claim_reason = "downgraded"
-    output.groups = [g for g in output.groups if g.claim_group != group_id]
-
-
-def validate_sentence_extraction(
-    output: SentenceExtractionOutput,
+def validate_grouping(
+    output: GroupingOutput,
     target_range: tuple[int, int],
 ) -> tuple[bool, str]:
-    """Validate one-per-sentence extraction output.
+    """Validate Pass 1 grouping + disposition output.
 
-    The schema structurally prevents most old problems (non-consecutive,
-    cross-claim overlap, grouped skipping). Three checks remain:
-
-    1. Index coverage: every target index present, no dupes, no OOR
-    2. Group integrity: every claim_group > 0 has a matching thesis
-    3. Thesis quality: short thesis / no speakers → downgrade to not_claim
+    1. Sentence coverage: every target index has exactly one entry, no dupes, no OOR
+    2. Group integrity: every group number in sentences has a matching entry in groups
+    3. Speaker check: claim groups must have at least one speaker — downgrade if missing
     """
     expected = set(range(target_range[0], target_range[1]))
 
-    # --- Check 1: Index coverage ---
+    # --- Check 1: Sentence coverage ---
     seen: set[int] = set()
-    for d in output.dispositions:
-        if d.index not in expected:
-            # Strip out-of-range (context bleed) — fixable
-            continue
-        if d.index in seen:
-            return False, f"Duplicate disposition for index {d.index}"
-        seen.add(d.index)
+    for s in output.sentences:
+        if s.index not in expected:
+            continue  # OOR — will be stripped
+        if s.index in seen:
+            return False, f"Duplicate sentence entry for index {s.index}"
+        seen.add(s.index)
 
     missing = expected - seen
     if missing:
         return False, f"Missing sentence indices: {sorted(missing)}"
 
-    # Strip out-of-range dispositions in place
-    output.dispositions = [d for d in output.dispositions if d.index in expected]
+    # Strip out-of-range entries in place
+    output.sentences = [s for s in output.sentences if s.index in expected]
 
     # --- Check 2: Group integrity ---
-    claim_group_ids = {d.claim_group for d in output.dispositions if d.claim_group > 0}
-    thesis_group_ids = {g.claim_group for g in output.groups}
-    orphaned = claim_group_ids - thesis_group_ids
-    if orphaned:
-        return False, f"Claim groups without thesis entry: {sorted(orphaned)}"
+    sentence_groups = {s.group for s in output.sentences}
+    group_lookup = {g.group: g for g in output.groups}
+    missing_groups = sentence_groups - set(group_lookup.keys())
+    if missing_groups:
+        return False, f"Groups referenced in sentences but missing from groups list: {sorted(missing_groups)}"
 
-    # --- Fix 3: Thesis quality — programmatic downgrade ---
-    for group in list(output.groups):
-        if len(group.thesis_statement.strip()) < 15:
+    # --- Fix 3: Speaker check — downgrade claim groups without speakers ---
+    for g in output.groups:
+        if g.disposition == "claim" and not g.speakers:
             log.warning(logger, MODULE, "group_downgraded",
-                        "Downgraded group with short thesis",
-                        claim_group=group.claim_group,
-                        thesis=group.thesis_statement[:60])
-            _downgrade_group(output, group.claim_group)
-            continue
-        if not group.speakers:
-            log.warning(logger, MODULE, "group_downgraded",
-                        "Downgraded group with no speakers",
-                        claim_group=group.claim_group)
-            _downgrade_group(output, group.claim_group)
+                        "Downgraded claim group with no speakers to not_claim",
+                        group=g.group)
+            g.disposition = "not_claim"
+            g.reason = "downgraded: no speakers"
+
+    return True, ""
+
+
+def validate_context_injection(
+    output: ContextInjectionOutput,
+    expected_groups: list[int],
+) -> tuple[bool, str]:
+    """Validate Pass 2 context injection output.
+
+    1. Every expected group has a matching entry in output.claims
+    2. Each decontextualized_statement meets minimum length (15 chars)
+    """
+    result_groups = {c.group for c in output.claims}
+    missing = set(expected_groups) - result_groups
+    if missing:
+        return False, f"Missing context-injected groups: {sorted(missing)}"
+
+    for c in output.claims:
+        if len(c.decontextualized_statement.strip()) < 15:
+            return False, (
+                f"Group {c.group} decontextualized_statement too short "
+                f"(<15 chars): '{c.decontextualized_statement}'"
+            )
 
     return True, ""
 

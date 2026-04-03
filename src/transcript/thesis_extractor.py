@@ -1,17 +1,20 @@
-"""Sentence-level claim extraction from parsed transcripts (Phase 1).
+"""Two-pass claim extraction from parsed transcripts (Phase 1).
 
 Takes a TranscriptData (from parser registry) and extracts every verifiable
-factual claim via sentence-level forced accountability.
+factual claim via two focused LLM passes:
+
+  Pass 1 (Grouping): Group sentences by semantic continuity, label claim/not_claim.
+  Pass 2 (Context Injection): Resolve pronouns/references in claim groups.
 
 Flow:
   SpeakerTurn[] → sentencize → NumberedSentence[] → build_sentence_chunks
-  → SentenceChunk[] → [per chunk] extract_chunk (LLM + coverage validator)
-  → SentenceExtractionOutput → convert_to_theses → ExtractedThesis[]
+  → SentenceChunk[] → [per chunk] extract_dispositions (Pass 1)
+  → GroupingOutput → [per chunk, claim groups only] inject_context (Pass 2)
+  → ContextInjectionOutput → _build_theses → ExtractedThesis[]
 
-SpaCy splits each turn into sentences with global indices. The LLM must
-account for every sentence in the target range — either extract a claim
-or mark it not_claims. A programmatic validator enforces full coverage.
-original_quote is derived from sentence text, not LLM output.
+SpaCy splits each turn into sentences with global indices. Pass 1 must
+account for every sentence in the target range. A programmatic validator
+enforces full coverage. original_quote is derived from sentence text.
 """
 
 from __future__ import annotations
@@ -20,12 +23,13 @@ from dataclasses import dataclass, field
 from datetime import date
 from functools import partial
 
-from src.llm import invoke_llm, validate_sentence_extraction
+from src.llm import invoke_llm, validate_grouping, validate_context_injection
 from src.prompts.extraction import (
-    SENTENCE_EXTRACTION_SYSTEM, SENTENCE_EXTRACTION_USER,
+    GROUPING_SYSTEM, GROUPING_USER,
+    CONTEXT_INJECT_SYSTEM, CONTEXT_INJECT_USER,
 )
 from src.schemas.llm_outputs import (
-    ExtractedThesis, SentenceExtractionOutput,
+    ExtractedThesis, GroupingOutput, ContextInjectionOutput,
 )
 from src.transcript.parsers import TranscriptData, SpeakerTurn
 from src.utils.logging import log, get_logger
@@ -233,31 +237,34 @@ def _format_sentences_numbered(sentences: list[NumberedSentence]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Bridge: SentenceExtractionOutput → ExtractedThesis[]
+# Bridge: GroupingOutput + ContextInjectionOutput → ExtractedThesis[]
 # ---------------------------------------------------------------------------
 
-def _convert_to_theses(
-    output: SentenceExtractionOutput,
+def _build_theses(
+    grouping: GroupingOutput,
+    injection: ContextInjectionOutput,
     sentences_lookup: dict[int, NumberedSentence],
 ) -> list[ExtractedThesis]:
-    """Convert one-per-sentence extraction output to ExtractedThesis format.
+    """Build ExtractedThesis list from Pass 1 + Pass 2 outputs.
 
-    Groups dispositions by claim_group, looks up the corresponding
-    ClaimGroupThesis, and derives original_quote from sentence texts.
+    - thesis_statement comes from Pass 2 (decontextualized_statement)
+    - speakers comes from Pass 1 (group disposition)
+    - original_quote is programmatic join of raw sentence texts
     """
-    # Index groups by claim_group for fast lookup
-    group_lookup = {g.claim_group: g for g in output.groups}
+    # Index Pass 1 groups and Pass 2 claims by group number
+    group_lookup = {g.group: g for g in grouping.groups}
+    injection_lookup = {c.group: c for c in injection.claims}
 
-    # Collect sentence indices per claim_group
+    # Collect sentence indices per group
     group_indices: dict[int, list[int]] = {}
-    for d in output.dispositions:
-        if d.claim_group > 0:
-            group_indices.setdefault(d.claim_group, []).append(d.index)
+    for s in grouping.sentences:
+        group_indices.setdefault(s.group, []).append(s.index)
 
     theses = []
     for gid, indices in sorted(group_indices.items()):
         group = group_lookup.get(gid)
-        if not group:
+        injected = injection_lookup.get(gid)
+        if not group or group.disposition != "claim" or not injected:
             continue
 
         # Build original_quote from sentence texts
@@ -269,7 +276,7 @@ def _convert_to_theses(
         original_quote = " ".join(quote_parts)
 
         theses.append(ExtractedThesis(
-            thesis_statement=group.thesis_statement,
+            thesis_statement=injected.decontextualized_statement,
             speakers=group.speakers,
             original_quote=original_quote,
         ))
@@ -277,7 +284,7 @@ def _convert_to_theses(
 
 
 # ---------------------------------------------------------------------------
-# Chunk-level extraction
+# Shared helpers
 # ---------------------------------------------------------------------------
 
 def _build_speaker_desc(enriched_speakers: list[dict]) -> str:
@@ -291,24 +298,10 @@ def _build_speaker_desc(enriched_speakers: list[dict]) -> str:
     return "\n".join(speaker_lines) if speaker_lines else "(no speaker info)"
 
 
-async def extract_chunk(
-    transcript: TranscriptData,
-    chunk: SentenceChunk,
-    enriched_speakers: list[dict],
-    sentences_lookup: dict[int, NumberedSentence],
-    logger=None,
-) -> list[ExtractedThesis]:
-    """Extract claims from a single sentence chunk.
-
-    Uses sentence-level forced extraction: the LLM must account for every
-    sentence in the target range. A coverage validator enforces this.
-
-    Returns list of ExtractedThesis (bridged from sentence output).
-    """
-    logger = logger or _default_logger
-
+def _build_context_note(transcript: TranscriptData) -> str:
+    """Build transcript metadata context note."""
     desc_line = f" Description: {transcript.description}." if transcript.description else ""
-    context_note = (
+    return (
         f"Title: {transcript.title}. "
         f"Date: {transcript.date or 'unknown'}."
         f"{desc_line} "
@@ -316,46 +309,154 @@ async def extract_chunk(
         f"Speakers: {', '.join(transcript.speakers)}."
     )
 
-    log.info(logger, MODULE, "chunk_extracting",
-             "Extracting from sentence chunk",
+
+# ---------------------------------------------------------------------------
+# Pass 1: Grouping + Disposition
+# ---------------------------------------------------------------------------
+
+async def extract_dispositions(
+    transcript: TranscriptData,
+    chunk: SentenceChunk,
+    enriched_speakers: list[dict],
+    logger=None,
+) -> GroupingOutput:
+    """Pass 1: Group sentences and label each group claim/not_claim.
+
+    No thesis writing — the model only decides structure and disposition.
+    A coverage validator enforces that every target sentence has a group.
+
+    Returns GroupingOutput (serialized to dict by the activity layer).
+    """
+    logger = logger or _default_logger
+
+    log.info(logger, MODULE, "pass1_start",
+             "Pass 1: grouping + disposition",
              chunk_index=chunk.chunk_index,
              total_chunks=chunk.total_chunks,
              target_range=chunk.target_range,
              target_sentences=len(chunk.target_sentences))
 
-    # Coverage validator closure — captures this chunk's target range
     coverage_validator = partial(
-        validate_sentence_extraction,
+        validate_grouping,
         target_range=chunk.target_range,
     )
 
     start = chunk.target_range[0]
     output = await invoke_llm(
-        system_prompt=SENTENCE_EXTRACTION_SYSTEM.format(
+        system_prompt=GROUPING_SYSTEM.format(
             current_date=date.today().isoformat(),
         ),
-        user_prompt=SENTENCE_EXTRACTION_USER.format(
+        user_prompt=GROUPING_USER.format(
             numbered_sentences=chunk.full_text,
             target_range_start=start,
             target_range_end=chunk.target_range[1] - 1,
-            context_note=context_note,
+            context_note=_build_context_note(transcript),
             speaker_descriptions=_build_speaker_desc(enriched_speakers),
             next_index=start + 1,
             next_next_index=start + 2,
         ),
-        schema=SentenceExtractionOutput,
+        schema=GroupingOutput,
         semantic_validator=coverage_validator,
-        max_tokens=16384,
-        activity_name=f"extract_chunk_{chunk.chunk_index}",
+        activity_name=f"group_chunk_{chunk.chunk_index}",
     )
 
-    theses = _convert_to_theses(output, sentences_lookup)
-
-    not_claim_count = sum(1 for d in output.dispositions if d.disposition == "not_claim")
-    log.info(logger, MODULE, "chunk_extracted",
-             "Claims extracted from sentence chunk",
-             count=len(theses),
+    claim_count = sum(1 for g in output.groups if g.disposition == "claim")
+    not_claim_count = sum(1 for g in output.groups if g.disposition == "not_claim")
+    log.info(logger, MODULE, "pass1_done",
+             "Pass 1 complete",
              chunk_index=chunk.chunk_index,
-             not_claims=not_claim_count)
+             claim_groups=claim_count,
+             not_claim_groups=not_claim_count,
+             total_sentences=len(output.sentences))
+
+    return output
+
+
+# ---------------------------------------------------------------------------
+# Pass 2: Context Injection
+# ---------------------------------------------------------------------------
+
+async def inject_context(
+    transcript: TranscriptData,
+    chunk: SentenceChunk,
+    grouping: GroupingOutput,
+    sentences_lookup: dict[int, NumberedSentence],
+    enriched_speakers: list[dict],
+    logger=None,
+) -> list[ExtractedThesis]:
+    """Pass 2: Resolve references in claim groups to make them standalone.
+
+    Takes Pass 1 grouping output, looks up raw sentence texts, and asks the
+    LLM to decontextualize each claim group.
+
+    Returns list of ExtractedThesis (same downstream shape).
+    """
+    logger = logger or _default_logger
+
+    # Collect claim groups and their sentence texts
+    claim_groups = [g for g in grouping.groups if g.disposition == "claim"]
+    if not claim_groups:
+        return []
+
+    # Build sentence indices per group
+    group_indices: dict[int, list[int]] = {}
+    for s in grouping.sentences:
+        group_indices.setdefault(s.group, []).append(s.index)
+
+    # Build claim groups text for the prompt
+    claim_groups_text_parts = []
+    expected_groups = []
+    for g in claim_groups:
+        indices = sorted(group_indices.get(g.group, []))
+        raw_sentences = []
+        for idx in indices:
+            sent = sentences_lookup.get(idx)
+            if sent:
+                raw_sentences.append(f"[S{idx}] {sent.speaker}: {sent.text}")
+        if not raw_sentences:
+            continue
+        expected_groups.append(g.group)
+        speakers_str = ", ".join(g.speakers) if g.speakers else "Unknown"
+        claim_groups_text_parts.append(
+            f"### Group {g.group} (speakers: {speakers_str})\n"
+            + "\n".join(raw_sentences)
+        )
+
+    if not expected_groups:
+        return []
+
+    claim_groups_text = "\n\n".join(claim_groups_text_parts)
+
+    log.info(logger, MODULE, "pass2_start",
+             "Pass 2: context injection",
+             chunk_index=chunk.chunk_index,
+             claim_groups=len(expected_groups))
+
+    injection_validator = partial(
+        validate_context_injection,
+        expected_groups=expected_groups,
+    )
+
+    output = await invoke_llm(
+        system_prompt=CONTEXT_INJECT_SYSTEM.format(
+            current_date=date.today().isoformat(),
+        ),
+        user_prompt=CONTEXT_INJECT_USER.format(
+            full_text=chunk.full_text,
+            context_note=_build_context_note(transcript),
+            speaker_descriptions=_build_speaker_desc(enriched_speakers),
+            claim_groups_text=claim_groups_text,
+        ),
+        schema=ContextInjectionOutput,
+        semantic_validator=injection_validator,
+        activity_name=f"inject_chunk_{chunk.chunk_index}",
+    )
+
+    theses = _build_theses(grouping, output, sentences_lookup)
+
+    log.info(logger, MODULE, "pass2_done",
+             "Pass 2 complete",
+             chunk_index=chunk.chunk_index,
+             thesis_count=len(theses))
 
     return theses

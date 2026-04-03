@@ -59,28 +59,52 @@ class ThesisExtractionOutput(BaseModel):
 
 
 # =============================================================================
-# SENTENCE-LEVEL EXTRACTION OUTPUT (forced accountability)
+# PASS 1: GROUPING + DISPOSITION (no thesis writing)
 # =============================================================================
 
-class SentenceDisposition(BaseModel):
-    """One entry per target sentence — claim or not_claim."""
+class SentenceGrouping(BaseModel):
+    """One entry per target sentence — assigns group number."""
     index: int
+    group: int
+
+
+class GroupDisposition(BaseModel):
+    """Disposition for a sentence group — claim or not_claim."""
+    group: int
     disposition: Literal["claim", "not_claim"]
-    claim_group: int = 0       # 0 = not_claim, 1+ = claim group
-    not_claim_reason: str = ""  # greeting, interjection, procedural, applause/reaction
+    speakers: Optional[list[str]] = Field(default_factory=list)  # required for claims
+    reason: Optional[str] = ""  # required for not_claims
+
+    @field_validator("speakers", mode="before")
+    @classmethod
+    def speakers_none_to_list(cls, v):
+        return v or []
+
+    @field_validator("reason", mode="before")
+    @classmethod
+    def reason_none_to_empty(cls, v):
+        return v or ""
 
 
-class ClaimGroupThesis(BaseModel):
-    """Thesis for one claim group."""
-    claim_group: int
-    thesis_statement: str
-    speakers: list[str] = Field(default_factory=list)
+class GroupingOutput(BaseModel):
+    """Pass 1 output: sentence groupings + per-group dispositions."""
+    sentences: list[SentenceGrouping] = Field(default_factory=list)
+    groups: list[GroupDisposition] = Field(default_factory=list)
 
 
-class SentenceExtractionOutput(BaseModel):
-    """Output from sentence-level forced extraction."""
-    dispositions: list[SentenceDisposition] = Field(default_factory=list)
-    groups: list[ClaimGroupThesis] = Field(default_factory=list)
+# =============================================================================
+# PASS 2: CONTEXT INJECTION (editing, not writing from scratch)
+# =============================================================================
+
+class ContextInjectedClaim(BaseModel):
+    """One context-injected statement per claim group."""
+    group: int
+    decontextualized_statement: str
+
+
+class ContextInjectionOutput(BaseModel):
+    """Pass 2 output: context-injected claims."""
+    claims: list[ContextInjectedClaim] = Field(default_factory=list)
 
 
 # =============================================================================

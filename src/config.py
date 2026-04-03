@@ -53,7 +53,7 @@ LLM_RETRY_DELAY = 1
 # Transcript chunking (Phase 1)
 # ---------------------------------------------------------------------------
 
-TARGET_SENTENCES_PER_CHUNK = 45   # ~45 sentences — well within 10B active model's reliable range
+TARGET_SENTENCES_PER_CHUNK = 50   # ~50 sentences per chunk
 OVERLAP_SENTENCES = 15            # context sentences before/after target range
 SPEAKER_CUTOFF_WINDOW = 5        # max sentences to extend past target to hit a speaker boundary
 
@@ -113,6 +113,7 @@ TIMEOUT_NOTIFY_FRONTEND = 10
 # Extraction workflow
 TIMEOUT_FETCH_TRANSCRIPT = 60
 TIMEOUT_EXTRACT_CHUNK = 2700  # 45 min — large chunks on slow model
+TIMEOUT_INJECT_CONTEXT = 600  # 10 min — simpler than extraction, smaller output
 TIMEOUT_CLASSIFY_CLAIMS = 600  # 10 min — 50-claim batches on local model
 TIMEOUT_DEDUP_CLAIMS = 600    # 10 min — per-speaker embedding dedup
 TIMEOUT_SYNTHESIZE_CLAIM = 300

@@ -10,9 +10,10 @@ behavior. Updated 2026-04-01 (classification replaces LLM review, embedding dedu
 
 ```mermaid
 flowchart TD
-    T[Transcript] --> CHUNK["CHUNK — word-based splits (~2500w, ~500w overlap)"]
-    CHUNK --> EXT["EXTRACT — 1 LLM call per chunk (thesis extraction)"]
-    EXT --> CLASS["CLASSIFY — 1 LLM call per batch of 50 (rubric classification)"]
+    T[Transcript] --> CHUNK["CHUNK — sentence-count splits (~45 sent, ~15 overlap)"]
+    CHUNK --> GRP["PASS 1 — 1 LLM call per chunk (group + classify)"]
+    GRP --> INJ["PASS 2 — 1 LLM call per chunk (context injection)"]
+    INJ --> CLASS["CLASSIFY — 1 LLM call per batch of 50 (rubric classification)"]
     CLASS --> DEDUP["DEDUP — embedding cosine similarity (no LLM)"]
     DEDUP --> SYNTH_C["SYNTHESIZE CLAIMS — 1 LLM call per multi-member group"]
     SYNTH_C --> RAW[Checkable Claim]
@@ -35,47 +36,86 @@ Server: `--parallel 2 --ctx-size 131072` (2 slots x 65K context each, ~3 GB KV c
 
 ---
 
-## Call 1: Extract Theses from Transcript (Phase 1)
+## Call 1a: Pass 1 — Group + Classify (Phase 1)
 
-**When**: Processing a transcript (not used for direct claim submissions). One LLM call per chunk.
+**When**: Processing a transcript. One LLM call per chunk (~45 sentences).
 
 **Files**:
-- Prompts: `src/prompts/extraction.py` — `THESIS_EXTRACTION_SYSTEM`, `THESIS_EXTRACTION_USER`
-- Invoker: `src/transcript/thesis_extractor.py` — `extract_chunk()`
-- Schema: `src/schemas/llm_outputs.py` — `ThesisExtractionOutput`, `ExtractedThesis`
-- Validator: `src/llm/validators.py` — `validate_thesis_extraction()`
+- Prompts: `src/prompts/extraction.py` — `GROUPING_SYSTEM`, `GROUPING_USER`
+- Invoker: `src/transcript/thesis_extractor.py` — `extract_dispositions()`
+- Schema: `src/schemas/llm_outputs.py` — `GroupingOutput`, `SentenceGrouping`, `GroupDisposition`
+- Validator: `src/llm/validators.py` — `validate_grouping()`
+- Activity: `src/activities/transcript_activities.py` — `extract_dispositions_activity`
 
-**Temperature**: 0.0. **Retries**: 2. **Max tokens**: 16384.
+**Temperature**: 0.7 (general profile). **Retries**: 2. **Max tokens**: 16384.
 
-**Placeholders**: `{current_date}`, `{transcript_text}`, `{context_note}`, `{speaker_descriptions}`
+**Placeholders**: `{current_date}`, `{numbered_sentences}`, `{target_range_start}`, `{target_range_end}`, `{context_note}`, `{speaker_descriptions}`
 
 ### What it does
 
-Extracts every verifiable factual thesis from a transcript chunk. The transcript is
-split into overlapping word-based chunks (~2500 words target, ~500 words overlap each side)
-by `build_chunks()`. Each chunk is sent to the LLM with text section markers (`## Extract claims
-from this section` / `## Context (do not extract)`). The LLM returns thesis statements with
-verbatim `original_quote` attribution.
+Groups sentences by semantic continuity, then labels each group claim/not_claim.
+No thesis writing — the model only decides structure and disposition. The transcript
+is split into overlapping sentence-count chunks (~45 target, ~15 overlap) by
+`build_sentence_chunks()`. A coverage validator enforces every target sentence has
+exactly one group assignment.
 
 ### Structured output
 
 ```
-ThesisExtractionOutput
-  theses: list[ExtractedThesis]
-    thesis_statement: str      ← decontextualized verifiable claim
-    speakers: list[str]        ← who made this claim
-    original_quote: str        ← verbatim speaker words (for frontend highlighting)
-    topic: str                 ← topic area (military, economic, political, etc.)
+GroupingOutput
+  sentences: list[SentenceGrouping]
+    index: int         ← global sentence index
+    group: int         ← group number (1, 2, 3...)
+  groups: list[GroupDisposition]
+    group: int         ← group number
+    disposition: str   ← claim | not_claim
+    speakers: list     ← who advances this assertion (claim groups only)
+    reason: str        ← why not a claim (not_claim groups only)
 ```
 
 ### Post-LLM enforcement
 
-- `_validate_quotes_in_target()`: Drops claims whose `original_quote` doesn't appear
-  (case-insensitive substring) in `chunk.target_text`. Catches claims hallucinated from
-  context sections or with fabricated quotes.
-- Drops quotes shorter than 10 characters.
+- Coverage: every target index present, no duplicates, no out-of-range
+- Group integrity: every group number in sentences has a matching entry in groups
+- Speaker check: claim groups without speakers are downgraded to not_claim
 
-## Call 1b: Classify Claims (Phase 2)
+## Call 1b: Pass 2 — Context Injection (Phase 1)
+
+**When**: After Pass 1, for each chunk with at least one claim group. One LLM call per chunk.
+
+**Files**:
+- Prompts: `src/prompts/extraction.py` — `CONTEXT_INJECT_SYSTEM`, `CONTEXT_INJECT_USER`
+- Invoker: `src/transcript/thesis_extractor.py` — `inject_context()`
+- Schema: `src/schemas/llm_outputs.py` — `ContextInjectionOutput`, `ContextInjectedClaim`
+- Validator: `src/llm/validators.py` — `validate_context_injection()`
+- Activity: `src/activities/transcript_activities.py` — `inject_context_activity`
+
+**Temperature**: 0.7 (general profile). **Retries**: 2. **Max tokens**: 16384.
+
+**Placeholders**: `{current_date}`, `{full_text}`, `{context_note}`, `{speaker_descriptions}`, `{claim_groups_text}`
+
+### What it does
+
+Takes each claim group's raw sentences + surrounding transcript context and resolves
+pronouns/references to make them standalone. This is editing, not writing from scratch.
+The model receives the chunk's full text for reference resolution and each claim group's
+raw sentences with speaker info.
+
+### Structured output
+
+```
+ContextInjectionOutput
+  claims: list[ContextInjectedClaim]
+    group: int                        ← group number from Pass 1
+    decontextualized_statement: str   ← fully standalone claim statement
+```
+
+### Post-LLM enforcement
+
+- Every expected claim group has a matching entry
+- Each decontextualized_statement meets minimum length (15 chars)
+
+## Call 1c: Classify Claims (Phase 2)
 
 **When**: After all chunks are extracted. Batch classification — up to 50 claims per LLM call.
 
@@ -115,7 +155,7 @@ A **numeric-skeleton guard** (Jaccard threshold 0.7) prevents merging claims wit
 
 Within each cluster, the claim with the longest `original_quote` is the representative. Non-representatives are flagged `is_duplicate=TRUE`.
 
-## Call 1c: Claim Synthesis (Phase 2b)
+## Call 1d: Claim Synthesis (Phase 2b)
 
 **When**: After classify + dedup, for each multi-member dedup cluster. Single-member clusters use the original thesis_statement directly (no LLM call).
 
@@ -664,10 +704,11 @@ Typically 10-20 unique items after deduplication across sub-claims.
 
 | # | Stage | Prompt Constants | Mode | Schema | Validator |
 |---|-------|-----------------|------|--------|-----------|
-| 1 | Extract | THESIS_EXTRACTION_SYSTEM + _USER | instruct (0.7) | ThesisExtractionOutput | validate_thesis_extraction |
-| 1b | Classify | CLASSIFY_CLAIMS_SYSTEM + _USER | instruct (0.7) | ClassifyClaimsOutput | — |
+| 1a | Group + Classify | GROUPING_SYSTEM + _USER | instruct (0.7) | GroupingOutput | validate_grouping |
+| 1b | Context Inject | CONTEXT_INJECT_SYSTEM + _USER | instruct (0.7) | ContextInjectionOutput | validate_context_injection |
+| 1c | Classify | CLASSIFY_CLAIMS_SYSTEM + _USER | instruct (0.7) | ClassifyClaimsOutput | — |
 | — | Dedup | (embedding similarity — no LLM) | — | — | — |
-| 1c | Synthesize Claims | SYNTHESIZE_CLAIM_SYSTEM + _USER | instruct (0.7) | SynthesizedClaim | validate_synthesized_claim |
+| 1d | Synthesize Claims | SYNTHESIZE_CLAIM_SYSTEM + _USER | instruct (0.7) | SynthesizedClaim | validate_synthesized_claim |
 | 2 | Normalize | NORMALIZE_SYSTEM + _USER | instruct (0.7) | NormalizeOutput | validate_normalize |
 | 3 | Decompose | DECOMPOSE_SYSTEM + _USER | instruct (0.7) | DecomposeOutput | validate_decompose |
 | — | Quality Check | (programmatic only — no LLM call) | — | — | — |
@@ -675,4 +716,4 @@ Typically 10-20 unique items after deduplication across sub-claims.
 | 5 | Judge | JUDGE_SYSTEM + _USER | instruct (0.7) | JudgeOutput | validate_judge |
 | 6 | Synthesize Verdict | SYNTHESIZE_SYSTEM + _USER | instruct (0.7) | SynthesizeOutput | validate_synthesize |
 
-Prompts live in `src/prompts/extraction.py` (thesis extraction), `src/prompts/classification.py` (classification), `src/prompts/claim_review.py` (claim synthesis), and `src/prompts/verification.py` (normalize, decompose, research, judge, synthesize verdict).
+Prompts live in `src/prompts/extraction.py` (grouping + context injection), `src/prompts/classification.py` (classification), `src/prompts/claim_review.py` (claim synthesis), and `src/prompts/verification.py` (normalize, decompose, research, judge, synthesize verdict).

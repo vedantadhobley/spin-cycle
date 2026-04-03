@@ -3,7 +3,8 @@
 Activities:
   1. fetch_transcript              — fetch + parse a C-SPAN transcript (Playwright WAF)
   2. fetch_raw_transcript          — parse raw text into TranscriptData
-  3. extract_chunk_activity        — extract claims from one chunk of transcript
+  3. extract_dispositions_activity  — Pass 1: group + classify sentences in one chunk
+  3b. inject_context_activity       — Pass 2: decontextualize claim groups in one chunk
   4. classify_claims_activity      — batch LLM classification (checkability)
   5. dedup_claims_activity         — embedding-based dedup per speaker (Phase 2)
   6. synthesize_claim_activity     — synthesize overarching claim per group
@@ -382,38 +383,27 @@ async def sentencize_and_chunk_activity(
     }
 
 
-@activity.defn
-async def extract_chunk_activity(
-    transcript_meta: dict,
-    chunk_dict: dict,
-    enriched_speakers: list[dict],
-    sentences_dict: dict,
-) -> list[dict]:
-    """Extract claims from a single sentence chunk of a transcript.
-
-    Takes slim transcript_meta, SentenceChunk dict, enriched speakers,
-    and sentences lookup dict. Returns list of thesis dicts.
-    """
-    from src.transcript.thesis_extractor import (
-        SentenceChunk, NumberedSentence, extract_chunk,
-    )
+def _rebuild_transcript_data(transcript_meta: dict):
+    """Reconstruct minimal TranscriptData from slim activity meta dict."""
     from src.transcript.parsers import TranscriptData
-
-    # Reconstruct minimal TranscriptData from slim meta
-    td = TranscriptData(
+    return TranscriptData(
         url=transcript_meta.get("url", ""),
         title=transcript_meta["title"],
         date=transcript_meta.get("date"),
         description=transcript_meta.get("description"),
         speakers=transcript_meta["speakers"],
-        turns=[],  # not needed by extract_chunk — only metadata used
+        turns=[],  # only metadata used
         source_format=transcript_meta.get("source_format", "rev"),
         speaker_aliases=transcript_meta.get("speaker_aliases", {}),
         _word_count_override=transcript_meta.get("word_count"),
         _turn_count_override=transcript_meta.get("turn_count"),
     )
 
-    # Reconstruct SentenceChunk from dict
+
+def _rebuild_chunk(chunk_dict: dict):
+    """Reconstruct SentenceChunk from Temporal-serialized dict."""
+    from src.transcript.thesis_extractor import SentenceChunk, NumberedSentence
+
     def _rebuild_sentences(dicts: list[dict]) -> list[NumberedSentence]:
         return [
             NumberedSentence(
@@ -425,7 +415,7 @@ async def extract_chunk_activity(
             for d in dicts
         ]
 
-    chunk = SentenceChunk(
+    return SentenceChunk(
         target_sentences=_rebuild_sentences(chunk_dict["target_sentences"]),
         context_before=_rebuild_sentences(chunk_dict["context_before"]),
         context_after=_rebuild_sentences(chunk_dict["context_after"]),
@@ -435,8 +425,11 @@ async def extract_chunk_activity(
         total_chunks=chunk_dict["total_chunks"],
     )
 
-    # Reconstruct sentences lookup
-    sentences_lookup = {
+
+def _rebuild_sentences_lookup(sentences_dict: dict):
+    """Reconstruct sentences lookup from Temporal-serialized dict."""
+    from src.transcript.thesis_extractor import NumberedSentence
+    return {
         int(k): NumberedSentence(
             global_index=v["global_index"],
             speaker=v["speaker"],
@@ -446,21 +439,100 @@ async def extract_chunk_activity(
         for k, v in sentences_dict.items()
     }
 
-    log.info(activity.logger, "extract", "chunk_start",
-             "Starting sentence chunk extraction",
+
+@activity.defn
+async def extract_dispositions_activity(
+    transcript_meta: dict,
+    chunk_dict: dict,
+    enriched_speakers: list[dict],
+) -> dict:
+    """Pass 1: Group sentences and label claim/not_claim for one chunk.
+
+    Returns serialized GroupingOutput dict: {"sentences": [...], "groups": [...]}.
+    """
+    from src.transcript.thesis_extractor import extract_dispositions
+
+    td = _rebuild_transcript_data(transcript_meta)
+    chunk = _rebuild_chunk(chunk_dict)
+
+    log.info(activity.logger, "extract", "pass1_start",
+             "Starting Pass 1: grouping + disposition",
              title=td.title,
              chunk_index=chunk.chunk_index,
              total_chunks=chunk.total_chunks,
              target_range=chunk.target_range)
 
     try:
-        theses = await extract_chunk(
-            td, chunk, enriched_speakers, sentences_lookup,
+        grouping = await extract_dispositions(
+            td, chunk, enriched_speakers,
             logger=activity.logger,
         )
     except Exception as e:
-        log.error(activity.logger, "extract", "chunk_failed",
-                  "Chunk extraction failed",
+        log.error(activity.logger, "extract", "pass1_failed",
+                  "Pass 1 failed",
+                  chunk_index=chunk.chunk_index, error=str(e))
+        raise
+
+    # Serialize for Temporal transport
+    result = {
+        "sentences": [{"index": s.index, "group": s.group} for s in grouping.sentences],
+        "groups": [
+            {
+                "group": g.group,
+                "disposition": g.disposition,
+                "speakers": g.speakers,
+                "reason": g.reason,
+            }
+            for g in grouping.groups
+        ],
+    }
+
+    claim_count = sum(1 for g in grouping.groups if g.disposition == "claim")
+    log.info(activity.logger, "extract", "pass1_done",
+             "Pass 1 complete",
+             chunk_index=chunk.chunk_index,
+             claim_groups=claim_count)
+
+    return result
+
+
+@activity.defn
+async def inject_context_activity(
+    transcript_meta: dict,
+    chunk_dict: dict,
+    grouping_result: dict,
+    enriched_speakers: list[dict],
+    sentences_dict: dict,
+) -> list[dict]:
+    """Pass 2: Decontextualize claim groups for one chunk.
+
+    Returns list of ExtractedThesis dicts (same shape as downstream expects).
+    """
+    from src.transcript.thesis_extractor import inject_context
+    from src.schemas.llm_outputs import GroupingOutput, SentenceGrouping, GroupDisposition
+
+    td = _rebuild_transcript_data(transcript_meta)
+    chunk = _rebuild_chunk(chunk_dict)
+    sentences_lookup = _rebuild_sentences_lookup(sentences_dict)
+
+    # Reconstruct GroupingOutput from serialized dict
+    grouping = GroupingOutput(
+        sentences=[SentenceGrouping(**s) for s in grouping_result["sentences"]],
+        groups=[GroupDisposition(**g) for g in grouping_result["groups"]],
+    )
+
+    log.info(activity.logger, "extract", "pass2_start",
+             "Starting Pass 2: context injection",
+             chunk_index=chunk.chunk_index)
+
+    try:
+        theses = await inject_context(
+            td, chunk, grouping, sentences_lookup, enriched_speakers,
+            logger=activity.logger,
+        )
+    except Exception as e:
+        log.error(activity.logger, "extract", "pass2_failed",
+                  "Pass 2 failed",
                   chunk_index=chunk.chunk_index, error=str(e))
         raise
 
@@ -471,11 +543,10 @@ async def extract_chunk_activity(
             "thesis_statement": t.thesis_statement,
             "speakers": t.speakers,
             "original_quote": t.original_quote,
-            "topic": t.topic,
         })
 
-    log.info(activity.logger, "extract", "chunk_done",
-             "Chunk extraction complete",
+    log.info(activity.logger, "extract", "pass2_done",
+             "Pass 2 complete",
              chunk_index=chunk.chunk_index,
              thesis_count=len(result))
 

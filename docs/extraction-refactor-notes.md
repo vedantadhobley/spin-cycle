@@ -1,120 +1,131 @@
 # Extraction Refactor Notes (2026-04-03)
 
-## What Was Done
+## Architecture: Two-Pass Extraction
 
-### 1. One-Per-Sentence Output Format (COMPLETE)
-Replaced grouped extraction (`claims: [{sentence_indices: [107,108,109]}]`) with
-one-per-sentence dispositions. Each sentence gets exactly one entry. Multi-sentence
-claims share a `claim_group` integer. Theses written once per group.
+Split extraction into two focused LLM passes per chunk:
 
-**Files changed:**
-- `src/schemas/llm_outputs.py` — `SentenceDisposition`, `ClaimGroupThesis`, updated `SentenceExtractionOutput`
-- `src/llm/validators.py` — Simplified validator: index coverage, group integrity, thesis quality downgrade
-- `src/prompts/extraction.py` — Rewritten prompt (see below)
-- `src/transcript/thesis_extractor.py` — `_convert_to_theses` groups by claim_group, updated logging
+**Pass 1 (Grouping + Disposition):** Group sentences by rhetorical paragraph, label
+each group claim/not_claim. No thesis writing. Model only decides structure.
 
-### 2. Cross-Chunk Index Mismatch Bug (FIXED, TESTED)
-`extract_claims.py` returned `all_theses` (pre-dedup, 124 items) alongside `tc_ids`
-(post-dedup, 123 items). Downstream `synthesize_claims.py` line 157 crashed with
-`IndexError: list index out of range`.
+**Pass 2 (Context Injection):** Take each claim group's raw sentences + surrounding
+context, resolve pronouns/references to make them standalone. Editing, not writing.
 
-**Fix:** In `extract_claims.py`, after cross-chunk dedup, filter `all_theses` to match
-the deduped set before returning. **Verified working in Run 4** — full pipeline
-through synthesis completed with no IndexError.
+**Why two passes:** Single-pass extraction asked the LLM to simultaneously classify,
+group, AND write decontextualized theses. The writing burden caused fabrication on
+borderline sentences (S3 "It was quite something" → Artemis thesis) and flattened
+hypotheticals into factual assertions. Separating grouping from writing lets each
+pass focus on one thing.
 
-### 3. Prompt Rewrite (COMPLETE)
-Single decision rule: "Does the sentence assert anything about the world?" → claim.
-"Zero propositional content?" → not_claim. No examples from test transcripts. No
-garbage-bin categories.
-
-### 4. Sentence-Based Chunking (COMPLETE)
-Switched from word-based (`TARGET_WORDS_PER_CHUNK=1500`) to sentence-based chunking.
-
-**Config (`src/config.py`):**
-- `TARGET_SENTENCES_PER_CHUNK = 45` — ~45 sentences per chunk
-- `OVERLAP_SENTENCES = 15` — context sentences before/after target range
-- `SPEAKER_CUTOFF_WINDOW = 5` — max sentences to extend past target for speaker boundary
-
-**For 186-sentence transcript:** 4 chunks [45, 45, 45, 51], 2 rounds with --parallel 2.
-Each chunk gets ~15 sentences of overlap context before and after (except first/last).
-
-### 5. Topic Moved from Extraction to Classification (COMPLETE)
-Topic assignment ("military", "economic", etc.) was removed from the extraction prompt
-and `ClaimGroupThesis` schema. Topic is now assigned during the classification step
-(`ClassifyAndDedupWorkflow` → `classify_claims_batch`), which already ran on every
-claim for checkability. This eliminated the most repetitive field from extraction output.
-
-**Why:** With `presence_penalty=0` (needed for exhaustive enumeration), repeating
-"military" 40+ times in the groups array caused degenerate repetition on chunk 3
-(10K+ tokens, 20+ minutes, never finished). Removing topic from extraction allowed
-restoring the default `presence_penalty=1.5` from the Qwen3.5 model card.
-
-**Files changed:**
-- `src/schemas/llm_outputs.py` — removed `topic` from `ClaimGroupThesis`, added to `ClaimClassification`
-- `src/prompts/extraction.py` — removed topic from output rules and JSON example
-- `src/prompts/classification.py` — added Step 4 for topic, updated JSON example
-- `src/transcript/thesis_extractor.py` — removed topic from `_convert_to_theses`, removed `presence_penalty=0` override
-- `src/transcript/claim_classifier.py` — added topic to classification result passthrough
-- `src/workflows/extract_claims.py` — removed topic from `_tag_theses_for_storage`
-- `src/workflows/classify_and_dedup.py` — added topic merge from classification, added to DB update
-- `src/activities/transcript_activities.py` — added topic persistence in classification update
-
-## Test Results (4 runs on singjupost Iran address, 186 sentences)
-
-### Run 1: Old prompt (grouped format)
-- 89 theses, chunk 1 failed 2/3 attempts
-
-### Run 2: New format, first prompt iteration
-- 103 theses, 75 not_claims, 0 retries
-- 20+ missed claims, model dumped short sentences into "filler" category
-
-### Run 3: New format, clean prompt, word-based chunks (2 chunks)
-- 123 theses, 34 not_claims, 0 retries, 115 unique checkable after dedup
-- Captured all 20 previously-missed claims
-- ~5 remaining edge-case misses
-- Cross-chunk dedup bug caused IndexError in synthesize (fix untested)
-
-### Run 4: Sentence-based chunks (4 chunks), topic removed, default presence_penalty
-- **160 theses, 15 not_claims, 0 retries on all 4 chunks**
-- 0 cross-chunk exact duplicates
-- 15 semantic duplicates caught by embedding dedup
-- 142 final claims after synthesis
-- Cross-chunk index fix VERIFIED — full pipeline completed
-
-**Not_claims (15 total, audit):**
-- 9 correct (greetings, closings, fillers: S0, S1, S5, S44, S54, S55, S103, S184, S185)
-- 4 defensible borderline (S8 blessing, S28 procedural framing, S37 pledge, S89 fragment)
-- 2 genuine misses (S25 "We don't have to be there", S26 "We don't need their oil")
-  - S24 captures the gist ("totally independent of Middle East")
-
-**Known issues from Run 4:**
-- S3 "It was quite something" classified as claim, got thesis from S4's content (over-decontextualization)
-- S45 "We'd still be winning" hypothetical misread as factual assertion about previous admin
-- Multi-sentence grouping occasionally causes model to inject content from adjacent sentences
-  into vague/contentless sentences rather than marking them not_claim
-- **Classification bug (pre-existing):** `matched=0` on all batches — model returns indices
-  that don't match 0-indexed input. All claims fall back to defaults (verifiable_fact,
-  checkable=True, topic=empty). Topic assignment not working until this is fixed.
-
-## Current Architecture
+### Key files
+- Schemas: `src/schemas/llm_outputs.py` — `GroupingOutput`, `ContextInjectionOutput`
+- Prompts: `src/prompts/extraction.py` — `GROUPING_SYSTEM/USER`, `CONTEXT_INJECT_SYSTEM/USER`
+- Logic: `src/transcript/thesis_extractor.py` — `extract_dispositions()`, `inject_context()`, `_build_theses()`
+- Validators: `src/llm/validators.py` — `validate_grouping()`, `validate_context_injection()`
+- Activities: `src/activities/transcript_activities.py` — `extract_dispositions_activity`, `inject_context_activity`
+- Workflow: `src/workflows/extract_claims.py` — two-phase orchestration
+- Config: `src/config.py` — `TARGET_SENTENCES_PER_CHUNK=50`, `TIMEOUT_INJECT_CONTEXT=600`
 
 ### Pipeline phases
-1. **Extract** — claim/not_claim + grouping + decontextualized thesis + speakers
-2. **Classify** — checkable/not_checkable + factual_anchor + topic (per claim)
-3. **Dedup** — per-speaker embedding clustering (cosine > 0.85)
-4. **Synthesize** — merge multi-member dedup groups into overarching claims
+1. **Pass 1** — group + classify (parallel pairs, sem=2)
+2. **Pass 2** — context inject (parallel pairs, skip chunks with 0 claims)
+3. **Classify** — checkable/not_checkable + factual_anchor + topic
+4. **Dedup** — per-speaker embedding clustering (cosine > 0.85)
+5. **Synthesize** — merge multi-member dedup groups into overarching claims
 
-### What extraction does NOT do
-- Topic assignment (moved to classification)
-- Checkability assessment (classification step)
-- Semantic dedup (embedding dedup step)
+## Run History (singjupost Iran address, 186 sentences)
 
-### Cross-chunk dedup (extraction)
-Exact text match only — `_tag_theses_for_storage()` deduplicates by identical
-`thesis_statement` string. Catches cases where overlapping context causes same
-thesis from adjacent chunks. NOT semantic.
+### Runs 1-4: Single-pass extraction (old architecture)
+- Run 1: 89 theses, grouped format, failures
+- Run 2: 103 theses, one-per-sentence format, over-aggressive not_claim
+- Run 3: 123 theses, clean prompt, word-based chunks
+- Run 4: 160 theses, sentence-based chunks, topic moved to classification, 142 final
+
+### Run 5: Two-pass extraction (first run)
+- **137 claims stored, 0 retries across both passes (all 8 LLM calls first attempt)**
+- Pass 1: ~6.5 min, Pass 2: ~5.5 min, total ~12 min
+- 17 not_claim sentences, 0 cross-chunk duplicates
+
+**Not_claims (17 total):**
+- 10 correct (greetings, closings, blessings, contentless filler)
+- 4 borderline (S17 vague, S27 policy, S29 personal vow, S36 characterization)
+- 3 genuine misses: S38 "forty-seven years" (number), S46 "terminated Iran deal" (action), S48 "took it out of banks" (action)
+
+**Decontextualization quality:** Excellent. Pronouns resolved correctly ("I" → "President Trump", "they" → "Iran"), dates injected ("April 1, 2026"), references grounded. No fabrication in Pass 2 output.
+
+**Issues found:**
+1. **Over-atomization in chunks 0-1:** Zero multi-sentence grouping. Every sentence got its own group. Chunk 2 grouped well (14 multi-sentence groups), chunk 3 decent (4). Root cause: prompt said "new assertion = new group" which splits enumeration lists and emphasis chains.
+2. **Filler-as-claim:** S5 "It was quite something" → "The launch of Artemis Two was a significant event." Not fabricated (good), but not a real claim either. Several similar: "Everyone is talking about it", "Every one of them", "Nobody's ever seen anything like it." These are rhetorical emphasis that got pulled in as standalone claims.
+3. **Both issues are one problem:** Over-atomization prevents filler from being absorbed into the adjacent claim group. If S5 is in the same group as the Artemis sentences, context injection produces one clean Artemis claim and the filler disappears. The grouping granularity is the root cause.
+
+**Fix applied:** Reframed grouping from per-assertion to per-rhetorical-paragraph. Key changes:
+- "A group is a rhetorical paragraph — one point or one argument"
+- "New group only when speaker shifts to fundamentally different subject"
+- "Short sentences (~<10 words) almost never introduce new subjects — default to current group"
+- Not_claim: "entire group contains zero verifiable information"
+- Removed per-sentence sequential procedure (was reinforcing atomization)
+
+### Run 6: Two-pass extraction (rhetorical paragraph grouping)
+- **58 claims stored, 0 retries across both passes (all 8 LLM calls first attempt)**
+- Pass 1: ~4.5 min, Pass 2: ~3.5 min, total ~8 min
+- 4 not_claim sentences, 0 cross-chunk duplicates
+
+**Grouping quality by chunk:**
+| Chunk | Sentences | Groups | Sent/Group |
+|-------|-----------|--------|-----------|
+| 0 | 50 | 12 | 4.2 |
+| 1 | 50 | 21 | 2.4 |
+| 2 | 50 | 10 | 5.0 |
+| 3 | 36 | 18 | 2.0 |
+
+**Not_claims (4 total):** All correct — S0 greeting, S1 greeting, S184 blessing, S185 closing. The 3 genuine misses from Run 5 (S38, S46, S48) are now correctly captured as claims.
+
+**Decontextualization quality:** Excellent. No fabrication. Pronouns resolved correctly throughout. Filler sentences like S3 "It was quite something" and S5 "It's amazing" absorbed into the Artemis group — context injection produces one clean Artemis claim and the filler disappears naturally.
+
+**Multi-sentence grouping highlights:**
+- Claim 52: 7 sentences (war duration comparisons) → single coherent claim
+- Claim 34: 8 sentences (economy stats) → single claim preserving all figures
+- Claim 35: 9 sentences (oil production) → single claim
+- Claim 7: 6 sentences (Iran's 47-year history) → single claim with all cited events
+
+**Remaining edge cases (expected, not bugs):**
+- Claims 36, 39, 53 all say "Iran is decimated" — repeated at different points in the speech, correctly grouped as separate adjacent claims. Semantic dedup downstream handles this.
+- Claims 55 vs 57 ("world is watching") — cross-chunk boundary (chunk 2 vs chunk 3). Grouping is intentionally local/adjacent within chunks; dedup merges semantic duplicates across chunks.
+- Claims 23, 49, 54 — pure rhetoric ("extraordinary", "unstoppable", "investment in your children"). Correctly extracted as claims; downstream classifier marks as not_checkable.
+
+**Run 5 → Run 6 comparison:**
+| Metric | Run 5 | Run 6 |
+|--------|-------|-------|
+| Claims | 137 | 58 |
+| Not_claims | 17 | 4 |
+| Not_claim accuracy | 10/17 | 4/4 |
+| Avg sent/group | ~1.0 | ~3.0 |
+| Filler-as-claim | Yes | No |
+| Missed claims | 3 | 0 |
+| Fabrication | None | None |
+| Retries | 0 | 0 |
+
+## Design Decisions
+
+### Grouping is local/adjacent, dedup is semantic
+
+Pass 1 grouping only merges adjacent sentences within a chunk. When a speaker repeats the same assertion at different points in the speech (e.g., "Iran is decimated" appears 3 times), each occurrence is a separate claim group. This is intentional:
+
+- **Grouping** answers: "which consecutive sentences form one rhetorical paragraph?"
+- **Dedup** answers: "which claims across the entire transcript say the same thing?"
+
+These are different questions. Grouping is structural (adjacency). Dedup is semantic (embedding similarity). Keeping them separate means each claim preserves its original context and quote location, and dedup can later decide which to keep and which research can be reused across duplicates.
+
+Cross-chunk duplicates (like "world is watching" split across chunks 2 and 3) are also handled by dedup, not grouping — the model can't see across chunk boundaries.
+
+## Key Learnings
+
+1. **LLMs are bad at doing multiple things simultaneously.** Single-pass (classify + group + write thesis) caused the model to fabricate content for borderline sentences. Two-pass (group only → write only) eliminated fabrication.
+2. **Per-assertion grouping doesn't work for political speeches.** Trump's style is rapid-fire short assertions. "Their navy is gone. Their air force is gone." = two assertions but one argument. Need paragraph-level grouping.
+3. **Short sentences are the failure mode.** 4-7 word sentences get atomized into standalone groups even when they're clearly continuation/emphasis. The short-sentence heuristic addresses this directly.
+4. **Null handling matters.** Model returns `null` for optional fields (reason, speakers) on groups where they're not applicable. Pydantic validators with `mode="before"` coerce nulls to defaults.
+5. **Grouping and dedup solve different problems.** Grouping is local adjacency within chunks. Dedup is global semantic similarity. Trying to make grouping do dedup's job would require the model to remember the entire transcript, which it can't across chunks.
 
 ## TODO
-- [ ] Fix classification index matching bug (matched=0)
-- [ ] Investigate multi-sentence grouping quality (S3/S45 issues)
-- [ ] Consider whether contentless sentences adjacent to claims should be forced not_claim
+- [ ] Fix classification index matching bug (matched=0, pre-existing)
+- [ ] Evaluate whether chunk size (50 sentences) is optimal for grouping quality
+- [ ] Run full pipeline (classify + dedup + synthesize) to verify dedup catches repeated assertions

@@ -1,25 +1,28 @@
-"""Prompts for sentence-level transcript claim extraction (Phase 1).
+"""Prompts for two-pass transcript claim extraction (Phase 1).
 
-The extraction LLM receives numbered transcript sentences and must produce
-one disposition per sentence — either "claim" or "not_claim". Multi-sentence
-claims share a claim_group integer; theses are written once per group.
+Pass 1 (Grouping + Disposition):
+  Group sentences by semantic continuity, then label each group claim/not_claim.
+  No thesis writing — the model only decides structure and disposition.
+
+Pass 2 (Context Injection):
+  Take each claim group's raw sentences + surrounding context, resolve
+  pronouns/references to make them standalone. Editing, not writing.
 
 Key design:
 - Sentences are globally numbered [S0], [S1], ..., [Sn]
-- Each sentence gets exactly one disposition entry (sequential, ordered)
-- claim_group 0 = not_claim; 1+ = claim group ID
-- Consecutive sentences with same claim_group = multi-sentence claim
+- Pass 1: every sentence gets a group number; every group gets a disposition
+- Pass 2: every claim group gets one decontextualized statement
 - original_quote is derived programmatically from sentence text (not LLM output)
 - Classification is deferred to a separate batch LLM phase (claim_classifier)
 """
 
-# ---------------------------------------------------------------------------
-# System prompt
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# PASS 1: GROUPING + DISPOSITION
+# ===========================================================================
 
-SENTENCE_EXTRACTION_SYSTEM = """\
-You are a fact-check analyst extracting claims from a transcript so a \
-newsroom can verify them.
+GROUPING_SYSTEM = """\
+You are a fact-check analyst grouping and classifying transcript sentences \
+so a newsroom can decide what to verify.
 
 Today's date: {current_date}
 
@@ -27,61 +30,51 @@ Today's date: {current_date}
 
 You receive numbered transcript sentences: [S42] Speaker: text
 
-For every sentence in the EXTRACT range, emit one disposition object \
-with "claim" or "not_claim". A programmatic validator checks that every \
-sentence has exactly one entry. Missing or duplicate entries trigger a retry.
+Two steps, in order:
 
-## The Decision Rule
+### Step 1 — Group
 
-A sentence is "claim" if it makes any assertion about the world that \
-could be checked — a fact, characterization, number, attribution, \
-comparison, or description of events, capabilities, or intent. \
-Sentence length does not matter.
+For each sentence in the EXTRACT range, assign a group number. A group \
+is a rhetorical paragraph — the set of sentences where the speaker is \
+making one point or advancing one argument. A new group starts only \
+when the speaker shifts to a fundamentally different subject.
 
-A sentence is "not_claim" ONLY if it contains zero propositional \
-content — pure greetings, applause, procedural mechanics, or \
-contentless interjections.
+Short sentences (roughly under 10 words) almost never introduce a new \
+subject. They typically elaborate, list examples, emphasize, or restate \
+what the speaker is already saying. Default to keeping them in the \
+current group.
+
+Group numbers start at 1 and increment sequentially.
+
+### Step 2 — Classify
+
+For each group, decide "claim" or "not_claim".
+
+A group is "claim" if, taken as a whole, it advances any assertion \
+about the world that could be checked — a fact, characterization, \
+number, attribution, comparison, or description of events, \
+capabilities, or intent.
+
+A group is "not_claim" ONLY if the entire group contains zero \
+verifiable information — pure greetings, applause, procedural \
+mechanics, blessings, or rhetorical filler that adds nothing \
+independently checkable.
 
 A downstream classifier decides what is worth checking. Your job is \
 to not lose factual content. When in doubt, "claim".
 
-## Procedure
-
-For each sentence from S{{start}} through S{{end}}, in order:
-1. Read the sentence.
-2. Does it assert anything about the world? → "claim". \
-Zero propositional content? → "not_claim".
-3. If "claim": does it continue the same assertion as the previous \
-sentence? Use the same claim_group. Otherwise increment claim_group.
-4. Emit the disposition and move to the next sentence.
-
-After all dispositions, write one entry in "groups" per unique \
-claim_group with thesis_statement, speakers, and topic.
-
-## How to Write thesis_statement
-
-Use the transcript metadata, speaker descriptions, and surrounding \
-sentences (including Context sections) to resolve all references:
-- NEUTRAL and DECONTEXTUALIZED — no pronouns, no "we", no "they"
-- Replace ALL pronouns with specific entities
-- Understandable by someone who hasn't read the transcript
-- Extract the checkable kernel from opinion-laden language
-
 ## Output Rules
 
-1. "dispositions" has exactly one entry per sentence in the EXTRACT \
-range, in order
-2. claim_group 0 = not_claim; 1+ = claim group (increment for new claims)
-3. Context sections are for reference only — do not emit dispositions \
-for them\
+1. "sentences" has exactly one entry per sentence in the EXTRACT range, in order
+2. Group numbers increment sequentially (1, 2, 3...)
+3. "groups" has one entry per unique group number
+4. "speakers" is required for claim groups (who advances the assertion)
+5. "reason" is required for not_claim groups
+6. Context sections are for reference only — do not emit entries for them\
 """
 
-# ---------------------------------------------------------------------------
-# User prompt
-# ---------------------------------------------------------------------------
-
-SENTENCE_EXTRACTION_USER = """\
-Extract every factual claim from sentences S{target_range_start} through S{target_range_end}.
+GROUPING_USER = """\
+Group and classify sentences S{target_range_start} through S{target_range_end}.
 
 {numbered_sentences}
 
@@ -93,14 +86,63 @@ Extract every factual claim from sentences S{target_range_start} through S{targe
 
 Return JSON:
 {{
-  "dispositions": [
-    {{"index": {target_range_start}, "disposition": "claim", "claim_group": 1}},
-    {{"index": {next_index}, "disposition": "claim", "claim_group": 1}},
-    {{"index": {next_next_index}, "disposition": "claim", "claim_group": 2}}
+  "sentences": [
+    {{"index": {target_range_start}, "group": 1}},
+    {{"index": {next_index}, "group": 1}},
+    {{"index": {next_next_index}, "group": 2}}
   ],
   "groups": [
-    {{"claim_group": 1, "thesis_statement": "Decontextualized claim statement", "speakers": ["Speaker Name"]}},
-    {{"claim_group": 2, "thesis_statement": "Another claim statement", "speakers": ["Speaker Name"]}}
+    {{"group": 1, "disposition": "claim", "speakers": ["Speaker Name"]}},
+    {{"group": 2, "disposition": "not_claim", "reason": "greeting"}}
+  ]
+}}\
+"""
+
+# ===========================================================================
+# PASS 2: CONTEXT INJECTION
+# ===========================================================================
+
+CONTEXT_INJECT_SYSTEM = """\
+You receive raw transcript sentences grouped into claims. Make each \
+group's sentences understandable to someone who hasn't read the transcript.
+
+Today's date: {current_date}
+
+## Rules
+
+- Replace pronouns with specific referents (names, countries, organizations)
+- Add dates and named entities when the referent is clear from context
+- Specify what "it", "they", "this", "that" refers to
+- If a group has multiple sentences, produce ONE statement that captures \
+the combined assertion
+- Do NOT add assertions not present in the original sentences — only \
+resolve references
+- Write in neutral, factual language — extract the checkable kernel, \
+not the speaker's subjective framing
+- The result must be understandable without any transcript context\
+"""
+
+CONTEXT_INJECT_USER = """\
+Decontextualize each claim group below. Use the full transcript excerpt \
+for reference resolution only.
+
+## Full Transcript Excerpt (for context)
+{full_text}
+
+## Transcript Metadata
+{context_note}
+
+## Speaker Descriptions
+{speaker_descriptions}
+
+## Claim Groups to Decontextualize
+{claim_groups_text}
+
+Return JSON:
+{{
+  "claims": [
+    {{"group": 1, "decontextualized_statement": "Fully standalone claim statement"}},
+    {{"group": 2, "decontextualized_statement": "Another standalone claim statement"}}
   ]
 }}\
 """

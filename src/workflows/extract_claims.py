@@ -1,7 +1,12 @@
-"""Chunked claim extraction — Phase 2 of the pipeline.
+"""Two-pass claim extraction — Phase 2 of the pipeline.
 
-Sentencizes the transcript, builds sentence-based chunks, extracts claims
-in parallel pairs (2 LLM slots), stores all claims once via INSERT.
+Sentencizes the transcript, builds sentence-based chunks, then runs two
+sequential LLM passes per chunk (parallel pairs within each pass):
+
+  Pass 1: Group sentences + label claim/not_claim (no thesis writing)
+  Pass 2: Context-inject each claim group (resolve pronouns/references)
+
+Stores all claims once via INSERT.
 """
 
 import asyncio
@@ -12,19 +17,23 @@ from temporalio.common import RetryPolicy
 with workflow.unsafe.imports_passed_through():
     from src.activities.transcript_activities import (
         sentencize_and_chunk_activity,
-        extract_chunk_activity,
+        extract_dispositions_activity,
+        inject_context_activity,
         store_transcript_claims,
         load_extract_inputs,
     )
     from src.utils.logging import log
-    from src.config import MAX_CONCURRENT, TIMEOUT_EXTRACT_CHUNK, TIMEOUT_STORE_CLAIMS
+    from src.config import (
+        MAX_CONCURRENT, TIMEOUT_EXTRACT_CHUNK, TIMEOUT_INJECT_CONTEXT,
+        TIMEOUT_STORE_CLAIMS,
+    )
 
 MODULE = "extract_claims"
 
 
 @workflow.defn
 class ExtractClaimsWorkflow:
-    """Extract claims from transcript chunks in parallel."""
+    """Extract claims from transcript chunks via two-pass LLM pipeline."""
 
     @workflow.run
     async def run(
@@ -47,7 +56,7 @@ class ExtractClaimsWorkflow:
             turns = turns or loaded["turns"]
 
         log.info(workflow.logger, MODULE, "started",
-                 "Starting sentence-level extraction",
+                 "Starting two-pass extraction",
                  transcript_id=transcript_id,
                  title=transcript_meta["title"])
 
@@ -67,30 +76,67 @@ class ExtractClaimsWorkflow:
                  sentence_count=sentencize_result["sentence_count"],
                  chunk_count=len(chunk_dicts))
 
-        # Execute chunks with semaphore — keeps both LLM slots busy
+        # ---------------------------------------------------------------
+        # Pass 1: Group + disposition (parallel pairs, sem=2)
+        # ---------------------------------------------------------------
         sem = asyncio.Semaphore(MAX_CONCURRENT)
-        chunk_results: list[list[dict]] = [[] for _ in chunk_dicts]
+        grouping_results: list[dict] = [None] * len(chunk_dicts)
 
-        async def extract_with_sem(idx: int, chunk_dict: dict):
+        async def group_with_sem(idx: int, chunk_dict: dict):
             async with sem:
                 result = await workflow.execute_activity(
-                    extract_chunk_activity,
-                    args=[transcript_meta, chunk_dict, enriched_speakers, sentences_dict],
+                    extract_dispositions_activity,
+                    args=[transcript_meta, chunk_dict, enriched_speakers],
                     start_to_close_timeout=timedelta(seconds=TIMEOUT_EXTRACT_CHUNK),
                     retry_policy=RetryPolicy(maximum_attempts=2),
                 )
-                chunk_results[idx] = result
+                grouping_results[idx] = result
 
         await asyncio.gather(*(
-            extract_with_sem(i, cd) for i, cd in enumerate(chunk_dicts)
+            group_with_sem(i, cd) for i, cd in enumerate(chunk_dicts)
         ))
 
+        total_claim_groups = sum(
+            sum(1 for g in gr["groups"] if g["disposition"] == "claim")
+            for gr in grouping_results
+        )
+        log.info(workflow.logger, MODULE, "pass1_done",
+                 "Pass 1 complete — all chunks grouped",
+                 transcript_id=transcript_id,
+                 total_claim_groups=total_claim_groups)
+
+        # ---------------------------------------------------------------
+        # Pass 2: Context injection (parallel pairs, skip chunks with 0 claims)
+        # ---------------------------------------------------------------
+        chunk_theses: list[list[dict]] = [[] for _ in chunk_dicts]
+
+        async def inject_with_sem(idx: int, chunk_dict: dict, grp_result: dict):
+            claim_groups = [g for g in grp_result.get("groups", [])
+                            if g["disposition"] == "claim"]
+            if not claim_groups:
+                return  # no claims in this chunk
+            async with sem:
+                result = await workflow.execute_activity(
+                    inject_context_activity,
+                    args=[transcript_meta, chunk_dict, grp_result,
+                          enriched_speakers, sentences_dict],
+                    start_to_close_timeout=timedelta(seconds=TIMEOUT_INJECT_CONTEXT),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
+                )
+                chunk_theses[idx] = result
+
+        await asyncio.gather(*(
+            inject_with_sem(i, cd, grouping_results[i])
+            for i, cd in enumerate(chunk_dicts)
+        ))
+
+        # Flatten
         all_theses: list[dict] = []
-        for theses in chunk_results:
+        for theses in chunk_theses:
             all_theses.extend(theses)
 
-        log.info(workflow.logger, MODULE, "extraction_done",
-                 "Extraction complete",
+        log.info(workflow.logger, MODULE, "pass2_done",
+                 "Pass 2 complete — all claims decontextualized",
                  transcript_id=transcript_id,
                  thesis_count=len(all_theses))
 
