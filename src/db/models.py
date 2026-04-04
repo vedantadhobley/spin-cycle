@@ -25,7 +25,7 @@ class Claim(Base):
     transcript_title = Column(String(512), nullable=True)  # source transcript title for topic context
     supporting_quotes = Column(JSONB, nullable=True)  # original transcript quotes supporting this claim
     status = Column(
-        Enum("queued", "pending", "processing", "verified", "flagged", name="claim_status"),
+        Enum("queued", "pending", "processing", "verified", "flagged", "extracted", name="claim_status"),
         default="pending",
         nullable=False,
     )
