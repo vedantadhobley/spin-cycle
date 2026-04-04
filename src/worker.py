@@ -28,11 +28,11 @@ from temporalio.worker import Worker  # noqa: E402
 
 from src.workflows.verify import VerifyClaimWorkflow  # noqa: E402
 from src.workflows.transcript_pipeline import TranscriptPipelineWorkflow  # noqa: E402
-from src.workflows.fetch_and_store import FetchAndStoreWorkflow  # noqa: E402
+from src.workflows.fetch_and_store import FetchTranscriptWorkflow  # noqa: E402
 from src.workflows.extract_claims import ExtractClaimsWorkflow  # noqa: E402
 from src.workflows.classify_and_dedup import ClassifyAndDedupWorkflow  # noqa: E402
 from src.workflows.synthesize_claims import SynthesizeClaimsWorkflow  # noqa: E402
-from src.workflows.verify_all_claims import VerifyAllClaimsWorkflow  # noqa: E402
+from src.workflows.verify_all_claims import VerifyClaimsWorkflow  # noqa: E402
 from src.activities.verify_activities import (  # noqa: E402
     create_claim,
     decompose_claim,
@@ -91,11 +91,11 @@ async def main():
         workflows=[
             VerifyClaimWorkflow,
             TranscriptPipelineWorkflow,
-            FetchAndStoreWorkflow,
+            FetchTranscriptWorkflow,
             ExtractClaimsWorkflow,
             ClassifyAndDedupWorkflow,
             SynthesizeClaimsWorkflow,
-            VerifyAllClaimsWorkflow,
+            VerifyClaimsWorkflow,
         ],
         activities=[
             # Verification pipeline

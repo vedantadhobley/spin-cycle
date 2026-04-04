@@ -3,6 +3,8 @@
 Runs VerifyClaimWorkflow as a child for each claim, one at a time.
 Each child gets both LLM slots (semaphore 2 inside VerifyClaimWorkflow).
 If a single claim fails after retries, it is skipped and the rest continue.
+
+Formerly VerifyAllClaimsWorkflow, renamed to VerifyClaimsWorkflow.
 """
 
 from temporalio import workflow
@@ -16,11 +18,11 @@ with workflow.unsafe.imports_passed_through():
     from src.utils.logging import log
     from src.config import TASK_QUEUE, TIMEOUT_STORE_CLAIMS
 
-MODULE = "verify_all_claims"
+MODULE = "verify_claims"
 
 
 @workflow.defn
-class VerifyAllClaimsWorkflow:
+class VerifyClaimsWorkflow:
     """Sequentially verify all claims for a transcript."""
 
     def __init__(self) -> None:

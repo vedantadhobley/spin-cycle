@@ -1,4 +1,4 @@
-"""Two-pass claim extraction — Phase 2 of the pipeline.
+"""Full claim extraction pipeline — extract, classify, dedup, synthesize.
 
 Sentencizes the transcript, builds sentence-based chunks, then runs two
 sequential LLM passes per chunk (parallel pairs within each pass):
@@ -6,7 +6,16 @@ sequential LLM passes per chunk (parallel pairs within each pass):
   Pass 1: Group sentences + label claim/not_claim (no thesis writing)
   Pass 2: Context-inject each claim group (resolve pronouns/references)
 
-Stores all claims once via INSERT.
+Then calls ClassifyAndDedupWorkflow and SynthesizeClaimsWorkflow as child
+workflows to classify, dedup, and synthesize the extracted claims.
+
+Pipeline phases:
+  1. Sentencize + chunk
+  2. Pass 1: Group + disposition (parallel pairs, sem=2)
+  3. Pass 2: Context injection (parallel pairs, skip chunks with 0 claims)
+  4. Store transcript_claims
+  5. Classify + dedup (child workflow)
+  6. Synthesize (child workflow)
 """
 
 import asyncio
@@ -22,10 +31,12 @@ with workflow.unsafe.imports_passed_through():
         store_transcript_claims,
         load_extract_inputs,
     )
+    from src.workflows.classify_and_dedup import ClassifyAndDedupWorkflow
+    from src.workflows.synthesize_claims import SynthesizeClaimsWorkflow
     from src.utils.logging import log
     from src.config import (
         MAX_CONCURRENT, TIMEOUT_EXTRACT_CHUNK, TIMEOUT_INJECT_CONTEXT,
-        TIMEOUT_STORE_CLAIMS,
+        TIMEOUT_STORE_CLAIMS, TASK_QUEUE,
     )
 
 MODULE = "extract_claims"
@@ -33,7 +44,7 @@ MODULE = "extract_claims"
 
 @workflow.defn
 class ExtractClaimsWorkflow:
-    """Extract claims from transcript chunks via two-pass LLM pipeline."""
+    """Extract, classify, dedup, and synthesize claims from a transcript."""
 
     @workflow.run
     async def run(
@@ -42,6 +53,8 @@ class ExtractClaimsWorkflow:
         transcript_meta: dict | None = None,
         enriched_speakers: list[dict] | None = None,
         turns: list[dict] | None = None,
+        source_url: str | None = None,
+        stop_after: str | None = None,
     ) -> dict:
         # Load from DB if inputs not provided (standalone mode)
         if transcript_meta is None or enriched_speakers is None or turns is None:
@@ -56,9 +69,10 @@ class ExtractClaimsWorkflow:
             turns = turns or loaded["turns"]
 
         log.info(workflow.logger, MODULE, "started",
-                 "Starting two-pass extraction",
+                 "Starting extraction pipeline",
                  transcript_id=transcript_id,
-                 title=transcript_meta["title"])
+                 title=transcript_meta["title"],
+                 stop_after=stop_after)
 
         # Sentencize and build chunks (activity — SpaCy can't run in workflow sandbox)
         sentencize_result = await workflow.execute_activity(
@@ -176,9 +190,71 @@ class ExtractClaimsWorkflow:
                     deduped_theses.append(t)
             all_theses = deduped_theses
 
+        if stop_after == "extract":
+            return {
+                "all_theses": all_theses,
+                "tc_ids": tc_ids,
+                "stopped_after": "extract",
+            }
+
+        # ---------------------------------------------------------------
+        # Phase 3: Classify + Dedup (child workflow)
+        # ---------------------------------------------------------------
+        dedup_result = await workflow.execute_child_workflow(
+            ClassifyAndDedupWorkflow.run,
+            args=[
+                transcript_id,
+                tc_ids,
+                all_theses,
+                enriched_speakers,
+            ],
+            id=f"classify-dedup-{workflow.info().workflow_id}",
+            task_queue=TASK_QUEUE,
+        )
+
+        if stop_after == "dedup":
+            return {
+                **dedup_result,
+                "stopped_after": "dedup",
+            }
+
+        # ---------------------------------------------------------------
+        # Phase 4: Synthesize (child workflow)
+        # ---------------------------------------------------------------
+        speaker_descriptions = {}
+        for s in enriched_speakers:
+            if isinstance(s, dict) and s.get("description"):
+                speaker_descriptions[s["name"]] = s["description"]
+
+        synth_result = await workflow.execute_child_workflow(
+            SynthesizeClaimsWorkflow.run,
+            args=[
+                transcript_id,
+                dedup_result["dedup_groups"],
+                dedup_result["classified_theses"],
+                enriched_speakers,
+                dedup_result["tc_ids"],
+                source_url or transcript_meta.get("url", ""),
+                transcript_meta.get("date"),
+                transcript_meta["title"],
+                transcript_meta.get("description") or "",
+                speaker_descriptions,
+            ],
+            id=f"synthesize-{workflow.info().workflow_id}",
+            task_queue=TASK_QUEUE,
+        )
+
+        log.info(workflow.logger, MODULE, "complete",
+                 "Extraction pipeline complete",
+                 transcript_id=transcript_id,
+                 thesis_count=len(all_theses),
+                 claim_count=len(synth_result.get("claim_ids", [])))
+
         return {
             "all_theses": all_theses,
             "tc_ids": tc_ids,
+            "checkable_groups": synth_result.get("checkable_groups", []),
+            "claim_ids": synth_result.get("claim_ids", []),
         }
 
 

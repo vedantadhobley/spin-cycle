@@ -1,17 +1,12 @@
-"""Orchestrator workflow for the transcript extraction pipeline.
+"""Orchestrator workflow for the transcript pipeline.
 
-Calls child workflows sequentially, passing data through return values.
+Calls three child workflows sequentially:
+  1. FetchTranscriptWorkflow   — fetch, parse, store, enrich speakers
+  2. ExtractClaimsWorkflow     — extract, classify, dedup, synthesize
+  3. VerifyClaimsWorkflow      — verify each claim sequentially
+
 Each child owns its activities and DB storage. The orchestrator's only
-direct activity is finish_transcript_and_start_next for queue management.
-
-Phases visible in Temporal UI:
-  1. fetching        — FetchAndStoreWorkflow
-  2. extracting      — ExtractClaimsWorkflow
-  3. classifying     — ClassifyAndDedupWorkflow (phase 1)
-  4. deduplicating   — ClassifyAndDedupWorkflow (phase 2)
-  5. synthesizing    — SynthesizeClaimsWorkflow
-  6. verifying       — VerifyClaimWorkflow × N
-  7. complete        — done
+direct activities are status updates and queue management.
 """
 
 from datetime import timedelta
@@ -25,11 +20,9 @@ with workflow.unsafe.imports_passed_through():
         notify_frontend_refresh,
         queue_claims_for_verification,
     )
-    from src.workflows.fetch_and_store import FetchAndStoreWorkflow
+    from src.workflows.fetch_and_store import FetchTranscriptWorkflow
     from src.workflows.extract_claims import ExtractClaimsWorkflow
-    from src.workflows.classify_and_dedup import ClassifyAndDedupWorkflow
-    from src.workflows.synthesize_claims import SynthesizeClaimsWorkflow
-    from src.workflows.verify_all_claims import VerifyAllClaimsWorkflow
+    from src.workflows.verify_all_claims import VerifyClaimsWorkflow
     from src.utils.logging import log
     from src.config import (
         TASK_QUEUE,
@@ -87,10 +80,10 @@ class TranscriptPipelineWorkflow:
                  "Starting transcript pipeline",
                  url=url, stop_after=stop_after)
 
-        # --- Phase 1: Fetch and Store ---
+        # --- Phase 1: Fetch ---
         self._set_phase("fetching")
         fetch_result = await workflow.execute_child_workflow(
-            FetchAndStoreWorkflow.run,
+            FetchTranscriptWorkflow.run,
             args=[url, raw_text, title, date],
             id=f"fetch-{workflow.info().workflow_id}",
             task_queue=TASK_QUEUE,
@@ -105,7 +98,7 @@ class TranscriptPipelineWorkflow:
             self._set_phase("complete")
             return {**fetch_result, "stopped_after": "fetch"}
 
-        # --- Phase 2: Extract Claims ---
+        # --- Phase 2: Extract + Classify + Dedup + Synthesize ---
         self._set_phase("extracting")
         extract_result = await workflow.execute_child_workflow(
             ExtractClaimsWorkflow.run,
@@ -114,75 +107,36 @@ class TranscriptPipelineWorkflow:
                 fetch_result["transcript_meta"],
                 fetch_result["enriched_speakers"],
                 fetch_result["turns"],
+                url,
+                stop_after,
             ],
             id=f"extract-claims-{workflow.info().workflow_id}",
             task_queue=TASK_QUEUE,
         )
-        self._thesis_count = len(extract_result["all_theses"])
-
-        if stop_after == "extract":
-            await self._mark_complete()
-            return {**extract_result, "stopped_after": "extract"}
-
-        # --- Phase 3: Classify and Dedup ---
-        self._set_phase("classifying")
-        dedup_result = await workflow.execute_child_workflow(
-            ClassifyAndDedupWorkflow.run,
-            args=[
-                fetch_result["transcript_id"],
-                extract_result["tc_ids"],
-                extract_result["all_theses"],
-                fetch_result["enriched_speakers"],
-            ],
-            id=f"classify-dedup-{workflow.info().workflow_id}",
-            task_queue=TASK_QUEUE,
-        )
-
-        if stop_after == "dedup":
-            await self._mark_complete()
-            return {**dedup_result, "stopped_after": "dedup"}
-
-        # --- Phase 4: Synthesize ---
-        self._set_phase("synthesizing")
-
-        # Build speaker descriptions from enriched speakers
-        speaker_descriptions = {}
-        for s in fetch_result["enriched_speakers"]:
-            if isinstance(s, dict) and s.get("description"):
-                speaker_descriptions[s["name"]] = s["description"]
-
-        synth_result = await workflow.execute_child_workflow(
-            SynthesizeClaimsWorkflow.run,
-            args=[
-                fetch_result["transcript_id"],
-                dedup_result["dedup_groups"],
-                dedup_result["classified_theses"],
-                fetch_result["enriched_speakers"],
-                dedup_result["tc_ids"],
-                url,
-                fetch_result["transcript_meta"].get("date"),
-                self._title,
-                fetch_result["transcript_meta"].get("description") or "",
-                speaker_descriptions,
-            ],
-            id=f"synthesize-{workflow.info().workflow_id}",
-            task_queue=TASK_QUEUE,
-        )
-        self._claim_count = len(synth_result.get("claim_ids", []))
+        self._thesis_count = len(extract_result.get("all_theses", []))
+        self._claim_count = len(extract_result.get("claim_ids", []))
         workflow.upsert_search_attributes([
             SA_CLAIM_COUNT.value_set(self._claim_count),
         ])
 
+        # Early stop gates handled inside ExtractClaimsWorkflow
+        if extract_result.get("stopped_after"):
+            await self._mark_complete()
+            return extract_result
+
         if stop_after == "synthesize":
             await self._mark_complete()
-            return {**synth_result, "stopped_after": "synthesize"}
+            return {**extract_result, "stopped_after": "synthesize"}
 
-        # --- Phase 5: Verify ---
-        if synth_result.get("claim_ids"):
+        # --- Phase 3: Verify ---
+        claim_ids = extract_result.get("claim_ids", [])
+        checkable_groups = extract_result.get("checkable_groups", [])
+
+        if claim_ids:
             # Flip claims from 'extracted' → 'queued' so verification can run
             await workflow.execute_activity(
                 queue_claims_for_verification,
-                args=[synth_result["claim_ids"]],
+                args=[claim_ids],
                 start_to_close_timeout=timedelta(seconds=TIMEOUT_UPDATE_STATUS),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
@@ -202,12 +156,15 @@ class TranscriptPipelineWorkflow:
             transcript_date = fetch_result["transcript_meta"].get("date") or "unknown"
             transcript_description = fetch_result["transcript_meta"].get("description") or ""
 
-            # Build claim dicts for VerifyAllClaimsWorkflow
+            # Build speaker descriptions for verification
+            speaker_descriptions = {}
+            for s in fetch_result["enriched_speakers"]:
+                if isinstance(s, dict) and s.get("description"):
+                    speaker_descriptions[s["name"]] = s["description"]
+
+            # Build claim dicts for VerifyClaimsWorkflow
             verify_claims = []
-            for claim_id_str, group in zip(
-                synth_result["claim_ids"],
-                synth_result["checkable_groups"],
-            ):
+            for claim_id_str, group in zip(claim_ids, checkable_groups):
                 speaker_name = group["speaker"]
                 verify_claims.append({
                     "claim_id": claim_id_str,
@@ -223,7 +180,7 @@ class TranscriptPipelineWorkflow:
                 })
 
             verify_result = await workflow.execute_child_workflow(
-                VerifyAllClaimsWorkflow.run,
+                VerifyClaimsWorkflow.run,
                 args=[verify_claims],
                 id=f"verify-all-{workflow.info().workflow_id}",
                 task_queue=TASK_QUEUE,

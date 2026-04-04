@@ -16,7 +16,7 @@ Activities:
  12. load_extract_inputs           — load DB state for ExtractClaimsWorkflow
  13. load_classify_inputs          — load DB state for ClassifyAndDedupWorkflow
  14. load_synthesize_inputs        — load DB state for SynthesizeClaimsWorkflow
- 15. load_verify_inputs            — load DB state for VerifyAllClaimsWorkflow
+ 15. load_verify_inputs            — load DB state for VerifyClaimsWorkflow
 
 Each chunk is a separate activity so it's visible in Temporal UI.
 The workflow orchestrates chunks — Temporal's max_concurrent_activities
@@ -928,7 +928,7 @@ async def create_claims_for_transcript(
 async def queue_claims_for_verification(claim_ids: list[str]) -> int:
     """Flip claims from 'extracted' to 'queued' so verification picks them up.
 
-    Called by the orchestrator right before starting VerifyAllClaimsWorkflow.
+    Called by the orchestrator right before starting VerifyClaimsWorkflow.
     This is the only place claims transition to 'queued' status.
     """
     from sqlalchemy import select
@@ -1265,7 +1265,7 @@ async def load_synthesize_inputs(transcript_id: str) -> dict:
 
 @activity.defn
 async def load_verify_inputs(transcript_id: str) -> list[dict]:
-    """Load inputs for VerifyAllClaimsWorkflow from DB.
+    """Load inputs for VerifyClaimsWorkflow from DB.
 
     Returns list of claim dicts ready for sequential verification.
     Only includes claims with status='queued' linked to this transcript.

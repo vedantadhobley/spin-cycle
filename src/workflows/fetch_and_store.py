@@ -2,6 +2,8 @@
 
 Fetches/parses the transcript, stores it in DB, enriches speakers.
 Returns transcript_id, enriched_speakers, transcript_meta, and turns.
+
+Formerly FetchAndStoreWorkflow, renamed to FetchTranscriptWorkflow.
 """
 
 from datetime import timedelta
@@ -22,11 +24,11 @@ with workflow.unsafe.imports_passed_through():
         TIMEOUT_ATTRIBUTE_SPEAKERS,
     )
 
-MODULE = "fetch_and_store"
+MODULE = "fetch_transcript"
 
 
 @workflow.defn
-class FetchAndStoreWorkflow:
+class FetchTranscriptWorkflow:
     """Fetch, parse, and store a transcript with speaker enrichment."""
 
     @workflow.run
