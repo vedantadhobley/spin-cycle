@@ -17,7 +17,7 @@ from langchain_core.tools import tool
 from src.tools.source_filter import filter_results, warm_mbfc_cache_background
 from src.utils.logging import log, get_logger
 
-MODULE = "tools"
+MODULE = "brave"
 logger = get_logger()
 
 BRAVE_API_KEY = os.getenv("BRAVE_API_KEY", "")

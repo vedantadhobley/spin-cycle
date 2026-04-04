@@ -16,7 +16,7 @@ from src.config import PAGE_FETCH_TIMEOUT, PAGE_FETCH_MAX_CONTENT
 from src.tools.source_filter import is_blocked
 from src.utils.logging import log, get_logger
 
-MODULE = "tools"
+MODULE = "page_fetcher"
 logger = get_logger()
 
 # User agent — identify ourselves honestly

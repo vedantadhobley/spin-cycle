@@ -59,11 +59,17 @@ curl -X POST http://localhost:4500/transcripts \
 flowchart TD
     POST["POST /transcripts"] --> PIPE["TranscriptPipelineWorkflow\n(orchestrator)"]
 
-    PIPE --> FETCH["FetchAndStoreWorkflow\n(C-SPAN Playwright / raw text parser\n→ Wikidata speaker enrichment)"]
-    FETCH --> EXTRACT["ExtractClaimsWorkflow\n(word-based chunking ~2500w\n→ parallel LLM extraction)"]
-    EXTRACT --> CLASSIFY["ClassifyAndDedupWorkflow\n(LLM classification + embedding dedup)"]
-    CLASSIFY --> SYNTH["SynthesizeClaimsWorkflow\n(multi-member LLM synthesis\n→ create Claim records)"]
-    SYNTH --> VERIFY["VerifyAllClaimsWorkflow\n(sequential verification)"]
+    PIPE --> FETCH["FetchTranscriptWorkflow\n(C-SPAN / SingjuPost / raw text\n→ Wikidata speaker enrichment)"]
+    FETCH --> ECW
+
+    subgraph ECW["ExtractClaimsWorkflow"]
+        direction TB
+        EX["Two-pass extraction\n(sentence chunks ~50\n→ group + context inject)"]
+        EX --> CL["ClassifyAndDedupWorkflow\n(LLM classification + embedding dedup)"]
+        CL --> SY["SynthesizeClaimsWorkflow\n(merge clusters → Claim records)"]
+    end
+
+    ECW --> VERIFY["VerifyClaimsWorkflow\n(sequential verification)"]
 ```
 
 ### 2. Manual Claim Submission
@@ -270,15 +276,15 @@ docker logs -f spin-cycle-dev-worker
 # I [WORKER    ] ready: Worker listening | task_queue=spin-cycle-verify activity_count=25 workflow_count=7
 
 # --- Transcript extraction pipeline ---
-# I [FETCH     ] start: Fetching transcript | url=...
-# I [EXTRACT   ] chunk_start: Starting chunk extraction | chunk_index=0 total_chunks=5
-# I [THESIS_EXT] chunk_extracted: Theses extracted from chunk | count=12 chunk_index=0
-# I [CLASSIFY  ] start: Starting claim classification | claim_count=33
-# I [CLAIM_CLAS] classify_done: Classification complete | count=33 matched=33
-# I [DEDUP     ] start: Starting embedding dedup | speaker=... claim_count=33
-# I [CLAIM_DEDU] dedup_done: Dedup complete for speaker | cluster_count=28 multi_member=2
-# I [SYNTHESIZE] synth_multi: Synthesizing multi-member groups | multi=2 single=19
-# I [SYNTHESIZE] claims_created: Created 21 Claim records | claim_count=21
+# I [FETCH_TRAN] started: Fetching transcript | url=...
+# I [EXTRACT_CL] started: Starting extraction pipeline | transcript_id=... title=...
+# I [THESIS_EXT] pass1_done: Pass 1 complete | chunk_index=0 claim_groups=8 not_claim_groups=2
+# I [THESIS_EXT] pass2_done: Pass 2 complete | chunk_index=0 thesis_count=6
+# I [EXTRACT_CL] pass2_done: Pass 2 complete — all claims decontextualized | thesis_count=62
+# I [CLASSIFY_A] classify_done: Classification complete | claim_count=62
+# I [CLAIM_DEDU] dedup_done: Dedup complete for speaker | cluster_count=60 multi_member=1
+# I [SYNTHESIZE] synthesis_done: Synthesis complete | checkable=60
+# I [EXTRACT_CL] complete: Extraction pipeline complete | thesis_count=62 claim_count=60
 
 # --- Claim verification pipeline ---
 # I [DECOMPOSE ] done: Claim decomposed | sub_count=3 thesis=...
@@ -348,7 +354,8 @@ spin-cycle/
 │   │   ├── client.py               # ChatOpenAI client setup
 │   │   ├── invoker.py              # invoke_llm() — structured output + retries
 │   │   ├── parser.py               # Response parsing helpers
-│   │   └── validators.py           # Semantic validators (normalize, decompose, judge, synthesize, extraction)
+│   │   ├── embeddings.py           # Embedding client (Qwen3-Embedding-8B)
+│   │   └── validators.py           # Semantic validators (grouping, context injection, etc.)
 │   │
 │   ├── utils/                      # Shared utilities
 │   │   ├── logging.py              # Structured logging (JSON for Loki, pretty for dev)
@@ -389,9 +396,10 @@ spin-cycle/
 │   │
 │   ├── prompts/                    # LLM prompts (heavily documented)
 │   │   ├── verification.py         # Normalize, Decompose, Research, Judge, Synthesize
-│   │   ├── extraction.py           # Thesis extraction (Phase 1)
-│   │   ├── classification.py       # Batch claim classification (Phase 2)
-│   │   └── claim_review.py         # Claim synthesis (Phase 2b)
+│   │   ├── extraction.py           # Two-pass extraction (grouping + context injection)
+│   │   ├── classification.py       # Batch claim classification
+│   │   ├── speaker_attribution.py  # LLM speaker attribution
+│   │   └── claim_review.py         # Claim synthesis
 │   │
 │   ├── schemas/                    # Data schemas
 │   │   ├── api.py                  # Pydantic API request/response models
@@ -400,11 +408,11 @@ spin-cycle/
 │   │
 │   ├── workflows/
 │   │   ├── transcript_pipeline.py  # TranscriptPipelineWorkflow (orchestrator)
-│   │   ├── fetch_and_store.py      # FetchAndStoreWorkflow
-│   │   ├── extract_claims.py       # ExtractClaimsWorkflow (chunked extraction)
-│   │   ├── classify_and_dedup.py   # ClassifyAndDedupWorkflow
-│   │   ├── synthesize_claims.py    # SynthesizeClaimsWorkflow
-│   │   ├── verify_all_claims.py    # VerifyAllClaimsWorkflow
+│   │   ├── fetch_and_store.py      # FetchTranscriptWorkflow
+│   │   ├── extract_claims.py       # ExtractClaimsWorkflow (extract + classify + dedup + synthesize)
+│   │   ├── classify_and_dedup.py   # ClassifyAndDedupWorkflow (child of ExtractClaims)
+│   │   ├── synthesize_claims.py    # SynthesizeClaimsWorkflow (child of ExtractClaims)
+│   │   ├── verify_all_claims.py    # VerifyClaimsWorkflow (sequential verification)
 │   │   └── verify.py               # VerifyClaimWorkflow (single claim)
 │   │
 │   ├── activities/
@@ -416,22 +424,30 @@ spin-cycle/
 │   │   │   ├── __init__.py         # SpeakerTurn, TranscriptData, normalize_turns()
 │   │   │   └── raw_text.py         # Raw text parser
 │   │   ├── cspan.py                # C-SPAN Playwright fetcher + parser
-│   │   ├── thesis_extractor.py     # Word-based chunking + extraction (Phase 1)
+│   │   ├── singjupost.py           # SingjuPost HTML parser
+│   │   ├── rev.py                  # Rev.com transcript parser
+│   │   ├── thesis_extractor.py     # Sentence-based chunking + two-pass extraction
 │   │   ├── claim_classifier.py     # Rubric-based checkability classification (Phase 2)
 │   │   ├── claim_dedup.py          # Embedding-based per-speaker dedup (Phase 2)
-│   │   ├── claim_synthesizer.py    # Per-group overarching claim (Phase 2b)
+│   │   ├── claim_synthesizer.py    # Per-group overarching claim
 │   │   ├── speakers.py             # Wikidata speaker enrichment
+│   │   ├── speaker_resolution.py   # Shared speaker resolution (resolver registry)
 │   │   └── cspan_discovery.py      # C-SPAN transcript auto-discovery (stub)
 │   │
 │   └── db/
 │       ├── models.py               # SQLAlchemy models (9 tables)
 │       └── session.py              # Async DB sessions
 │
+├── scripts/
+│   └── init_db.py                   # One-time DB schema init
+│
 └── tests/
     ├── test_health.py               # Health endpoint tests
     ├── test_schemas.py              # Schema validation tests
     ├── test_evidence_ranker.py      # Evidence ranking tests
     ├── test_extraction_fii.py       # Transcript pipeline integration tests
+    ├── audit_extraction.py          # Sentence → claim mapping audit
+    ├── audit_full.py                # Full transcript audit with issue detection
     ├── regression_claims.py         # Known-answer regression suite
     └── stress_claims.py             # Load/stress testing
 ```

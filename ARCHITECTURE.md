@@ -6,15 +6,15 @@ Spin Cycle is an automated news claim verification system. The goal: take verifi
 
 ```mermaid
 flowchart LR
-    T["Transcripts\n(C-SPAN / raw text)"] --> TW["TranscriptPipelineWorkflow\n(Temporal orchestrator)"]
+    T["Transcripts\n(C-SPAN / SingjuPost / raw text)"] --> TW["TranscriptPipelineWorkflow\n(Temporal orchestrator)"]
     API["POST /claims\n(manual)"] --> VW
-    TW --> |"extracted claims"| VW["VerifyAllClaimsWorkflow\n(Temporal)"]
+    TW --> |"extracted claims"| VW["VerifyClaimsWorkflow\n(Temporal)"]
     VW --> DB[(PostgreSQL)]
     DB --> FastAPI["FastAPI\n(read layer)"]
     FastAPI --> FE["vedanta-systems\n(frontend @ 3100)"]
 ```
 
-The primary intake is **transcript extraction** — Temporal workflows fetch transcripts from C-SPAN (via Playwright) or accept raw text, the LLM extracts verifiable claims via overlapping word-based chunks, and each claim is fed into the verification pipeline. The FastAPI backend is a **read layer** for the frontend, with a secondary `POST /claims` for manual submission.
+The primary intake is **transcript extraction** — Temporal workflows fetch transcripts from C-SPAN (via Playwright), SingjuPost, or raw text, then a two-pass LLM pipeline extracts verifiable claims via sentence-based chunks (~50 sentences each). Each claim is classified, deduplicated, synthesized, and fed into the verification pipeline. The FastAPI backend is a **read layer** for the frontend, with a secondary `POST /claims` for manual submission.
 
 ---
 
@@ -577,40 +577,45 @@ Parser → list[SpeakerTurn] → normalize_turns() → build_chunks() → list[C
 flowchart TD
     URL["POST /transcripts\n{url}"] --> PIPE["TranscriptPipelineWorkflow\n(orchestrator)"]
 
-    PIPE --> FETCH["FetchAndStoreWorkflow\n(C-SPAN Playwright / raw text parser\n→ store + Wikidata speaker enrichment)"]
+    PIPE --> FETCH["FetchTranscriptWorkflow\n(C-SPAN / SingjuPost / raw text\n→ store + Wikidata speaker enrichment)"]
 
-    FETCH --> EXTRACT["ExtractClaimsWorkflow\n(build_chunks → Pass 1: group+classify × N\n→ Pass 2: context inject × N\nsemaphore=2, parallel pairs → INSERT once)"]
+    FETCH --> ECW
 
-    EXTRACT --> CLASSIFY["ClassifyAndDedupWorkflow\n(batch classify → UPDATE\n→ per-speaker embedding dedup → UPDATE)"]
+    subgraph ECW["ExtractClaimsWorkflow"]
+        direction TB
+        EX["Two-pass extraction\n(sentence chunks ~50\n→ Pass 1: group + classify\n→ Pass 2: context inject)"]
+        EX --> CL["ClassifyAndDedupWorkflow\n(batch classify → UPDATE\n→ per-speaker embedding dedup)"]
+        CL --> SY["SynthesizeClaimsWorkflow\n(merge clusters → Claim records)"]
+    end
 
-    CLASSIFY --> SYNTH["SynthesizeClaimsWorkflow\n(multi-member synthesis, parallel pairs\n→ create Claim records + link FKs)"]
-
-    SYNTH --> VERIFY["VerifyAllClaimsWorkflow\n(sequential: VerifyClaimWorkflow × N)"]
+    ECW --> VERIFY["VerifyClaimsWorkflow\n(sequential: VerifyClaimWorkflow × N)"]
 
     VERIFY --> DONE["Mark transcript complete\nStart next queued transcript"]
 ```
 
 The orchestrator exposes a `status()` query with phase, claim counts, and title (visible in Temporal UI via search attributes). The `stop_after` parameter allows halting after any phase for testing.
 
-### Phase 1 — Chunked Extraction
+### Phase 1 — Two-Pass Extraction
 
-Word-based chunking: ~2500 words target, ~500 words overlap each side. Long monologues are split at paragraph > sentence boundaries before chunking (recursive).
+Sentence-based chunking: ~50 sentences target, ~15 sentences overlap. Speaker-turn-aware cutoff extends up to 10 sentences to hit a speaker boundary. Small remainders are absorbed into the last chunk.
 
 Multi-chunk transcripts use text section markers to guide the LLM:
 ```
-## Context (do not extract claims from this section)
-Speaker A: previous text...
+## Context (do not extract from this section)
+[S35] Speaker A: previous text...
 
-## Extract claims from this section
-Speaker A: target content...
+## Extract claims from sentences S50 through S99
+[S50] Speaker A: target content...
 
-## Context (do not extract claims from this section)
-Speaker B: trailing text...
+## Context (do not extract from this section)
+[S100] Speaker B: trailing text...
 ```
 
-Small transcripts (≤2500 words) become a single chunk with no markers.
+Small transcripts (≤50 sentences) become a single chunk with no context markers.
 
-**Post-processing:** `_validate_quotes_in_target()` verifies each `original_quote` appears (case-insensitive substring) in `chunk.target_text`. Claims whose quotes only appear in context sections or are too short (<10 chars) are dropped.
+**Pass 1 (Grouping + Disposition):** Groups sentences by rhetorical paragraph, labels each group claim/not_claim. No thesis writing — the model only decides structure. A programmatic validator enforces full sentence coverage and splits any cross-speaker groups.
+
+**Pass 2 (Context Injection):** Takes each claim group's raw sentences + surrounding context, resolves pronouns/references to produce standalone statements. This is editing, not writing from scratch. `original_quote` is derived programmatically from sentence text (not LLM output).
 
 ### Phase 2 — Classification + Dedup (`ClassifyAndDedupWorkflow`)
 
@@ -653,14 +658,15 @@ Multi-member dedup clusters get a synthesized overarching claim via LLM. Single-
 | `src/transcript/claim_dedup.py` | `dedup_speaker_claims()` — embedding-based per-speaker dedup |
 | `src/transcript/claim_synthesizer.py` | `synthesize_claim()` — per-group overarching claim |
 | `src/transcript/speakers.py` | `_enrich_speakers()` — Wikidata speaker description lookup |
-| `src/prompts/extraction.py` | `THESIS_EXTRACTION_SYSTEM` / `THESIS_EXTRACTION_USER` |
-| `src/prompts/claim_review.py` | Classification + synthesis prompts, formatting helpers |
-| `src/workflows/transcript_pipeline.py` | `TranscriptPipelineWorkflow` (orchestrator) |
-| `src/workflows/fetch_and_store.py` | `FetchAndStoreWorkflow` (fetch + store + speaker enrichment) |
-| `src/workflows/extract_claims.py` | `ExtractClaimsWorkflow` (chunked parallel extraction) |
-| `src/workflows/classify_and_dedup.py` | `ClassifyAndDedupWorkflow` (batch classify + embedding dedup) |
-| `src/workflows/synthesize_claims.py` | `SynthesizeClaimsWorkflow` (parallel pair synthesis + claim creation) |
-| `src/workflows/verify_all_claims.py` | `VerifyAllClaimsWorkflow` (sequential verification of all claims) |
+| `src/prompts/extraction.py` | `GROUPING_SYSTEM/USER`, `CONTEXT_INJECT_SYSTEM/USER` |
+| `src/prompts/classification.py` | Batch classification prompts |
+| `src/prompts/claim_review.py` | Synthesis prompts, formatting helpers |
+| `src/workflows/transcript_pipeline.py` | `TranscriptPipelineWorkflow` (orchestrator: fetch → extract → verify) |
+| `src/workflows/fetch_and_store.py` | `FetchTranscriptWorkflow` (fetch + store + speaker enrichment) |
+| `src/workflows/extract_claims.py` | `ExtractClaimsWorkflow` (extract + classify + dedup + synthesize) |
+| `src/workflows/classify_and_dedup.py` | `ClassifyAndDedupWorkflow` (child of ExtractClaims) |
+| `src/workflows/synthesize_claims.py` | `SynthesizeClaimsWorkflow` (child of ExtractClaims) |
+| `src/workflows/verify_all_claims.py` | `VerifyClaimsWorkflow` (sequential verification of all claims) |
 | `src/llm/invoker.py` | `invoke_llm()` — streaming invocation with idle timeout, retry, validation |
 
 ---
@@ -1346,7 +1352,7 @@ Config: `~/workspace/monitor/promtail/promtail.yml`
 | Docker infrastructure | **Done** | 7 containers, health checks, volume persistence |
 | PostgreSQL schema | **Done** | 9 tables: claims (+ decompose rubric), sub_claims (+ categories, judge_rubric), evidence (+ quality metadata), verdicts (+ synthesis_rubric), interested_parties, transcripts, transcript_claims (+ extraction metadata), source_ratings, wikidata_cache |
 | FastAPI API | **Done** | POST/GET claims, health check, lifespan management |
-| Temporal workflows | **Done** | 7 workflows: TranscriptPipelineWorkflow (orchestrator), FetchAndStore, ExtractClaims, ClassifyAndDedup, SynthesizeClaims, VerifyAllClaims, VerifyClaim |
+| Temporal workflows | **Done** | 7 workflows: TranscriptPipelineWorkflow (orchestrator), FetchTranscript, ExtractClaims (absorbs classify+dedup+synthesize as children), ClassifyAndDedup, SynthesizeClaims, VerifyClaims, VerifyClaim |
 | Temporal worker | **Done** | Registers 7 workflows + 25 activities, max_concurrent_activities=2, structured logging |
 | `decompose_claim` | **Done** | LLM decomposes text into flat facts (guided by 15 extraction rules) + thesis (structure, key_test) in one pass |
 | `research_subclaim` | **Done** | LangGraph ReAct agent with Serper (primary) + DuckDuckGo (fallback) + Brave (optional) + Wikipedia + page_fetcher |
@@ -1365,7 +1371,7 @@ See [ROADMAP.md](ROADMAP.md) for the full prioritised improvement plan. Key next
 
 | Component | Status | Details |
 |-----------|--------|--------|
-| Transcript extraction | **Done** | TranscriptPipelineWorkflow: C-SPAN Playwright fetch + raw text parser → SpeakerTurn → word-based chunking (~2500w/chunk, ~500w overlap) → thesis extraction → batch classification → embedding-based dedup → synthesis → sequential verification. Quote-based attribution (original_quote substring match). Streaming LLM invocation with idle timeout. |
+| Transcript extraction | **Done** | TranscriptPipelineWorkflow → FetchTranscript → ExtractClaims (absorbs classify+dedup+synthesize) → VerifyClaims. Two-pass extraction: sentence-based chunking (~50 sent/chunk, ~15 overlap), Pass 1 groups+classifies, Pass 2 context-injects. Programmatic speaker boundary enforcement. Streaming LLM invocation with idle timeout. |
 | Data persistence | **Done** | All intermediate data persisted: decompose rubric, judge rubric, synthesis rubric, interested parties, extraction metadata. Enables retrospective debugging |
 | Grafana dashboard | **Done** | Pipeline KPIs, verdict trends, LLM latency, evidence quality, transcript metrics, error tracking. Loki datasource |
 | Rubric-based prompts | **Done** | Judge (5-step) and Synthesize (4-step) rubrics with structured output. Decompose (2-step) with categories and seed queries |
@@ -1581,17 +1587,17 @@ spin-cycle/
 │   │
 │   ├── prompts/                    # All LLM prompts with documentation
 │   │   ├── verification.py         # Normalize, Decompose, Research, Judge, Synthesize
-│   │   ├── extraction.py           # Thesis extraction (Phase 1)
-│   │   ├── classification.py       # Batch claim classification (Phase 2)
-│   │   └── claim_review.py         # Claim synthesis (Phase 2b)
+│   │   ├── extraction.py           # Two-pass extraction (grouping + context injection)
+│   │   ├── classification.py       # Batch claim classification
+│   │   └── claim_review.py         # Claim synthesis
 │   │
 │   ├── workflows/                  # Temporal workflow definitions
 │   │   ├── transcript_pipeline.py  # TranscriptPipelineWorkflow (orchestrator)
-│   │   ├── fetch_and_store.py      # FetchAndStoreWorkflow (fetch + store)
-│   │   ├── extract_claims.py       # ExtractClaimsWorkflow (chunked extraction)
-│   │   ├── classify_and_dedup.py   # ClassifyAndDedupWorkflow (classify + embedding dedup)
-│   │   ├── synthesize_claims.py    # SynthesizeClaimsWorkflow (synthesis + claim creation)
-│   │   ├── verify_all_claims.py    # VerifyAllClaimsWorkflow (sequential verification)
+│   │   ├── fetch_and_store.py      # FetchTranscriptWorkflow (fetch + store)
+│   │   ├── extract_claims.py       # ExtractClaimsWorkflow (extract + classify + dedup + synthesize)
+│   │   ├── classify_and_dedup.py   # ClassifyAndDedupWorkflow (child of ExtractClaims)
+│   │   ├── synthesize_claims.py    # SynthesizeClaimsWorkflow (child of ExtractClaims)
+│   │   ├── verify_all_claims.py    # VerifyClaimsWorkflow (sequential verification)
 │   │   └── verify.py               # VerifyClaimWorkflow (single claim verification)
 │   │
 │   ├── activities/                 # Temporal activity implementations

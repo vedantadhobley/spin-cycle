@@ -16,7 +16,7 @@ from src.config import SERPER_TIMEOUT
 from src.tools.source_filter import filter_results, warm_mbfc_cache_background
 from src.utils.logging import log, get_logger
 
-MODULE = "tools"
+MODULE = "serper"
 logger = get_logger()
 
 SERPER_API_KEY = os.getenv("SERPER_API_KEY", "")

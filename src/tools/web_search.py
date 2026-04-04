@@ -17,7 +17,7 @@ from langchain_core.tools import tool
 from src.tools.source_filter import filter_results
 from src.utils.logging import log, get_logger
 
-MODULE = "tools"
+MODULE = "web_search"
 logger = get_logger()
 
 

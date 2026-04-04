@@ -15,7 +15,7 @@ from langchain_core.tools import tool
 
 from src.utils.logging import log, get_logger
 
-MODULE = "tools"
+MODULE = "wikipedia"
 logger = get_logger()
 
 

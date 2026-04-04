@@ -21,7 +21,7 @@ from typing import Optional
 from src.tools.source_ratings import extract_domain
 from src.utils.logging import log, get_logger
 
-MODULE = "tools"
+MODULE = "source_filter"
 logger = get_logger()
 
 # Hard blocklist — things that are NOT news sources at all.

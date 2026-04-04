@@ -30,7 +30,7 @@ A working end-to-end claim verification pipeline with **flat fact extraction + t
 - Results stored in Postgres with sub-claims, evidence, and reasoning chains
 - **Full intermediate data persistence** — decompose rubric (thesis, structure, claim_analysis), judge rubric (5-step assessment), synthesis rubric (thesis_survives, subclaim_weights), interested parties table. All stored in DB for debugging and frontend display.
 - Temporal orchestrates everything with retries and durability (25 activities, 7 workflows)
-- **Transcript extraction pipeline** — `TranscriptPipelineWorkflow` orchestrates 5 child workflows: fetch → extract (word-based chunking ~2500w/chunk, ~500w overlap) → classify (LLM rubric classification) + dedup (embedding cosine similarity, threshold 0.85, numeric divergence guard) → synthesize → verify. INSERT once, UPDATE twice pattern. Stores ALL claims with extraction metadata. One-pipeline-at-a-time constraint matches LLM server capacity. Claims created as `extracted` status (inert), only flipped to `queued` when verify phase begins.
+- **Transcript extraction pipeline** — `TranscriptPipelineWorkflow` orchestrates 3 child workflows: `FetchTranscriptWorkflow` → `ExtractClaimsWorkflow` (which itself runs classify+dedup+synthesize as children) → `VerifyClaimsWorkflow`. Two-pass extraction: Pass 1 groups sentences by rhetorical paragraph + labels claim/not_claim, Pass 2 resolves references. Sentence-based chunking (~50 sentences/chunk, ~15 overlap). INSERT once, UPDATE twice pattern. One-pipeline-at-a-time constraint matches LLM server capacity. Claims created as `extracted` status (inert), only flipped to `queued` when verify phase begins.
 - **Transcript → verification bridge** — extracted claims auto-submit to verification queue with FK linking `transcript_claims → claims → sub_claims → evidence → verdicts`
 - **Grafana dashboard** — provisioned Loki dashboard (28 panels) for pipeline status, verdict distribution, LLM latency, evidence quality, transcript progress, error monitoring
 - Production-grade structured JSON logging (for Grafana Loki, pretty format for dev) — INFO for pipeline milestones, DEBUG for per-query tool noise
@@ -346,9 +346,9 @@ Right now you manually POST claims. To actually audit politicians and pundits at
 
 **What was implemented:**
 - C-SPAN Playwright fetcher + raw text parser (`src/transcript/cspan.py`, `src/transcript/parsers/`)
-- SpeakerTurn-based architecture: parsers → `normalize_turns()` → `build_chunks()` (word-based, ~2500w target, ~500w overlap)
-- `TranscriptPipelineWorkflow` orchestrator with 5 child workflows: FetchAndStore → ExtractClaims → ClassifyAndDedup → SynthesizeClaims → VerifyAllClaims
-- Exhaustive thesis extraction per chunk — no skip rules except greetings/filler (downstream classifier handles checkability)
+- SpeakerTurn-based architecture: parsers → `normalize_turns()` → `sentencize_transcript()` → `build_sentence_chunks()` (~50 sentences target, ~15 overlap)
+- `TranscriptPipelineWorkflow` orchestrator with 3 child workflows: FetchTranscript → ExtractClaims (absorbs classify+dedup+synthesize) → VerifyClaims
+- Two-pass extraction per chunk — Pass 1 groups sentences + classifies disposition, Pass 2 context-injects claim groups. Downstream classifier handles checkability.
 - Rubric-based classification: factual_anchor → classification → checkable flag (via `classify_claims_batch()`)
 - Embedding-based per-speaker dedup: cosine similarity (threshold 0.85) with numeric-skeleton divergence guard (Jaccard 0.7)
 - Per-group claim synthesis for multi-member dedup clusters (parallel, semaphore=2)
