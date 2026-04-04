@@ -36,8 +36,10 @@ Two steps, in order:
 
 For each sentence in the EXTRACT range, assign a group number. A group \
 is a rhetorical paragraph — the set of sentences where the speaker is \
-making one point or advancing one argument. A new group starts only \
-when the speaker shifts to a fundamentally different subject.
+making one point, advancing one argument, or building one comparison. \
+A new group starts when:
+- The speaker changes (different speakers are ALWAYS in separate groups)
+- The same speaker shifts to a fundamentally different subject
 
 Short sentences (roughly under 10 words) almost never introduce a new \
 subject. They typically elaborate, list examples, emphasize, or restate \

@@ -58,7 +58,8 @@ pass focus on one thing.
 3. **Both issues are one problem:** Over-atomization prevents filler from being absorbed into the adjacent claim group. If S5 is in the same group as the Artemis sentences, context injection produces one clean Artemis claim and the filler disappears. The grouping granularity is the root cause.
 
 **Fix applied:** Reframed grouping from per-assertion to per-rhetorical-paragraph. Key changes:
-- "A group is a rhetorical paragraph — one point or one argument"
+- "A group is a rhetorical paragraph — one point, one argument, or one comparison"
+- "Speaker change always starts a new group" (prompt + programmatic validator enforcement)
 - "New group only when speaker shifts to fundamentally different subject"
 - "Short sentences (~<10 words) almost never introduce new subjects — default to current group"
 - Not_claim: "entire group contains zero verifiable information"
@@ -92,17 +93,33 @@ pass focus on one thing.
 - Claims 55 vs 57 ("world is watching") — cross-chunk boundary (chunk 2 vs chunk 3). Grouping is intentionally local/adjacent within chunks; dedup merges semantic duplicates across chunks.
 - Claims 23, 49, 54 — pure rhetoric ("extraordinary", "unstoppable", "investment in your children"). Correctly extracted as claims; downstream classifier marks as not_checkable.
 
-**Run 5 → Run 6 comparison:**
-| Metric | Run 5 | Run 6 |
-|--------|-------|-------|
-| Claims | 137 | 58 |
-| Not_claims | 17 | 4 |
-| Not_claim accuracy | 10/17 | 4/4 |
-| Avg sent/group | ~1.0 | ~3.0 |
-| Filler-as-claim | Yes | No |
-| Missed claims | 3 | 0 |
-| Fabrication | None | None |
-| Retries | 0 | 0 |
+### Runs 7-9: Prompt tuning iterations
+- Run 7: 65 claims. War durations atomized (7 groups). Non-determinism at temp=0.7.
+- Run 8: 71 claims. Added "list of examples = single group" instruction — no improvement, reverted.
+- Run 9: 71 claims. Tried inline sentence formatting (flowing prose vs one-per-line) — no improvement on war durations, caused more aggressive not_claim in chunk 0, reverted.
+
+### Run 10: "one comparison" prompt fix
+- **50 claims stored, 0 retries (all 8 LLM calls first attempt)**
+- Added "or building one comparison" to group definition — war durations grouped correctly.
+- Chunk 3: 18 groups (16 claim, 2 not_claim) for 36 sentences — matches Run 6 quality.
+
+**Key finding:** The model needed an explicit category for comparison/enumeration patterns.
+"One point or one argument" didn't cover "one comparison built from a list of examples."
+Three words ("or one comparison") fixed a problem that inline formatting and list
+instructions couldn't.
+
+**Run 5 → Run 10 comparison:**
+| Metric | Run 5 | Run 6 | Run 10 |
+|--------|-------|-------|--------|
+| Claims | 137 | 58 | 50 |
+| Not_claims | 17 | 4 | 4 |
+| Not_claim accuracy | 10/17 | 4/4 | 4/4 |
+| Avg sent/group | ~1.0 | ~3.0 | ~3.6 |
+| Filler-as-claim | Yes | No | No |
+| Missed claims | 3 | 0 | 0 |
+| War durations grouped | N/A | Yes | Yes |
+| Fabrication | None | None | None |
+| Retries | 0 | 0 | 0 |
 
 ## Design Decisions
 
@@ -122,10 +139,13 @@ Cross-chunk duplicates (like "world is watching" split across chunks 2 and 3) ar
 1. **LLMs are bad at doing multiple things simultaneously.** Single-pass (classify + group + write thesis) caused the model to fabricate content for borderline sentences. Two-pass (group only → write only) eliminated fabrication.
 2. **Per-assertion grouping doesn't work for political speeches.** Trump's style is rapid-fire short assertions. "Their navy is gone. Their air force is gone." = two assertions but one argument. Need paragraph-level grouping.
 3. **Short sentences are the failure mode.** 4-7 word sentences get atomized into standalone groups even when they're clearly continuation/emphasis. The short-sentence heuristic addresses this directly.
-4. **Null handling matters.** Model returns `null` for optional fields (reason, speakers) on groups where they're not applicable. Pydantic validators with `mode="before"` coerce nulls to defaults.
-5. **Grouping and dedup solve different problems.** Grouping is local adjacency within chunks. Dedup is global semantic similarity. Trying to make grouping do dedup's job would require the model to remember the entire transcript, which it can't across chunks.
+4. **The model needs explicit categories, not just rules.** "One point or one argument" didn't cover enumerated comparisons. Adding "or one comparison" (3 words) fixed a problem that detailed list instructions and formatting changes couldn't. The model follows categories better than abstract rules.
+5. **Prompt formatting doesn't matter as much as prompt semantics.** Tried inline flowing prose vs one-sentence-per-line — no grouping improvement. The model's grouping decisions are driven by how it interprets the task description, not the visual layout of the input.
+6. **Null handling matters.** Model returns `null` for optional fields (reason, speakers) on groups where they're not applicable. Pydantic validators with `mode="before"` coerce nulls to defaults.
+7. **Grouping and dedup solve different problems.** Grouping is local adjacency within chunks. Dedup is global semantic similarity. Trying to make grouping do dedup's job would require the model to remember the entire transcript, which it can't across chunks.
+8. **Speaker boundaries need programmatic enforcement.** Prompt instructions alone can't guarantee different speakers end up in different groups. The validator splits any cross-speaker group after the LLM returns.
 
 ## TODO
-- [ ] Fix classification index matching bug (matched=0, pre-existing)
 - [ ] Evaluate whether chunk size (50 sentences) is optimal for grouping quality
 - [ ] Run full pipeline (classify + dedup + synthesize) to verify dedup catches repeated assertions
+- [ ] Consider embedding-based grouping as alternative to LLM grouping for deterministic results

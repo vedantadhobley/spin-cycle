@@ -236,6 +236,28 @@ def _format_sentences_numbered(sentences: list[NumberedSentence]) -> str:
     return "\n".join(lines)
 
 
+def _format_sentences_inline(sentences: list[NumberedSentence]) -> str:
+    """Format sentences as flowing text with inline [Sn] markers.
+
+    Speaker name is only printed when it changes. Sentences flow as
+    continuous prose so the model reads them as a transcript, not a
+    spreadsheet.
+    """
+    parts = []
+    prev_speaker = None
+    for s in sentences:
+        if s.section_header:
+            parts.append(f"\n[Section: {s.section_header}]\n")
+            prev_speaker = None
+        if s.speaker != prev_speaker:
+            if parts:
+                parts.append("\n\n")
+            parts.append(f"{s.speaker}: ")
+            prev_speaker = s.speaker
+        parts.append(f"[S{s.global_index}] {s.text} ")
+    return "".join(parts).strip()
+
+
 # ---------------------------------------------------------------------------
 # Bridge: GroupingOutput + ContextInjectionOutput → ExtractedThesis[]
 # ---------------------------------------------------------------------------
@@ -336,9 +358,13 @@ async def extract_dispositions(
              target_range=chunk.target_range,
              target_sentences=len(chunk.target_sentences))
 
+    sentence_speakers = {
+        s.global_index: s.speaker for s in chunk.target_sentences
+    }
     coverage_validator = partial(
         validate_grouping,
         target_range=chunk.target_range,
+        sentence_speakers=sentence_speakers,
     )
 
     start = chunk.target_range[0]

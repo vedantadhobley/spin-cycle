@@ -24,6 +24,7 @@ from src.schemas.llm_outputs import (
     SynthesizedClaim,
     AttributeSpeakersOutput,
     GroupingOutput,
+    GroupDisposition,
     ContextInjectionOutput,
 )
 from src.utils.logging import log, get_logger
@@ -304,12 +305,14 @@ def validate_thesis_extraction(output: ThesisExtractionOutput) -> tuple[bool, st
 def validate_grouping(
     output: GroupingOutput,
     target_range: tuple[int, int],
+    sentence_speakers: dict[int, str] | None = None,
 ) -> tuple[bool, str]:
     """Validate Pass 1 grouping + disposition output.
 
     1. Sentence coverage: every target index has exactly one entry, no dupes, no OOR
     2. Group integrity: every group number in sentences has a matching entry in groups
-    3. Speaker check: claim groups must have at least one speaker — downgrade if missing
+    3. Speaker boundary: split groups that span multiple speakers (programmatic fix)
+    4. Speaker check: claim groups must have at least one speaker — downgrade if missing
     """
     expected = set(range(target_range[0], target_range[1]))
 
@@ -336,7 +339,67 @@ def validate_grouping(
     if missing_groups:
         return False, f"Groups referenced in sentences but missing from groups list: {sorted(missing_groups)}"
 
-    # --- Fix 3: Speaker check — downgrade claim groups without speakers ---
+    # --- Fix 3: Speaker boundary — split groups spanning multiple speakers ---
+    if sentence_speakers:
+        # Build group → [sentence indices] mapping
+        group_sentences: dict[int, list[int]] = {}
+        for s in output.sentences:
+            group_sentences.setdefault(s.group, []).append(s.index)
+
+        next_group_num = max(g.group for g in output.groups) + 1
+        splits = 0
+
+        for grp_num, indices in list(group_sentences.items()):
+            sorted_indices = sorted(indices)
+            # Find speaker runs within this group
+            runs: list[tuple[str, list[int]]] = []
+            for idx in sorted_indices:
+                speaker = sentence_speakers.get(idx, "")
+                if runs and runs[-1][0] == speaker:
+                    runs[-1][1].append(idx)
+                else:
+                    runs.append((speaker, [idx]))
+
+            if len(runs) <= 1:
+                continue  # Single speaker — no split needed
+
+            # Split: first run keeps original group number, rest get new groups
+            orig_group = group_lookup.get(grp_num)
+            if not orig_group:
+                continue
+
+            for run_speaker, run_indices in runs[1:]:
+                new_num = next_group_num
+                next_group_num += 1
+                splits += 1
+
+                # Reassign sentences to new group
+                for idx in run_indices:
+                    for s in output.sentences:
+                        if s.index == idx:
+                            s.group = new_num
+
+                # Create new group entry (copy disposition from original)
+                new_group = GroupDisposition(
+                    group=new_num,
+                    disposition=orig_group.disposition,
+                    speakers=[run_speaker] if orig_group.disposition == "claim" else [],
+                    reason=orig_group.reason,
+                )
+                output.groups.append(new_group)
+
+            # Update original group's speakers to first run's speaker
+            if orig_group.disposition == "claim":
+                orig_group.speakers = [runs[0][0]]
+
+        if splits:
+            log.info(logger, MODULE, "speaker_boundary_splits",
+                     f"Split {splits} groups at speaker boundaries",
+                     splits=splits)
+            # Rebuild group_lookup after splits
+            group_lookup = {g.group: g for g in output.groups}
+
+    # --- Fix 4: Speaker check — downgrade claim groups without speakers ---
     for g in output.groups:
         if g.disposition == "claim" and not g.speakers:
             log.warning(logger, MODULE, "group_downgraded",
