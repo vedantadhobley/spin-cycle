@@ -105,23 +105,40 @@ Return JSON:
 # ===========================================================================
 
 CONTEXT_INJECT_SYSTEM = """\
-You receive raw transcript sentences grouped into claims. Make each \
-group's sentences understandable to someone who hasn't read the transcript.
+You edit raw transcript sentences so they are readable without the \
+transcript. This is reference resolution, not rewriting.
 
 Today's date: {current_date}
 
-## Rules
+## What to Resolve
 
-- Replace pronouns with specific referents (names, countries, organizations)
-- Add dates and named entities when the referent is clear from context
-- Specify what "it", "they", "this", "that" refers to
-- If a group has multiple sentences, produce ONE statement that captures \
-the combined assertion
-- Do NOT add assertions not present in the original sentences — only \
-resolve references
-- Write in neutral, factual language — extract the checkable kernel, \
-not the speaker's subjective framing
-- The result must be understandable without any transcript context\
+- Pronouns → specific referents (names, countries, organizations)
+- "it", "they", "this", "that" → what they refer to
+- Relative time → absolute when clear from context. If ambiguous, \
+describe rather than guess ("In June" with no year → keep "in June", \
+do NOT assume a specific year)
+- Speaker-perspective language → neutral phrasing. When a speaker says \
+"our president" or "our country" while narrating past events, identify \
+who held that role at the time described, not who holds it now. If \
+unclear, use a description ("the president at the time") rather than \
+guessing a name
+
+## What to Preserve
+
+- Every named entity, number, date, and specific detail from the source
+- Enumerated lists — if the speaker lists 5 items, all 5 must appear
+- Conditional and hypothetical framing — "would have", "could", "if" \
+must survive as conditionals, not become stated facts
+- Attribution — who said or did what
+
+## What NOT to Do
+
+- Do NOT summarize or compress — combine multi-sentence groups into \
+one statement but keep ALL specifics
+- Do NOT add facts or claims not in the source sentences
+- Do NOT resolve ambiguous references with guesses — describe the \
+referent instead
+- Do NOT remove qualifiers, hedging, or attribution language\
 """
 
 CONTEXT_INJECT_USER = """\
@@ -145,6 +162,50 @@ Return JSON:
   "claims": [
     {{"group": 1, "decontextualized_statement": "Fully standalone claim statement"}},
     {{"group": 2, "decontextualized_statement": "Another standalone claim statement"}}
+  ]
+}}\
+"""
+
+# ===========================================================================
+# PASS 2 RETRY: targeted retry for groups that dropped entities
+# ===========================================================================
+
+CONTEXT_INJECT_RETRY_SYSTEM = """\
+You are revising decontextualized claim statements. Your previous output \
+dropped entities that appeared in the source sentences.
+
+Today's date: {current_date}
+
+## Rules
+
+- Include ALL entities listed as "missing" — they were in the source \
+and must appear in your output
+- Resolve pronouns to specific referents
+- Keep ALL specifics from the source: names, numbers, dates, list items
+- Do NOT add facts not in the source sentences
+- Do NOT guess ambiguous referents — describe them instead\
+"""
+
+CONTEXT_INJECT_RETRY_USER = """\
+Revise the statements below. Each group lists entities from the source \
+text that were MISSING from your previous output.
+
+## Full Transcript Excerpt (for context)
+{full_text}
+
+## Transcript Metadata
+{context_note}
+
+## Speaker Descriptions
+{speaker_descriptions}
+
+## Groups Requiring Revision
+{retry_groups_text}
+
+Return JSON:
+{{
+  "claims": [
+    {{"group": 1, "decontextualized_statement": "Revised standalone claim statement"}}
   ]
 }}\
 """

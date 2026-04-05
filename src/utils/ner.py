@@ -103,6 +103,60 @@ def extract_quoted_entities(content: str) -> list[str]:
     return extract_entity_names(content, labels={"PERSON", "ORG"})
 
 
+# Labels for claim entity extraction — broad set to catch all factual content
+# that should survive decontextualization
+CLAIM_ENTITY_LABELS = {
+    "PERSON", "ORG", "GPE", "NORP", "DATE", "CARDINAL",
+    "MONEY", "EVENT", "FAC", "PRODUCT", "QUANTITY", "ORDINAL", "LAW",
+}
+
+
+def extract_claim_entities(sentences: list[str]) -> list[str]:
+    """Extract named entities from claim group sentences for coverage checking.
+
+    Runs SpaCy NER with a broad label set to catch all factual content:
+    people, organizations, places, dates, numbers, nationalities, etc.
+
+    Used by Pass 2 context injection to build a per-group entity checklist.
+    After the LLM produces a decontextualized statement, we check which
+    entities from the source survived. Missing entities trigger a targeted retry.
+
+    Returns deduplicated list of entity text strings (min 3 chars).
+    """
+    combined = " ".join(sentences)
+    if not combined.strip():
+        return []
+
+    entities = extract_entities(combined, labels=CLAIM_ENTITY_LABELS)
+
+    filtered = []
+    seen: set[str] = set()
+    for e in entities:
+        text = e["text"].strip()
+        if len(text) < 3:
+            continue
+        lower = text.lower()
+        if lower in seen:
+            continue
+        seen.add(lower)
+        filtered.append(text)
+
+    return filtered
+
+
+def check_entity_coverage(statement: str, entities: list[str]) -> list[str]:
+    """Return entities from the checklist not found in the statement.
+
+    Simple case-insensitive substring matching. Catches obvious drops
+    (USS Cole, Beirut, 45,000) while accepting reasonable reformulations
+    (Iran → Iran's, Obama → President Obama).
+    """
+    if not entities:
+        return []
+    statement_lower = statement.lower()
+    return [e for e in entities if e.lower() not in statement_lower]
+
+
 def extract_entity_names(text: str, labels: Optional[set[str]] = None) -> list[str]:
     """Extract just the entity name strings (no labels).
 

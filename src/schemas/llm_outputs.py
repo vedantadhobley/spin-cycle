@@ -130,6 +130,25 @@ class ClaimClassification(BaseModel):
         "diplomatic, technological, environmental, health, or other"
     )
 
+    @field_validator("classification", mode="before")
+    @classmethod
+    def normalize_classification(cls, v: str) -> str:
+        """Normalize classification to prevent batch rejection from one bad value."""
+        if isinstance(v, str):
+            v = v.lower().strip().replace(" ", "_").replace("-", "_")
+            mapping = {
+                "verifiable": "verifiable_fact",
+                "fact": "verifiable_fact",
+                "checkable": "verifiable_fact",
+                "not_verifiable": "not_checkable",
+                "uncheckable": "not_checkable",
+                "opinion": "not_checkable",
+                "prediction": "not_checkable",
+                "future_prediction": "not_checkable",
+            }
+            return mapping.get(v, v)
+        return v
+
 
 class ClassifyClaimsOutput(BaseModel):
     """Output from batch claim classification."""

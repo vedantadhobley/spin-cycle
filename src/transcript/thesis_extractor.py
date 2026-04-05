@@ -23,14 +23,16 @@ from dataclasses import dataclass, field
 from datetime import date
 from functools import partial
 
-from src.llm import invoke_llm, validate_grouping, validate_context_injection
+from src.llm import invoke_llm, LLMInvocationError, validate_grouping, validate_context_injection
 from src.prompts.extraction import (
     GROUPING_SYSTEM, GROUPING_USER,
     CONTEXT_INJECT_SYSTEM, CONTEXT_INJECT_USER,
+    CONTEXT_INJECT_RETRY_SYSTEM, CONTEXT_INJECT_RETRY_USER,
 )
 from src.schemas.llm_outputs import (
     ExtractedThesis, GroupingOutput, ContextInjectionOutput,
 )
+from src.utils.ner import extract_claim_entities, check_entity_coverage
 from src.transcript.parsers import TranscriptData, SpeakerTurn
 from src.utils.logging import log, get_logger
 
@@ -412,8 +414,14 @@ async def inject_context(
 ) -> list[ExtractedThesis]:
     """Pass 2: Resolve references in claim groups to make them standalone.
 
-    Takes Pass 1 grouping output, looks up raw sentence texts, and asks the
-    LLM to decontextualize each claim group.
+    Two-phase approach:
+    1. Batch LLM call for all claim groups (with NER entity hints in prompt)
+    2. Per-group NER validation — groups missing entities get a targeted retry
+
+    The first call uses invoke_llm with the structural validator (groups exist,
+    min length). After that succeeds, we check each group's output against its
+    NER entity checklist independently. Only failed groups get retried, with
+    explicit "you missed: [entities]" guidance.
 
     Returns list of ExtractedThesis (same downstream shape).
     """
@@ -429,9 +437,24 @@ async def inject_context(
     for s in grouping.sentences:
         group_indices.setdefault(s.group, []).append(s.index)
 
-    # Build claim groups text for the prompt
+    # Extract NER entities per group for coverage checking
+    group_entities: dict[int, list[str]] = {}
+    for g in claim_groups:
+        indices = sorted(group_indices.get(g.group, []))
+        raw_texts = [
+            sentences_lookup[idx].text
+            for idx in indices if idx in sentences_lookup
+        ]
+        entities = extract_claim_entities(raw_texts)
+        if entities:
+            group_entities[g.group] = entities
+
+    # Build claim groups text with entity hints
     claim_groups_text_parts = []
     expected_groups = []
+    # Keep raw sentences per group for retry prompt
+    group_raw_sentences: dict[int, list[str]] = {}
+
     for g in claim_groups:
         indices = sorted(group_indices.get(g.group, []))
         raw_sentences = []
@@ -442,10 +465,18 @@ async def inject_context(
         if not raw_sentences:
             continue
         expected_groups.append(g.group)
+        group_raw_sentences[g.group] = raw_sentences
         speakers_str = ", ".join(g.speakers) if g.speakers else "Unknown"
+
+        entity_hint = ""
+        entities = group_entities.get(g.group)
+        if entities:
+            entity_hint = f"\nKey entities: {', '.join(entities)}"
+
         claim_groups_text_parts.append(
             f"### Group {g.group} (speakers: {speakers_str})\n"
             + "\n".join(raw_sentences)
+            + entity_hint
         )
 
     if not expected_groups:
@@ -456,13 +487,15 @@ async def inject_context(
     log.info(logger, MODULE, "pass2_start",
              "Pass 2: context injection",
              chunk_index=chunk.chunk_index,
-             claim_groups=len(expected_groups))
+             claim_groups=len(expected_groups),
+             groups_with_entities=len(group_entities))
 
     injection_validator = partial(
         validate_context_injection,
         expected_groups=expected_groups,
     )
 
+    # Batch LLM call — structural validator handles missing groups / short statements
     output = await invoke_llm(
         system_prompt=CONTEXT_INJECT_SYSTEM.format(
             current_date=date.today().isoformat(),
@@ -478,11 +511,139 @@ async def inject_context(
         activity_name=f"inject_chunk_{chunk.chunk_index}",
     )
 
+    # Per-group NER entity coverage check
+    failed_groups: dict[int, dict] = {}
+    for c in output.claims:
+        entities = group_entities.get(c.group)
+        if not entities:
+            continue
+        missing = check_entity_coverage(c.decontextualized_statement, entities)
+        if missing:
+            failed_groups[c.group] = {
+                "missing": missing,
+                "all_entities": entities,
+                "previous_output": c.decontextualized_statement,
+            }
+
+    if failed_groups:
+        log.info(logger, MODULE, "ner_coverage_gaps",
+                 "Entity coverage gaps detected, retrying failed groups",
+                 chunk_index=chunk.chunk_index,
+                 failed_count=len(failed_groups),
+                 total_groups=len(expected_groups),
+                 gaps={gid: info["missing"] for gid, info in failed_groups.items()})
+
+        retry_output = await _retry_failed_groups(
+            transcript, chunk, grouping, sentences_lookup,
+            enriched_speakers, group_raw_sentences, failed_groups, logger,
+        )
+
+        if retry_output:
+            # Merge: replace failed groups with retry results
+            retry_lookup = {c.group: c for c in retry_output.claims}
+            merged = []
+            for c in output.claims:
+                if c.group in retry_lookup:
+                    merged.append(retry_lookup[c.group])
+                else:
+                    merged.append(c)
+            output.claims = merged
+
+            # Log remaining gaps after retry
+            still_missing = {}
+            for c in output.claims:
+                entities = group_entities.get(c.group)
+                if not entities:
+                    continue
+                remaining = check_entity_coverage(
+                    c.decontextualized_statement, entities,
+                )
+                if remaining:
+                    still_missing[c.group] = remaining
+            if still_missing:
+                log.warning(logger, MODULE, "ner_gaps_after_retry",
+                            "Some entity gaps remain after retry",
+                            chunk_index=chunk.chunk_index,
+                            remaining_gaps=still_missing)
+
     theses = _build_theses(grouping, output, sentences_lookup)
 
     log.info(logger, MODULE, "pass2_done",
              "Pass 2 complete",
              chunk_index=chunk.chunk_index,
-             thesis_count=len(theses))
+             thesis_count=len(theses),
+             groups_retried=len(failed_groups))
 
     return theses
+
+
+async def _retry_failed_groups(
+    transcript: TranscriptData,
+    chunk: SentenceChunk,
+    grouping: GroupingOutput,
+    sentences_lookup: dict[int, NumberedSentence],
+    enriched_speakers: list[dict],
+    group_raw_sentences: dict[int, list[str]],
+    failed_groups: dict[int, dict],
+    logger,
+) -> ContextInjectionOutput | None:
+    """Targeted retry for groups that failed NER entity coverage.
+
+    Builds a focused prompt showing only the failed groups with:
+    - Raw source sentences
+    - All expected entities
+    - The previous (incomplete) output
+    - Which entities were missing
+
+    Returns ContextInjectionOutput with revised claims, or None on failure.
+    """
+    retry_parts = []
+    retry_expected = []
+
+    group_lookup = {g.group: g for g in grouping.groups}
+    for gid, info in failed_groups.items():
+        group = group_lookup.get(gid)
+        if not group:
+            continue
+        retry_expected.append(gid)
+        speakers_str = ", ".join(group.speakers) if group.speakers else "Unknown"
+        raw = "\n".join(group_raw_sentences.get(gid, []))
+        retry_parts.append(
+            f"### Group {gid} (speakers: {speakers_str})\n"
+            f"Raw sentences:\n{raw}\n"
+            f"Key entities: {', '.join(info['all_entities'])}\n"
+            f"Your previous output: \"{info['previous_output']}\"\n"
+            f"MISSING entities: {', '.join(info['missing'])}"
+        )
+
+    if not retry_expected:
+        return None
+
+    retry_validator = partial(
+        validate_context_injection,
+        expected_groups=retry_expected,
+    )
+
+    try:
+        return await invoke_llm(
+            system_prompt=CONTEXT_INJECT_RETRY_SYSTEM.format(
+                current_date=date.today().isoformat(),
+            ),
+            user_prompt=CONTEXT_INJECT_RETRY_USER.format(
+                full_text=chunk.full_text,
+                context_note=_build_context_note(transcript),
+                speaker_descriptions=_build_speaker_desc(enriched_speakers),
+                retry_groups_text="\n\n".join(retry_parts),
+            ),
+            schema=ContextInjectionOutput,
+            semantic_validator=retry_validator,
+            max_retries=1,
+            activity_name=f"inject_retry_chunk_{chunk.chunk_index}",
+        )
+    except LLMInvocationError as e:
+        log.warning(logger, MODULE, "ner_retry_failed",
+                    "Targeted retry failed, keeping original output",
+                    chunk_index=chunk.chunk_index,
+                    error=str(e),
+                    failed_groups=list(failed_groups.keys()))
+        return None
