@@ -1303,7 +1303,10 @@ async def load_verify_inputs(transcript_id: str) -> list[dict]:
             return []
 
         c_result = await session.execute(
-            select(Claim).where(Claim.id.in_(claim_ids))
+            select(Claim).where(
+                Claim.id.in_(claim_ids),
+                Claim.status.in_(["queued", "pending"]),
+            )
         )
         claims = c_result.scalars().all()
 

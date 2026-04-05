@@ -252,6 +252,7 @@ async def judge(
     # Invoke the judge LLM
     citations = []
     judge_rubric = None
+    judge_failed = False
     try:
         output = await invoke_llm(
             system_prompt=JUDGE_SYSTEM.format(
@@ -376,6 +377,7 @@ async def judge(
         verdict = "unverifiable"
         confidence = 0.0
         reasoning = f"Failed to parse LLM judgment after {e.attempts} attempts"
+        judge_failed = True
 
     log.info(logger, MODULE, "done", "Sub-claim judged",
              sub_claim=sub_claim, verdict=verdict, confidence=confidence)
@@ -388,6 +390,7 @@ async def judge(
         "evidence": evidence_metadata,
         "citations": citations,
         "judge_rubric": judge_rubric,
+        "judge_failed": judge_failed,
     }
 
 

@@ -167,14 +167,14 @@ async def synthesize(
 
     except LLMInvocationError as e:
         log.warning(logger, MODULE, "invocation_failed",
-                    "LLM invocation failed after retries",
+                    "LLM invocation failed after retries, attempting deterministic fallback",
                     error=str(e), attempts=e.attempts,
                     parse_error=e.parse_error,
                     validation_error=e.validation_error,
                     raw_output_tail=e.raw_output[-500:] if e.raw_output else None)
-        verdict = "unverifiable"
-        confidence = 0.0
-        reasoning = f"Failed to synthesize verdict after {e.attempts} attempts"
+        verdict, confidence, reasoning = _deterministic_fallback(
+            child_results, claim_text, e.attempts,
+        )
 
     log.info(logger, MODULE, "done", "Verdict synthesized",
              claim=claim_text, verdict=verdict, confidence=confidence)
@@ -285,6 +285,111 @@ def _extract_synthesize_citations(
                 "domain": ev.get("domain"),
             })
     return citations
+
+
+def _deterministic_fallback(
+    child_results: list[dict],
+    claim_text: str,
+    llm_attempts: int,
+) -> tuple[str, float, str]:
+    """Compute verdict from sub-claim verdicts when LLM synthesis fails.
+
+    Filters out judge-failed sub-claims (confidence=0 with parse failure),
+    then uses the remaining verdicts to produce a weighted result.
+
+    Returns (verdict, confidence, reasoning).
+    """
+    # Separate real verdicts from judge failures
+    usable = [
+        r for r in child_results
+        if not r.get("judge_failed", False)
+    ]
+    failed_count = len(child_results) - len(usable)
+
+    if not usable:
+        log.info(logger, MODULE, "fallback_no_data",
+                 "No usable sub-verdicts for deterministic fallback",
+                 claim=claim_text, total_subs=len(child_results))
+        return (
+            "unverifiable", 0.0,
+            f"Failed to synthesize verdict after {llm_attempts} attempts. "
+            f"All {len(child_results)} sub-claim judgments also failed."
+        )
+
+    # Score verdicts numerically: true=1, mostly_true=0.75, mixed=0.5,
+    # mostly_false=0.25, false=0, unverifiable=None (excluded)
+    VERDICT_SCORES = {
+        "true": 1.0,
+        "mostly_true": 0.75,
+        "mixed": 0.5,
+        "mostly_false": 0.25,
+        "false": 0.0,
+    }
+    SCORE_TO_VERDICT = [
+        (0.875, "true"),
+        (0.625, "mostly_true"),
+        (0.375, "mixed"),
+        (0.125, "mostly_false"),
+        (0.0, "false"),
+    ]
+
+    scored = []
+    for r in usable:
+        v = r.get("verdict", "")
+        if v in VERDICT_SCORES:
+            scored.append((VERDICT_SCORES[v], r.get("confidence", 0.5)))
+
+    if not scored:
+        log.info(logger, MODULE, "fallback_no_scored",
+                 "No scoreable sub-verdicts (all unverifiable)",
+                 claim=claim_text, usable=len(usable))
+        return (
+            "unverifiable", 0.0,
+            f"Failed to synthesize verdict after {llm_attempts} attempts. "
+            f"{len(usable)} sub-claims were unverifiable."
+        )
+
+    # Confidence-weighted average
+    total_weight = sum(conf for _, conf in scored)
+    avg_score = sum(score * conf for score, conf in scored) / total_weight
+
+    # Map back to verdict
+    final_verdict = "false"
+    for threshold, label in SCORE_TO_VERDICT:
+        if avg_score >= threshold:
+            final_verdict = label
+            break
+
+    # Reduce confidence: average of sub-confidences, penalized for failures
+    avg_conf = total_weight / len(scored)
+    penalty = 0.9 ** failed_count  # 10% penalty per failed sub-claim
+    final_confidence = round(avg_conf * penalty, 2)
+
+    # Build reasoning from sub-verdicts
+    sub_lines = []
+    for r in usable:
+        sub_lines.append(
+            f"- {r['sub_claim'][:100]}: {r['verdict']} ({r['confidence']})"
+        )
+    if failed_count:
+        sub_lines.append(
+            f"- {failed_count} sub-claim(s) had judge failures and were excluded"
+        )
+
+    reasoning = (
+        f"Deterministic fallback (LLM synthesis failed after {llm_attempts} attempts). "
+        f"Verdict computed from {len(scored)} sub-claim verdicts "
+        f"(weighted average score: {avg_score:.2f}).\n"
+        + "\n".join(sub_lines)
+    )
+
+    log.info(logger, MODULE, "fallback_computed",
+             "Deterministic fallback verdict computed",
+             claim=claim_text, verdict=final_verdict,
+             confidence=final_confidence, avg_score=avg_score,
+             usable=len(scored), failed=failed_count)
+
+    return final_verdict, final_confidence, reasoning
 
 
 def _validate_synthesize_consistency(output: SynthesizeOutput) -> list[str]:

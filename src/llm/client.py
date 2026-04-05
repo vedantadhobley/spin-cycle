@@ -80,6 +80,7 @@ def get_llm(
         max_tokens=max_tokens,
         top_p=params["top_p"],
         presence_penalty=pp,
+        max_retries=0,  # We handle retries in invoke_llm with proper backoff
         extra_body={
             "chat_template_kwargs": {"enable_thinking": False},
             "top_k": params["top_k"],

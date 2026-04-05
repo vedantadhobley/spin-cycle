@@ -48,6 +48,10 @@ LLM_MAX_TOKENS = 16384
 
 # Retry pause between LLM attempts (seconds)
 LLM_RETRY_DELAY = 1
+# Longer backoff for server unavailability (503 / connection error)
+# Gives the model time to reload after a crash/restart
+LLM_SERVER_RETRY_DELAY = 30
+LLM_SERVER_MAX_RETRIES = 5
 
 # ---------------------------------------------------------------------------
 # Transcript chunking (Phase 1)
@@ -102,7 +106,7 @@ HIGH_CONFIDENCE_THRESHOLD = 0.8  # unverifiable + high confidence → warning
 
 # Verification workflow
 TIMEOUT_CREATE_CLAIM = 15
-TIMEOUT_DECOMPOSE = 180
+TIMEOUT_DECOMPOSE = 600  # 10 min — structured output (thesis, facts, parties) on local model
 TIMEOUT_RESEARCH = 540
 TIMEOUT_JUDGE = 300
 TIMEOUT_SYNTHESIZE = 300

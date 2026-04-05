@@ -93,7 +93,7 @@ async def decompose_claim(claim_text: str, speaker: str | None = None,
                              transcript_description=transcript_description)
     log.info(activity.logger, "decompose", "done", "Decompose complete",
              fact_count=len(result.get("facts", [])),
-             thesis=result.get("thesis_info", {}).get("thesis", "")[:80])
+             thesis=(result.get("thesis_info", {}).get("thesis") or "")[:80])
     return result
 
 

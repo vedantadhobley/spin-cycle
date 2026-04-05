@@ -27,6 +27,8 @@ from src.config import (
     LLM_MAX_RETRIES,
     LLM_MAX_TOKENS,
     LLM_RETRY_DELAY,
+    LLM_SERVER_RETRY_DELAY,
+    LLM_SERVER_MAX_RETRIES,
 )
 from src.utils.logging import log, get_logger
 
@@ -190,10 +192,11 @@ async def invoke_llm(
     last_raw: Optional[str] = None
     last_parse_error: Optional[str] = None
     last_validation_error: Optional[str] = None
+    server_retries = 0  # separate counter for server unavailability
 
     for attempt in range(max_retries + 1):
         try:
-            # Step 1: INVOKE (streaming with idle timeout)
+            # Stream tokens from LLM with idle timeout
             llm = get_llm(profile=profile, max_tokens=max_tokens, presence_penalty=presence_penalty)
             _t0 = time.monotonic()
             messages = [
@@ -212,7 +215,7 @@ async def invoke_llm(
                      attempt=attempt + 1, latency_ms=latency_ms,
                      raw_length=len(raw))
 
-            # Step 2: PARSE
+            # Extract JSON from raw response
             try:
                 parsed = extract_json(raw)
             except JSONExtractionError as e:
@@ -222,7 +225,7 @@ async def invoke_llm(
                            attempt=attempt + 1, error=str(e))
                 continue
 
-            # Step 3: VALIDATE (schema)
+            # Validate against Pydantic schema
             try:
                 validated = schema.model_validate(parsed)
             except ValidationError as e:
@@ -233,7 +236,7 @@ async def invoke_llm(
                            schema=schema.__name__)
                 continue
 
-            # Step 4: VALIDATE (semantic)
+            # Run domain-specific semantic validation
             if semantic_validator:
                 is_valid, semantic_error = semantic_validator(validated)
                 if not is_valid:
@@ -258,15 +261,37 @@ async def invoke_llm(
             continue
 
         except BaseException as e:
-            last_error = str(e)
-            log.error(logger, MODULE, "invoke_error",
-                     f"LLM invocation error for {activity_name}",
-                     attempt=attempt + 1, error=str(e),
-                     error_type=type(e).__name__)
             # CancelledError = Temporal killed the activity (timeout, workflow cancel)
             # Re-raise BaseException subclasses that shouldn't be retried
             if not isinstance(e, Exception):
                 raise
+
+            err_str = str(e)
+            err_type = type(e).__name__
+            is_server_error = (
+                "503" in err_str
+                or "Loading model" in err_str
+                or "Connection error" in err_str
+                or "APIConnectionError" in err_type
+            )
+
+            if is_server_error and server_retries < LLM_SERVER_MAX_RETRIES:
+                server_retries += 1
+                log.warning(logger, MODULE, "server_unavailable",
+                           f"LLM server unavailable for {activity_name}, "
+                           f"waiting {LLM_SERVER_RETRY_DELAY}s before retry",
+                           server_retry=server_retries,
+                           max_server_retries=LLM_SERVER_MAX_RETRIES,
+                           error=err_str, error_type=err_type)
+                await asyncio.sleep(LLM_SERVER_RETRY_DELAY)
+                # Don't consume an attempt — server errors are transient
+                continue
+
+            last_error = err_str
+            log.error(logger, MODULE, "invoke_error",
+                     f"LLM invocation error for {activity_name}",
+                     attempt=attempt + 1, error=err_str,
+                     error_type=err_type)
             if attempt < max_retries:
                 await asyncio.sleep(LLM_RETRY_DELAY)
 
