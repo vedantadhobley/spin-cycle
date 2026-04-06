@@ -7,6 +7,7 @@ The Temporal activity wrapper in verify_activities.py calls synthesize() here.
 
 import re
 from datetime import date
+from functools import partial
 
 from src.llm import invoke_llm, LLMInvocationError, validate_synthesize
 from src.prompts.verification import SYNTHESIZE_SYSTEM, SYNTHESIZE_USER, build_claim_date_line
@@ -48,9 +49,39 @@ async def synthesize(
     log.info(logger, MODULE, "start", "Synthesizing verdict",
              claim=claim_text, num_children=len(child_results))
 
-    # Format sub-verdicts for the LLM prompt
+    # Separate real verdicts from judge failures — only feed real ones to LLM
+    usable_results = [r for r in child_results if not r.get("judge_failed", False)]
+    failed_count = len(child_results) - len(usable_results)
+
+    if failed_count:
+        log.info(logger, MODULE, "judge_failures_filtered",
+                 "Filtering judge-failed sub-claims from synthesis input",
+                 claim=claim_text, usable=len(usable_results),
+                 failed=failed_count)
+
+    # If no usable results, skip LLM entirely
+    if not usable_results:
+        log.info(logger, MODULE, "all_failed",
+                 "All sub-claims failed judge — returning unverifiable",
+                 claim=claim_text, total=len(child_results))
+        return {
+            "sub_claim": claim_text,
+            "verdict": "unverifiable",
+            "confidence": 0.0,
+            "reasoning": (
+                f"All {len(child_results)} sub-claim judgments failed to produce "
+                f"parseable results. Insufficient data for verdict synthesis."
+            ),
+            "evidence": [],
+            "child_results": child_results,
+            "reasoning_chain": [sub.get("reasoning", "") for sub in child_results],
+            "citations": [],
+            "synthesis_rubric": None,
+        }
+
+    # Format sub-verdicts for the LLM prompt (only usable results)
     sub_verdict_parts = []
-    for i, sub in enumerate(child_results, 1):
+    for i, sub in enumerate(usable_results, 1):
         part = (
             f"[{i}] Sub-claim: {sub['sub_claim']}\n"
             f"    Verdict: {sub['verdict']}\n"
@@ -66,16 +97,23 @@ async def synthesize(
                 source_lines.append(f"      - {label} ({c.get('url', '')})")
             part += "\n    Key sources:\n" + "\n".join(source_lines)
         sub_verdict_parts.append(part)
+
+    if failed_count:
+        sub_verdict_parts.append(
+            f"Note: {failed_count} additional sub-claim(s) could not be evaluated "
+            f"(judge parse failure). Base your verdict on the sub-claims above."
+        )
     sub_verdicts_text = "\n\n".join(sub_verdict_parts)
 
-    # Build unified evidence digest from judge-cited sources
-    evidence_digest = _build_evidence_digest(child_results)
+    # Build unified evidence digest from judge-cited sources (usable only)
+    evidence_digest = _build_evidence_digest(usable_results)
     evidence_digest_text = _format_evidence_digest(evidence_digest)
 
     log.info(logger, MODULE, "evidence_digest",
              "Built unified evidence digest from judge citations",
              claim=claim_text, digest_size=len(evidence_digest),
-             child_count=len(child_results))
+             usable_children=len(usable_results),
+             failed_children=failed_count)
 
     synthesis_context = (
         "This is the FINAL OVERALL verdict for the original claim. "
@@ -108,7 +146,10 @@ async def synthesize(
                 transcript_context=_build_transcript_context(transcript_title, transcript_description),
             ),
             schema=SynthesizeOutput,
-            semantic_validator=validate_synthesize,
+            semantic_validator=partial(
+                validate_synthesize,
+                evidence_digest_size=len(evidence_digest),
+            ),
             max_retries=2,
             profile="reasoning",
             max_tokens=16384,

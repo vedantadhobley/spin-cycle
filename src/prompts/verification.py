@@ -889,7 +889,7 @@ that test. The key test is what must be true for the ORIGINAL claim to hold.
 → Output: "claim_interpretation"
 
 STEP 2 — TRIAGE KEY EVIDENCE
-Identify the 3-5 most relevant evidence items. PREFER higher-tier sources: \
+Identify the 5-10 most relevant evidence items. PREFER higher-tier sources: \
 a TIER 1 source (wire services like Reuters/AP, government data, court \
 filings) always outweighs a TIER 2 source on the same point. Do NOT skip \
 TIER 1 evidence in favor of lower-tier sources just because they appear \

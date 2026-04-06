@@ -185,10 +185,18 @@ def validate_judge(output: JudgeOutput) -> tuple[bool, str]:
     return True, ""
 
 
-def validate_synthesize(output: SynthesizeOutput) -> tuple[bool, str]:
+def validate_synthesize(
+    output: SynthesizeOutput,
+    evidence_digest_size: int | None = None,
+) -> tuple[bool, str]:
     """Validate synthesize output semantically.
 
     Checks rubric completeness + confidence/verdict consistency + citation density.
+
+    Args:
+        output: The synthesize output to validate.
+        evidence_digest_size: Number of items in the evidence digest. When provided,
+            citation minimum is capped at digest size (can't cite more than exists).
     """
     # Check 1: Rubric fields are populated
     if not output.thesis_restatement or len(output.thesis_restatement.strip()) < 5:
@@ -203,12 +211,16 @@ def validate_synthesize(output: SynthesizeOutput) -> tuple[bool, str]:
 
     # Check 3: Minimum citation density in reasoning
     # Final synthesis must cite at least 5 sources from the evidence digest.
+    # Capped at digest size when known (can't cite more than exists).
     # Unverifiable verdicts are exempt.
     if output.verdict != "unverifiable":
+        min_required = MIN_SYNTHESIZE_CITATIONS
+        if evidence_digest_size is not None:
+            min_required = min(min_required, evidence_digest_size)
         citation_count = _count_citations(output.reasoning)
-        if citation_count < MIN_SYNTHESIZE_CITATIONS:
+        if citation_count < min_required:
             return False, (
-                f"Reasoning cites only {citation_count} sources (minimum {MIN_SYNTHESIZE_CITATIONS}). "
+                f"Reasoning cites only {citation_count} sources (minimum {min_required}). "
                 f"Cite evidence using [N] notation from the evidence digest."
             )
 

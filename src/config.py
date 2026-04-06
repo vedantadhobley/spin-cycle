@@ -65,7 +65,7 @@ SPEAKER_CUTOFF_WINDOW = 5        # max sentences to extend past target to hit a 
 # Batch classification (between extraction and dedup)
 # ---------------------------------------------------------------------------
 
-CLASSIFY_BATCH_SIZE = 50       # claims per classification LLM call
+CLASSIFY_BATCH_SIZE = 25       # claims per classification LLM call
 
 # ---------------------------------------------------------------------------
 # Embedding-based dedup (Phase 2)
