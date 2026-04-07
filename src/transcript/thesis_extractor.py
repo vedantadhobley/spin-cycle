@@ -271,15 +271,13 @@ def _build_theses(
 ) -> list[ExtractedThesis]:
     """Build ExtractedThesis list from Pass 1 + Pass 2 outputs.
 
-    - thesis_statement comes from Pass 2 (decontextualized_statement)
-    - speakers comes from Pass 1 (group disposition)
-    - original_quote is programmatic join of raw sentence texts
+    - thesis_statement: joined resolved sentences from Pass 2
+    - speakers: from Pass 1 group disposition
+    - original_quote: programmatic join of raw sentence texts
     """
-    # Index Pass 1 groups and Pass 2 claims by group number
     group_lookup = {g.group: g for g in grouping.groups}
     injection_lookup = {c.group: c for c in injection.claims}
 
-    # Collect sentence indices per group
     group_indices: dict[int, list[int]] = {}
     for s in grouping.sentences:
         group_indices.setdefault(s.group, []).append(s.index)
@@ -291,7 +289,16 @@ def _build_theses(
         if not group or group.disposition != "claim" or not injected:
             continue
 
-        # Build original_quote from sentence texts
+        # Build thesis_statement from resolved sentences (joined in order)
+        resolved_lookup = {s.index: s.resolved for s in injected.sentences}
+        resolved_parts = []
+        for idx in sorted(indices):
+            resolved = resolved_lookup.get(idx)
+            if resolved:
+                resolved_parts.append(resolved)
+        thesis_statement = " ".join(resolved_parts)
+
+        # Build original_quote from raw sentence texts
         quote_parts = []
         for idx in sorted(indices):
             sent = sentences_lookup.get(idx)
@@ -300,7 +307,7 @@ def _build_theses(
         original_quote = " ".join(quote_parts)
 
         theses.append(ExtractedThesis(
-            thesis_statement=injected.decontextualized_statement,
+            thesis_statement=thesis_statement,
             speakers=group.speakers,
             original_quote=original_quote,
         ))
@@ -412,16 +419,16 @@ async def inject_context(
     enriched_speakers: list[dict],
     logger=None,
 ) -> list[ExtractedThesis]:
-    """Pass 2: Resolve references in claim groups to make them standalone.
+    """Pass 2: Resolve references per sentence in claim groups.
+
+    Per-sentence editing: the model resolves pronouns/references in each
+    sentence independently. No synthesis — sentences are joined programmatically
+    in _build_theses. This prevents attribution framing ("Speaker stated
+    that...") which occurs when the model synthesizes multiple sentences.
 
     Two-phase approach:
     1. Batch LLM call for all claim groups (with NER entity hints in prompt)
     2. Per-group NER validation — groups missing entities get a targeted retry
-
-    The first call uses invoke_llm with the structural validator (groups exist,
-    min length). After that succeeds, we check each group's output against its
-    NER entity checklist independently. Only failed groups get retried, with
-    explicit "you missed: [entities]" guidance.
 
     Returns list of ExtractedThesis (same downstream shape).
     """
@@ -452,7 +459,7 @@ async def inject_context(
     # Build claim groups text with entity hints
     claim_groups_text_parts = []
     expected_groups = []
-    # Keep raw sentences per group for retry prompt
+    expected_sentences: dict[int, list[int]] = {}
     group_raw_sentences: dict[int, list[str]] = {}
 
     for g in claim_groups:
@@ -461,10 +468,11 @@ async def inject_context(
         for idx in indices:
             sent = sentences_lookup.get(idx)
             if sent:
-                raw_sentences.append(f"[S{idx}] {sent.speaker}: {sent.text}")
+                raw_sentences.append(f"[S{idx}] {sent.text}")
         if not raw_sentences:
             continue
         expected_groups.append(g.group)
+        expected_sentences[g.group] = indices
         group_raw_sentences[g.group] = raw_sentences
         speakers_str = ", ".join(g.speakers) if g.speakers else "Unknown"
 
@@ -484,8 +492,20 @@ async def inject_context(
 
     claim_groups_text = "\n\n".join(claim_groups_text_parts)
 
+    # Pick example indices for the JSON template from the first few groups
+    all_indices = []
+    for g in claim_groups:
+        for idx in sorted(group_indices.get(g.group, [])):
+            all_indices.append(idx)
+            if len(all_indices) >= 3:
+                break
+        if len(all_indices) >= 3:
+            break
+    while len(all_indices) < 3:
+        all_indices.append(all_indices[-1] + 1 if all_indices else 0)
+
     log.info(logger, MODULE, "pass2_start",
-             "Pass 2: context injection",
+             "Pass 2: per-sentence reference resolution",
              chunk_index=chunk.chunk_index,
              claim_groups=len(expected_groups),
              groups_with_entities=len(group_entities))
@@ -493,9 +513,9 @@ async def inject_context(
     injection_validator = partial(
         validate_context_injection,
         expected_groups=expected_groups,
+        expected_sentences=expected_sentences,
     )
 
-    # Batch LLM call — structural validator handles missing groups / short statements
     output = await invoke_llm(
         system_prompt=CONTEXT_INJECT_SYSTEM.format(
             current_date=date.today().isoformat(),
@@ -505,24 +525,28 @@ async def inject_context(
             context_note=_build_context_note(transcript),
             speaker_descriptions=_build_speaker_desc(enriched_speakers),
             claim_groups_text=claim_groups_text,
+            example_idx_a=all_indices[0],
+            example_idx_b=all_indices[1],
+            example_idx_c=all_indices[2],
         ),
         schema=ContextInjectionOutput,
         semantic_validator=injection_validator,
         activity_name=f"inject_chunk_{chunk.chunk_index}",
     )
 
-    # Per-group NER entity coverage check
+    # Per-group NER entity coverage check (on joined resolved text)
     failed_groups: dict[int, dict] = {}
     for c in output.claims:
         entities = group_entities.get(c.group)
         if not entities:
             continue
-        missing = check_entity_coverage(c.decontextualized_statement, entities)
+        joined_text = " ".join(s.resolved for s in c.sentences)
+        missing = check_entity_coverage(joined_text, entities)
         if missing:
             failed_groups[c.group] = {
                 "missing": missing,
                 "all_entities": entities,
-                "previous_output": c.decontextualized_statement,
+                "previous_sentences": c.sentences,
             }
 
     if failed_groups:
@@ -539,7 +563,6 @@ async def inject_context(
         )
 
         if retry_output:
-            # Merge: replace failed groups with retry results
             retry_lookup = {c.group: c for c in retry_output.claims}
             merged = []
             for c in output.claims:
@@ -555,9 +578,8 @@ async def inject_context(
                 entities = group_entities.get(c.group)
                 if not entities:
                     continue
-                remaining = check_entity_coverage(
-                    c.decontextualized_statement, entities,
-                )
+                joined = " ".join(s.resolved for s in c.sentences)
+                remaining = check_entity_coverage(joined, entities)
                 if remaining:
                     still_missing[c.group] = remaining
             if still_missing:
@@ -591,8 +613,7 @@ async def _retry_failed_groups(
 
     Builds a focused prompt showing only the failed groups with:
     - Raw source sentences
-    - All expected entities
-    - The previous (incomplete) output
+    - Previous per-sentence resolutions
     - Which entities were missing
 
     Returns ContextInjectionOutput with revised claims, or None on failure.
@@ -608,11 +629,18 @@ async def _retry_failed_groups(
         retry_expected.append(gid)
         speakers_str = ", ".join(group.speakers) if group.speakers else "Unknown"
         raw = "\n".join(group_raw_sentences.get(gid, []))
+
+        # Format previous per-sentence resolutions
+        prev_sentences = info.get("previous_sentences", [])
+        prev_lines = "\n".join(
+            f"[S{s.index}] {s.resolved}" for s in prev_sentences
+        )
+
         retry_parts.append(
             f"### Group {gid} (speakers: {speakers_str})\n"
-            f"Raw sentences:\n{raw}\n"
+            f"Source sentences:\n{raw}\n"
+            f"Your previous resolutions:\n{prev_lines}\n"
             f"Key entities: {', '.join(info['all_entities'])}\n"
-            f"Your previous output: \"{info['previous_output']}\"\n"
             f"MISSING entities: {', '.join(info['missing'])}"
         )
 

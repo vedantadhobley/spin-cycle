@@ -107,13 +107,16 @@ raw sentences with speaker info.
 ContextInjectionOutput
   claims: list[ContextInjectedClaim]
     group: int                        ← group number from Pass 1
-    decontextualized_statement: str   ← fully standalone claim statement
+    sentences: list[ResolvedSentence] ← per-sentence resolved text
+      index: int                      ← sentence index from Pass 1
+      resolved: str                   ← sentence with references resolved
 ```
 
 ### Post-LLM enforcement
 
 - Every expected claim group has a matching entry
-- Each decontextualized_statement meets minimum length (15 chars)
+- Each group has all expected sentence indices
+- Each resolved sentence meets minimum length (5 chars)
 
 ## Call 1c: Classify Claims (Phase 2)
 

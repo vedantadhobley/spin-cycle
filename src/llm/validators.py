@@ -426,11 +426,14 @@ def validate_grouping(
 def validate_context_injection(
     output: ContextInjectionOutput,
     expected_groups: list[int],
+    expected_sentences: dict[int, list[int]] | None = None,
 ) -> tuple[bool, str]:
     """Validate Pass 2 context injection output.
 
     1. Every expected group has a matching entry in output.claims
-    2. Each decontextualized_statement meets minimum length (15 chars)
+    2. Each group has at least one resolved sentence
+    3. Each resolved sentence meets minimum length (5 chars)
+    4. If expected_sentences provided, every sentence index is present
     """
     result_groups = {c.group for c in output.claims}
     missing = set(expected_groups) - result_groups
@@ -438,11 +441,25 @@ def validate_context_injection(
         return False, f"Missing context-injected groups: {sorted(missing)}"
 
     for c in output.claims:
-        if len(c.decontextualized_statement.strip()) < 15:
-            return False, (
-                f"Group {c.group} decontextualized_statement too short "
-                f"(<15 chars): '{c.decontextualized_statement}'"
-            )
+        if not c.sentences:
+            return False, f"Group {c.group} has no resolved sentences"
+
+        for s in c.sentences:
+            if len(s.resolved.strip()) < 5:
+                return False, (
+                    f"Group {c.group}, sentence {s.index} resolved text "
+                    f"too short (<5 chars): '{s.resolved}'"
+                )
+
+        if expected_sentences and c.group in expected_sentences:
+            expected = set(expected_sentences[c.group])
+            actual = {s.index for s in c.sentences}
+            missing_sents = expected - actual
+            if missing_sents:
+                return False, (
+                    f"Group {c.group} missing sentence indices: "
+                    f"{sorted(missing_sents)}"
+                )
 
     return True, ""
 
