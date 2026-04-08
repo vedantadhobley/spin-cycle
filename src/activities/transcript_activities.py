@@ -4,7 +4,7 @@ Activities:
   1. fetch_transcript              — fetch + parse a C-SPAN transcript (Playwright WAF)
   2. fetch_raw_transcript          — parse raw text into TranscriptData
   3. extract_dispositions_activity  — Pass 1: group + classify sentences in one chunk
-  3b. inject_context_activity       — Pass 2: decontextualize claim groups in one chunk
+  3b. synthesize_claims_activity     — Pass 2: synthesize standalone claims from groups in one chunk
   4. classify_claims_activity      — batch LLM classification (checkability)
   5. dedup_claims_activity         — embedding-based dedup per speaker (Phase 2)
   6. synthesize_claim_activity     — synthesize overarching claim per group
@@ -497,18 +497,18 @@ async def extract_dispositions_activity(
 
 
 @activity.defn
-async def inject_context_activity(
+async def synthesize_claims_activity(
     transcript_meta: dict,
     chunk_dict: dict,
     grouping_result: dict,
     enriched_speakers: list[dict],
     sentences_dict: dict,
 ) -> list[dict]:
-    """Pass 2: Decontextualize claim groups for one chunk.
+    """Pass 2: Synthesize standalone claims from claim groups for one chunk.
 
     Returns list of ExtractedThesis dicts (same shape as downstream expects).
     """
-    from src.transcript.thesis_extractor import inject_context
+    from src.transcript.thesis_extractor import synthesize_claims
     from src.schemas.llm_outputs import GroupingOutput, SentenceGrouping, GroupDisposition
 
     td = _rebuild_transcript_data(transcript_meta)
@@ -522,11 +522,11 @@ async def inject_context_activity(
     )
 
     log.info(activity.logger, "extract", "pass2_start",
-             "Starting Pass 2: context injection",
+             "Starting Pass 2: claim synthesis",
              chunk_index=chunk.chunk_index)
 
     try:
-        theses = await inject_context(
+        theses = await synthesize_claims(
             td, chunk, grouping, sentences_lookup, enriched_speakers,
             logger=activity.logger,
         )

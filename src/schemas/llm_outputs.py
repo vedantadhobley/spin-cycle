@@ -93,24 +93,18 @@ class GroupingOutput(BaseModel):
 
 
 # =============================================================================
-# PASS 2: CONTEXT INJECTION (per-sentence reference resolution)
+# PASS 2: CLAIM SYNTHESIS (decontextualize + resolve references per group)
 # =============================================================================
 
-class ResolvedSentence(BaseModel):
-    """One sentence with references resolved to stand alone."""
-    index: int
-    resolved: str
-
-
-class ContextInjectedClaim(BaseModel):
-    """Per-sentence resolved text for a claim group."""
+class ExtractedClaimSynthesis(BaseModel):
+    """One synthesized claim statement per group."""
     group: int
-    sentences: list[ResolvedSentence] = Field(default_factory=list)
+    claim: str
 
 
-class ContextInjectionOutput(BaseModel):
-    """Pass 2 output: per-sentence resolved claims."""
-    claims: list[ContextInjectedClaim] = Field(default_factory=list)
+class ClaimSynthesisOutput(BaseModel):
+    """Pass 2 output: one synthesized claim per group."""
+    claims: list[ExtractedClaimSynthesis] = Field(default_factory=list)
 
 
 # =============================================================================

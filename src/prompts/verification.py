@@ -345,6 +345,7 @@ def _resolve_temporal_anchors(claim_text: str, claim_date: str) -> str:
 
     Returns a string with computed anchors, or empty string if none found.
     """
+    import itertools
     import re
     from datetime import datetime, timedelta
 
@@ -353,17 +354,31 @@ def _resolve_temporal_anchors(claim_text: str, claim_date: str) -> str:
     except (ValueError, TypeError):
         return ""
 
-    # Patterns: "in the past/last N unit(s)", "N unit(s) ago", "within the past/last N unit(s)"
-    pattern = re.compile(
-        r"(?:in the (?:past|last)|within the (?:past|last)|about|approximately|roughly)?\s*"
+    # Two patterns — at least one temporal marker required to avoid matching
+    # bare "N units" in duration expressions ("one month since X began").
+    # Pattern A: prefix + N unit(s) [+ optional ago]
+    # Pattern B: N unit(s) + ago (required suffix, no prefix needed)
+    pattern_a = re.compile(
+        r"(?:in the (?:past|last)|within the (?:past|last)|(?:about|approximately|roughly)\s+)"
         r"(\d+(?:\.\d+)?)\s+"
         r"(hours?|days?|weeks?|months?|years?)"
         r"(?:\s+ago)?",
         re.IGNORECASE,
     )
+    pattern_b = re.compile(
+        r"(\d+(?:\.\d+)?)\s+"
+        r"(hours?|days?|weeks?|months?|years?)"
+        r"\s+ago",
+        re.IGNORECASE,
+    )
 
     anchors = []
-    for m in pattern.finditer(claim_text):
+    seen_spans: set[tuple[int, int]] = set()
+    for m in itertools.chain(pattern_a.finditer(claim_text),
+                             pattern_b.finditer(claim_text)):
+        if (m.start(), m.end()) in seen_spans:
+            continue
+        seen_spans.add((m.start(), m.end()))
         value = float(m.group(1))
         unit = m.group(2).lower().rstrip("s")
         if unit == "hour":
@@ -423,7 +438,7 @@ NORMALIZE_SYSTEM = """\
 Today's date: {current_date}
 {claim_date_line}
 You are a linguistic preprocessor for a fact-checking pipeline. Rewrite \
-claims in neutral, researchable language WITHOUT changing their meaning.
+claims in neutral language WITHOUT changing their meaning.
 
 Perform three operations:
 
@@ -451,7 +466,12 @@ descriptions to named entities ("the country that hosted the 2024 \
 Olympics" → "France").
 When Speaker is provided, use ONLY for first-person resolution ("my", \
 "we", "I" → speaker's name). Do NOT reframe as "Speaker stated that..." \
-— we verify content, not attribution.
+— we verify content, not attribution. If the input already contains \
+attribution framing ("Speaker stated/claimed/said that X"), strip the \
+framing and normalize X directly. Keep the speaker as subject only when \
+they are the agent of an action ("Speaker terminated the deal"), not \
+when they are introducing an assertion ("Speaker stated the deal was \
+bad" → "The deal was bad").
 
 3. FLAG EDGE CASES
 Note speculative language ("could", "expected to") and rhetorical framing \
@@ -465,6 +485,9 @@ states that are usually unverifiable — note in changes.
 WHAT YOU DO NOT DO:
 - Do NOT decompose (that is step 2)
 - Do NOT add information not in the original claim
+- Do NOT insert specific dates not present in the source — keep relative \
+time expressions ("one month since", "recently") as-is rather than \
+computing an absolute date
 - Do NOT change meaning — only clarify the factual questions being asked
 
 Do NOT weaken characterizations that independent bodies routinely assess. \
@@ -482,7 +505,7 @@ Return ONLY the JSON object. No markdown, no explanation, no wrapping.\
 """
 
 NORMALIZE_USER = """\
-Normalize this claim into neutral, researchable language.
+Normalize this claim into neutral language.
 {speaker_line}{transcript_context}
 Claim: {claim_text}
 
@@ -564,6 +587,9 @@ actual strength, not a softened version.
 factual question into a trivially true attribution check.
 BAD: "Operation X is described as one of the largest military operations"
 GOOD: "Operation X is one of the largest military operations in history"
+When the input says "Speaker stated/claimed/said that X", extract X as \
+the fact — not "Speaker stated X." Verifying that the speaker said \
+something in the source document is tautological.
 
 5. SEARCHABILITY: Every fact must be a complete sentence a researcher could \
 search for. No brackets, placeholders, or algebraic variables. Don't invent \

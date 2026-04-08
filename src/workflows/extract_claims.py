@@ -27,7 +27,7 @@ with workflow.unsafe.imports_passed_through():
     from src.activities.transcript_activities import (
         sentencize_and_chunk_activity,
         extract_dispositions_activity,
-        inject_context_activity,
+        synthesize_claims_activity,
         store_transcript_claims,
         load_extract_inputs,
     )
@@ -120,18 +120,18 @@ class ExtractClaimsWorkflow:
                  total_claim_groups=total_claim_groups)
 
         # ---------------------------------------------------------------
-        # Pass 2: Context injection (parallel pairs, skip chunks with 0 claims)
+        # Pass 2: Claim synthesis (parallel pairs, skip chunks with 0 claims)
         # ---------------------------------------------------------------
         chunk_theses: list[list[dict]] = [[] for _ in chunk_dicts]
 
-        async def inject_with_sem(idx: int, chunk_dict: dict, grp_result: dict):
+        async def synthesize_with_sem(idx: int, chunk_dict: dict, grp_result: dict):
             claim_groups = [g for g in grp_result.get("groups", [])
                             if g["disposition"] == "claim"]
             if not claim_groups:
                 return  # no claims in this chunk
             async with sem:
                 result = await workflow.execute_activity(
-                    inject_context_activity,
+                    synthesize_claims_activity,
                     args=[transcript_meta, chunk_dict, grp_result,
                           enriched_speakers, sentences_dict],
                     start_to_close_timeout=timedelta(seconds=TIMEOUT_INJECT_CONTEXT),
@@ -140,7 +140,7 @@ class ExtractClaimsWorkflow:
                 chunk_theses[idx] = result
 
         await asyncio.gather(*(
-            inject_with_sem(i, cd, grouping_results[i])
+            synthesize_with_sem(i, cd, grouping_results[i])
             for i, cd in enumerate(chunk_dicts)
         ))
 
@@ -150,7 +150,7 @@ class ExtractClaimsWorkflow:
             all_theses.extend(theses)
 
         log.info(workflow.logger, MODULE, "pass2_done",
-                 "Pass 2 complete — all claims decontextualized",
+                 "Pass 2 complete — all claims synthesized",
                  transcript_id=transcript_id,
                  thesis_count=len(all_theses))
 
