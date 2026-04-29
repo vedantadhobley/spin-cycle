@@ -56,7 +56,7 @@ from src.llm.validators import (
     validate_extraction,
     validate_thesis_extraction,
     validate_grouping,
-    validate_context_injection,
+    validate_claim_synthesis,
     validate_synthesized_claim,
 )
 
@@ -79,6 +79,6 @@ __all__ = [
     "validate_extraction",
     "validate_thesis_extraction",
     "validate_grouping",
-    "validate_context_injection",
+    "validate_claim_synthesis",
     "validate_synthesized_claim",
 ]

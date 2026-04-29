@@ -4,13 +4,13 @@ Takes a TranscriptData (from parser registry) and extracts every verifiable
 factual claim via two focused LLM passes:
 
   Pass 1 (Grouping): Group sentences by semantic continuity, label claim/not_claim.
-  Pass 2 (Context Injection): Resolve pronouns/references in claim groups.
+  Pass 2 (Synthesis): Distill each claim group into a standalone factual assertion.
 
 Flow:
   SpeakerTurn[] → sentencize → NumberedSentence[] → build_sentence_chunks
   → SentenceChunk[] → [per chunk] extract_dispositions (Pass 1)
-  → GroupingOutput → [per chunk, claim groups only] inject_context (Pass 2)
-  → ContextInjectionOutput → _build_theses → ExtractedThesis[]
+  → GroupingOutput → [per chunk, claim groups only] synthesize_claims (Pass 2)
+  → ClaimSynthesisOutput → _build_theses → ExtractedThesis[]
 
 SpaCy splits each turn into sentences with global indices. Pass 1 must
 account for every sentence in the target range. A programmatic validator
@@ -23,14 +23,14 @@ from dataclasses import dataclass, field
 from datetime import date
 from functools import partial
 
-from src.llm import invoke_llm, LLMInvocationError, validate_grouping, validate_context_injection
+from src.llm import invoke_llm, LLMInvocationError, validate_grouping, validate_claim_synthesis
 from src.prompts.extraction import (
     GROUPING_SYSTEM, GROUPING_USER,
-    CONTEXT_INJECT_SYSTEM, CONTEXT_INJECT_USER,
-    CONTEXT_INJECT_RETRY_SYSTEM, CONTEXT_INJECT_RETRY_USER,
+    SYNTHESIS_SYSTEM, SYNTHESIS_USER,
+    SYNTHESIS_RETRY_SYSTEM, SYNTHESIS_RETRY_USER,
 )
 from src.schemas.llm_outputs import (
-    ExtractedThesis, GroupingOutput, ContextInjectionOutput,
+    ExtractedThesis, GroupingOutput, ClaimSynthesisOutput,
 )
 from src.utils.ner import extract_claim_entities, check_entity_coverage
 from src.transcript.parsers import TranscriptData, SpeakerTurn
@@ -261,22 +261,22 @@ def _format_sentences_inline(sentences: list[NumberedSentence]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Bridge: GroupingOutput + ContextInjectionOutput → ExtractedThesis[]
+# Bridge: GroupingOutput + ClaimSynthesisOutput → ExtractedThesis[]
 # ---------------------------------------------------------------------------
 
 def _build_theses(
     grouping: GroupingOutput,
-    injection: ContextInjectionOutput,
+    synthesis: ClaimSynthesisOutput,
     sentences_lookup: dict[int, NumberedSentence],
 ) -> list[ExtractedThesis]:
     """Build ExtractedThesis list from Pass 1 + Pass 2 outputs.
 
-    - thesis_statement: joined resolved sentences from Pass 2
+    - thesis_statement: synthesized claim from Pass 2
     - speakers: from Pass 1 group disposition
     - original_quote: programmatic join of raw sentence texts
     """
     group_lookup = {g.group: g for g in grouping.groups}
-    injection_lookup = {c.group: c for c in injection.claims}
+    synthesis_lookup = {c.group: c for c in synthesis.claims}
 
     group_indices: dict[int, list[int]] = {}
     for s in grouping.sentences:
@@ -285,18 +285,9 @@ def _build_theses(
     theses = []
     for gid, indices in sorted(group_indices.items()):
         group = group_lookup.get(gid)
-        injected = injection_lookup.get(gid)
-        if not group or group.disposition != "claim" or not injected:
+        synthesized = synthesis_lookup.get(gid)
+        if not group or group.disposition != "claim" or not synthesized:
             continue
-
-        # Build thesis_statement from resolved sentences (joined in order)
-        resolved_lookup = {s.index: s.resolved for s in injected.sentences}
-        resolved_parts = []
-        for idx in sorted(indices):
-            resolved = resolved_lookup.get(idx)
-            if resolved:
-                resolved_parts.append(resolved)
-        thesis_statement = " ".join(resolved_parts)
 
         # Build original_quote from raw sentence texts
         quote_parts = []
@@ -307,7 +298,7 @@ def _build_theses(
         original_quote = " ".join(quote_parts)
 
         theses.append(ExtractedThesis(
-            thesis_statement=thesis_statement,
+            thesis_statement=synthesized.claim,
             speakers=group.speakers,
             original_quote=original_quote,
         ))
@@ -408,10 +399,10 @@ async def extract_dispositions(
 
 
 # ---------------------------------------------------------------------------
-# Pass 2: Context Injection
+# Pass 2: Claim Synthesis
 # ---------------------------------------------------------------------------
 
-async def inject_context(
+async def synthesize_claims(
     transcript: TranscriptData,
     chunk: SentenceChunk,
     grouping: GroupingOutput,
@@ -419,12 +410,11 @@ async def inject_context(
     enriched_speakers: list[dict],
     logger=None,
 ) -> list[ExtractedThesis]:
-    """Pass 2: Resolve references per sentence in claim groups.
+    """Pass 2: Synthesize standalone claim from each claim group.
 
-    Per-sentence editing: the model resolves pronouns/references in each
-    sentence independently. No synthesis — sentences are joined programmatically
-    in _build_theses. This prevents attribution framing ("Speaker stated
-    that...") which occurs when the model synthesizes multiple sentences.
+    The model distills what is being asserted about the world — resolving
+    references and combining multi-sentence groups into a single checkable
+    claim statement. Speaker identity is in metadata, not the claim text.
 
     Two-phase approach:
     1. Batch LLM call for all claim groups (with NER entity hints in prompt)
@@ -459,7 +449,6 @@ async def inject_context(
     # Build claim groups text with entity hints
     claim_groups_text_parts = []
     expected_groups = []
-    expected_sentences: dict[int, list[int]] = {}
     group_raw_sentences: dict[int, list[str]] = {}
 
     for g in claim_groups:
@@ -472,7 +461,6 @@ async def inject_context(
         if not raw_sentences:
             continue
         expected_groups.append(g.group)
-        expected_sentences[g.group] = indices
         group_raw_sentences[g.group] = raw_sentences
         speakers_str = ", ".join(g.speakers) if g.speakers else "Unknown"
 
@@ -492,61 +480,44 @@ async def inject_context(
 
     claim_groups_text = "\n\n".join(claim_groups_text_parts)
 
-    # Pick example indices for the JSON template from the first few groups
-    all_indices = []
-    for g in claim_groups:
-        for idx in sorted(group_indices.get(g.group, [])):
-            all_indices.append(idx)
-            if len(all_indices) >= 3:
-                break
-        if len(all_indices) >= 3:
-            break
-    while len(all_indices) < 3:
-        all_indices.append(all_indices[-1] + 1 if all_indices else 0)
-
     log.info(logger, MODULE, "pass2_start",
-             "Pass 2: per-sentence reference resolution",
+             "Pass 2: claim synthesis",
              chunk_index=chunk.chunk_index,
              claim_groups=len(expected_groups),
              groups_with_entities=len(group_entities))
 
-    injection_validator = partial(
-        validate_context_injection,
+    synthesis_validator = partial(
+        validate_claim_synthesis,
         expected_groups=expected_groups,
-        expected_sentences=expected_sentences,
     )
 
     output = await invoke_llm(
-        system_prompt=CONTEXT_INJECT_SYSTEM.format(
+        system_prompt=SYNTHESIS_SYSTEM.format(
             current_date=date.today().isoformat(),
         ),
-        user_prompt=CONTEXT_INJECT_USER.format(
+        user_prompt=SYNTHESIS_USER.format(
             full_text=chunk.full_text,
             context_note=_build_context_note(transcript),
             speaker_descriptions=_build_speaker_desc(enriched_speakers),
             claim_groups_text=claim_groups_text,
-            example_idx_a=all_indices[0],
-            example_idx_b=all_indices[1],
-            example_idx_c=all_indices[2],
         ),
-        schema=ContextInjectionOutput,
-        semantic_validator=injection_validator,
-        activity_name=f"inject_chunk_{chunk.chunk_index}",
+        schema=ClaimSynthesisOutput,
+        semantic_validator=synthesis_validator,
+        activity_name=f"synthesize_chunk_{chunk.chunk_index}",
     )
 
-    # Per-group NER entity coverage check (on joined resolved text)
+    # Per-group NER entity coverage check
     failed_groups: dict[int, dict] = {}
     for c in output.claims:
         entities = group_entities.get(c.group)
         if not entities:
             continue
-        joined_text = " ".join(s.resolved for s in c.sentences)
-        missing = check_entity_coverage(joined_text, entities)
+        missing = check_entity_coverage(c.claim, entities)
         if missing:
             failed_groups[c.group] = {
                 "missing": missing,
                 "all_entities": entities,
-                "previous_sentences": c.sentences,
+                "previous_claim": c.claim,
             }
 
     if failed_groups:
@@ -578,8 +549,7 @@ async def inject_context(
                 entities = group_entities.get(c.group)
                 if not entities:
                     continue
-                joined = " ".join(s.resolved for s in c.sentences)
-                remaining = check_entity_coverage(joined, entities)
+                remaining = check_entity_coverage(c.claim, entities)
                 if remaining:
                     still_missing[c.group] = remaining
             if still_missing:
@@ -608,15 +578,15 @@ async def _retry_failed_groups(
     group_raw_sentences: dict[int, list[str]],
     failed_groups: dict[int, dict],
     logger,
-) -> ContextInjectionOutput | None:
+) -> ClaimSynthesisOutput | None:
     """Targeted retry for groups that failed NER entity coverage.
 
     Builds a focused prompt showing only the failed groups with:
     - Raw source sentences
-    - Previous per-sentence resolutions
+    - Previous synthesized claim
     - Which entities were missing
 
-    Returns ContextInjectionOutput with revised claims, or None on failure.
+    Returns ClaimSynthesisOutput with revised claims, or None on failure.
     """
     retry_parts = []
     retry_expected = []
@@ -630,16 +600,10 @@ async def _retry_failed_groups(
         speakers_str = ", ".join(group.speakers) if group.speakers else "Unknown"
         raw = "\n".join(group_raw_sentences.get(gid, []))
 
-        # Format previous per-sentence resolutions
-        prev_sentences = info.get("previous_sentences", [])
-        prev_lines = "\n".join(
-            f"[S{s.index}] {s.resolved}" for s in prev_sentences
-        )
-
         retry_parts.append(
             f"### Group {gid} (speakers: {speakers_str})\n"
             f"Source sentences:\n{raw}\n"
-            f"Your previous resolutions:\n{prev_lines}\n"
+            f"Your previous claim:\n{info.get('previous_claim', '')}\n"
             f"Key entities: {', '.join(info['all_entities'])}\n"
             f"MISSING entities: {', '.join(info['missing'])}"
         )
@@ -648,25 +612,25 @@ async def _retry_failed_groups(
         return None
 
     retry_validator = partial(
-        validate_context_injection,
+        validate_claim_synthesis,
         expected_groups=retry_expected,
     )
 
     try:
         return await invoke_llm(
-            system_prompt=CONTEXT_INJECT_RETRY_SYSTEM.format(
+            system_prompt=SYNTHESIS_RETRY_SYSTEM.format(
                 current_date=date.today().isoformat(),
             ),
-            user_prompt=CONTEXT_INJECT_RETRY_USER.format(
+            user_prompt=SYNTHESIS_RETRY_USER.format(
                 full_text=chunk.full_text,
                 context_note=_build_context_note(transcript),
                 speaker_descriptions=_build_speaker_desc(enriched_speakers),
                 retry_groups_text="\n\n".join(retry_parts),
             ),
-            schema=ContextInjectionOutput,
+            schema=ClaimSynthesisOutput,
             semantic_validator=retry_validator,
             max_retries=1,
-            activity_name=f"inject_retry_chunk_{chunk.chunk_index}",
+            activity_name=f"synthesis_retry_chunk_{chunk.chunk_index}",
         )
     except LLMInvocationError as e:
         log.warning(logger, MODULE, "ner_retry_failed",

@@ -25,7 +25,7 @@ from src.schemas.llm_outputs import (
     AttributeSpeakersOutput,
     GroupingOutput,
     GroupDisposition,
-    ContextInjectionOutput,
+    ClaimSynthesisOutput,
 )
 from src.utils.logging import log, get_logger
 
@@ -423,43 +423,25 @@ def validate_grouping(
     return True, ""
 
 
-def validate_context_injection(
-    output: ContextInjectionOutput,
+def validate_claim_synthesis(
+    output: ClaimSynthesisOutput,
     expected_groups: list[int],
-    expected_sentences: dict[int, list[int]] | None = None,
 ) -> tuple[bool, str]:
-    """Validate Pass 2 context injection output.
+    """Validate Pass 2 claim synthesis output.
 
     1. Every expected group has a matching entry in output.claims
-    2. Each group has at least one resolved sentence
-    3. Each resolved sentence meets minimum length (5 chars)
-    4. If expected_sentences provided, every sentence index is present
+    2. Each synthesized claim meets minimum length (15 chars)
     """
     result_groups = {c.group for c in output.claims}
     missing = set(expected_groups) - result_groups
     if missing:
-        return False, f"Missing context-injected groups: {sorted(missing)}"
+        return False, f"Missing synthesized groups: {sorted(missing)}"
 
     for c in output.claims:
-        if not c.sentences:
-            return False, f"Group {c.group} has no resolved sentences"
-
-        for s in c.sentences:
-            if len(s.resolved.strip()) < 5:
-                return False, (
-                    f"Group {c.group}, sentence {s.index} resolved text "
-                    f"too short (<5 chars): '{s.resolved}'"
-                )
-
-        if expected_sentences and c.group in expected_sentences:
-            expected = set(expected_sentences[c.group])
-            actual = {s.index for s in c.sentences}
-            missing_sents = expected - actual
-            if missing_sents:
-                return False, (
-                    f"Group {c.group} missing sentence indices: "
-                    f"{sorted(missing_sents)}"
-                )
+        if len(c.claim.strip()) < 15:
+            return False, (
+                f"Group {c.group} claim too short (<15 chars): '{c.claim}'"
+            )
 
     return True, ""
 

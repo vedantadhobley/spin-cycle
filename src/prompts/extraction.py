@@ -2,16 +2,17 @@
 
 Pass 1 (Grouping + Disposition):
   Group sentences by semantic continuity, then label each group claim/not_claim.
-  No thesis writing — the model only decides structure and disposition.
+  No claim writing — the model only decides structure and disposition.
 
-Pass 2 (Context Injection):
-  Take each claim group's raw sentences + surrounding context, resolve
-  pronouns/references to make them standalone. Editing, not writing.
+Pass 2 (Claim Synthesis):
+  Take each claim group's raw sentences + surrounding context, synthesize
+  a standalone factual claim. Resolves references and distills the checkable
+  assertion — what is being claimed about the world.
 
 Key design:
 - Sentences are globally numbered [S0], [S1], ..., [Sn]
 - Pass 1: every sentence gets a group number; every group gets a disposition
-- Pass 2: every claim group gets one decontextualized statement
+- Pass 2: every claim group gets one synthesized claim statement
 - original_quote is derived programmatically from sentence text (not LLM output)
 - Classification is deferred to a separate batch LLM phase (claim_classifier)
 """
@@ -101,53 +102,51 @@ Return JSON:
 """
 
 # ===========================================================================
-# PASS 2: CONTEXT INJECTION
+# PASS 2: CLAIM SYNTHESIS
 # ===========================================================================
 
-CONTEXT_INJECT_SYSTEM = """\
-You extract the substantive assertion from each transcript sentence \
-and resolve its references so it stands alone without the transcript. \
-Process each sentence independently.
+SYNTHESIS_SYSTEM = """\
+You synthesize standalone factual claims from transcript sentence groups.
 
-The speaker's identity is stored in metadata. Your output should \
-contain what the speaker is asserting about the world — not \
-meta-commentary about their own act of speaking.
+Each group is a set of consecutive sentences where a speaker makes one \
+point. Your job: distill what is being asserted about the world into a \
+single claim statement that a fact-checker can verify without seeing \
+the transcript.
+
+The speaker's identity is stored separately in metadata. Your output \
+is the factual content — what is being claimed about the world. Do not \
+frame claims as speech acts ("stated that", "said that", "announced \
+that", "pointed out that"). Write the assertion directly.
 
 Today's date: {current_date}
 
-## What to Resolve
+## Reference Resolution
 
 - Pronouns → specific referents (names, countries, organizations)
-- "it", "they", "this", "that" → what they refer to
+- "it", "they", "this", "that" → what they refer to in the transcript
 - "I" / "we" → the speaker's name when they are the subject of an \
-action, or the entity they represent. \
-"I terminated the deal" → "[Speaker] terminated the deal." \
-"We launched the operation" → "The United States launched the operation."
-- Relative time → absolute when clear from context. If ambiguous, \
-keep as-is (do NOT guess a year)
-- "our president", "our country" → identify who held that role at \
-the time described, not who holds it now
+action, or the entity they represent
+- Relative time → absolute when clear from context (do NOT guess years)
+- "our president", "our country" → identify the specific person or \
+country from context
 
 ## What to Preserve
 
-- Every named entity, number, date, and specific detail
-- Enumerated lists — all items must appear
+- Every named entity, number, date, and specific detail from the source
 - Conditional and hypothetical framing ("would have", "could", "if")
 - Third-party attribution — "he said", "they claimed" about others
-- Historical self-references with a specific time or event \
-("In 2015, I vowed..." is a historical claim — the speaker as actor)
+- Enumerated lists — all items must appear
 
 ## What NOT to Do
 
-- Do NOT combine sentences — one input sentence = one output sentence
-- Do NOT add facts not in the source sentence
-- Do NOT guess ambiguous referents — describe them instead
-- Do NOT remove qualifiers, hedging, or attribution language\
+- Do NOT add facts not present in the source sentences
+- Do NOT frame the claim as a speech act by the speaker
+- Do NOT guess ambiguous referents — describe them instead\
 """
 
-CONTEXT_INJECT_USER = """\
-Resolve references in each sentence below. Use the full transcript \
-for context only.
+SYNTHESIS_USER = """\
+Synthesize one standalone claim per group. Use the full transcript \
+to resolve references.
 
 ## Full Transcript Excerpt (for context)
 {full_text}
@@ -158,19 +157,14 @@ for context only.
 ## Speaker Descriptions
 {speaker_descriptions}
 
-## Claim Groups to Resolve
+## Claim Groups to Synthesize
 {claim_groups_text}
 
 Return JSON:
 {{
   "claims": [
-    {{"group": 1, "sentences": [
-      {{"index": {example_idx_a}, "resolved": "Sentence with references resolved."}},
-      {{"index": {example_idx_b}, "resolved": "Another resolved sentence."}}
-    ]}},
-    {{"group": 2, "sentences": [
-      {{"index": {example_idx_c}, "resolved": "Resolved sentence text."}}
-    ]}}
+    {{"group": 1, "claim": "Standalone factual claim with all references resolved."}},
+    {{"group": 2, "claim": "Another standalone factual claim."}}
   ]
 }}\
 """
@@ -179,8 +173,8 @@ Return JSON:
 # PASS 2 RETRY: targeted retry for groups that dropped entities
 # ===========================================================================
 
-CONTEXT_INJECT_RETRY_SYSTEM = """\
-You are revising resolved sentences. Your previous output dropped \
+SYNTHESIS_RETRY_SYSTEM = """\
+You are revising claim synthesis. Your previous output dropped \
 entities that appeared in the source text.
 
 Today's date: {current_date}
@@ -189,16 +183,16 @@ Today's date: {current_date}
 
 - Include ALL entities listed as "missing" — they were in the source \
 and must appear in your output
-- Resolve pronouns to specific referents
+- Resolve pronouns and references to specific referents
 - Keep ALL specifics: names, numbers, dates, list items
-- One input sentence = one output sentence
+- Write the factual assertion directly — not as a speech act
 - Do NOT add facts not in the source sentences
 - Do NOT guess ambiguous referents — describe them instead\
 """
 
-CONTEXT_INJECT_RETRY_USER = """\
-Revise the sentence resolutions below. Each group lists entities from \
-the source text that were MISSING from your previous output.
+SYNTHESIS_RETRY_USER = """\
+Revise the claims below. Each group lists entities from the source \
+text that were MISSING from your previous output.
 
 ## Full Transcript Excerpt (for context)
 {full_text}
@@ -215,10 +209,7 @@ the source text that were MISSING from your previous output.
 Return JSON:
 {{
   "claims": [
-    {{"group": 1, "sentences": [
-      {{"index": 0, "resolved": "Revised resolved sentence."}},
-      {{"index": 1, "resolved": "Another revised sentence."}}
-    ]}}
+    {{"group": 1, "claim": "Revised standalone claim with all entities."}}
   ]
 }}\
 """
