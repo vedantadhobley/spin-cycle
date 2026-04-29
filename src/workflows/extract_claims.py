@@ -1,21 +1,22 @@
-"""Full claim extraction pipeline — extract, classify, dedup, synthesize.
+"""Full claim extraction pipeline — decontextualize, group, synthesize.
 
-Sentencizes the transcript, builds sentence-based chunks, then runs two
-sequential LLM passes per chunk (parallel pairs within each pass):
+Sentencizes the transcript, builds sentence-based chunks, then:
 
-  Pass 1: Group sentences + label claim/not_claim (no thesis writing)
-  Pass 2: Context-inject each claim group (resolve pronouns/references)
+  1. Decontextualize: LLM resolves references per chunk (parallel, sem=2)
+  2. Embed + group:   Programmatic cosine-similarity grouping (single activity)
+  3. Synthesize:      LLM combines standalone sentences into claims (parallel batches)
 
 Then calls ClassifyAndDedupWorkflow and SynthesizeClaimsWorkflow as child
 workflows to classify, dedup, and synthesize the extracted claims.
 
 Pipeline phases:
   1. Sentencize + chunk
-  2. Pass 1: Group + disposition (parallel pairs, sem=2)
-  3. Pass 2: Context injection (parallel pairs, skip chunks with 0 claims)
-  4. Store transcript_claims
-  5. Classify + dedup (child workflow)
-  6. Synthesize (child workflow)
+  2. Decontextualize (parallel per chunk, sem=2)
+  3. Embed + group (single activity, programmatic)
+  4. Synthesize claims (parallel per batch, sem=2)
+  5. Store transcript_claims
+  6. Classify + dedup (child workflow)
+  7. Synthesize overarching claims (child workflow)
 """
 
 import asyncio
@@ -26,7 +27,8 @@ from temporalio.common import RetryPolicy
 with workflow.unsafe.imports_passed_through():
     from src.activities.transcript_activities import (
         sentencize_and_chunk_activity,
-        extract_dispositions_activity,
+        decontextualize_chunk_activity,
+        embed_and_group_activity,
         synthesize_claims_activity,
         store_transcript_claims,
         load_extract_inputs,
@@ -35,8 +37,9 @@ with workflow.unsafe.imports_passed_through():
     from src.workflows.synthesize_claims import SynthesizeClaimsWorkflow
     from src.utils.logging import log
     from src.config import (
-        MAX_CONCURRENT, TIMEOUT_EXTRACT_CHUNK, TIMEOUT_INJECT_CONTEXT,
-        TIMEOUT_STORE_CLAIMS, TASK_QUEUE,
+        MAX_CONCURRENT, TIMEOUT_DECONTEXTUALIZE, TIMEOUT_EMBED_AND_GROUP,
+        TIMEOUT_SYNTHESIZE_BATCH, TIMEOUT_STORE_CLAIMS, TASK_QUEUE,
+        GROUPING_SIMILARITY_THRESHOLD, GROUPING_BRIDGE_MAX_WORDS,
     )
 
 MODULE = "extract_claims"
@@ -91,66 +94,90 @@ class ExtractClaimsWorkflow:
                  chunk_count=len(chunk_dicts))
 
         # ---------------------------------------------------------------
-        # Pass 1: Group + disposition (parallel pairs, sem=2)
+        # Phase 2: Decontextualize (parallel per chunk, sem=2)
         # ---------------------------------------------------------------
         sem = asyncio.Semaphore(MAX_CONCURRENT)
-        grouping_results: list[dict] = [None] * len(chunk_dicts)
+        decontext_results: list[dict] = [None] * len(chunk_dicts)
 
-        async def group_with_sem(idx: int, chunk_dict: dict):
+        async def decontext_with_sem(idx: int, chunk_dict: dict):
             async with sem:
                 result = await workflow.execute_activity(
-                    extract_dispositions_activity,
+                    decontextualize_chunk_activity,
                     args=[transcript_meta, chunk_dict, enriched_speakers],
-                    start_to_close_timeout=timedelta(seconds=TIMEOUT_EXTRACT_CHUNK),
+                    start_to_close_timeout=timedelta(seconds=TIMEOUT_DECONTEXTUALIZE),
                     retry_policy=RetryPolicy(maximum_attempts=2),
                 )
-                grouping_results[idx] = result
+                decontext_results[idx] = result
 
         await asyncio.gather(*(
-            group_with_sem(i, cd) for i, cd in enumerate(chunk_dicts)
+            decontext_with_sem(i, cd) for i, cd in enumerate(chunk_dicts)
         ))
 
-        total_claim_groups = sum(
-            sum(1 for g in gr["groups"] if g["disposition"] == "claim")
-            for gr in grouping_results
-        )
-        log.info(workflow.logger, MODULE, "pass1_done",
-                 "Pass 1 complete — all chunks grouped",
+        # Merge all decontextualized sentences into flat dict
+        # Keys are str(global_index) for Temporal JSON transport
+        standalone_sentences = {}
+        for chunk_result in decontext_results:
+            for idx_str, standalone in chunk_result.items():
+                idx = int(idx_str)
+                sent = sentences_dict.get(idx_str) or sentences_dict.get(idx)
+                if sent:
+                    standalone_sentences[str(idx)] = {
+                        "global_index": idx,
+                        "speaker": sent["speaker"],
+                        "text": sent["text"],
+                        "standalone": standalone,
+                    }
+
+        log.info(workflow.logger, MODULE, "decontext_done",
+                 "Decontextualization complete — all chunks",
                  transcript_id=transcript_id,
-                 total_claim_groups=total_claim_groups)
+                 standalone_count=len(standalone_sentences))
 
         # ---------------------------------------------------------------
-        # Pass 2: Claim synthesis (parallel pairs, skip chunks with 0 claims)
+        # Phase 3: Embed + group (single activity, programmatic)
         # ---------------------------------------------------------------
-        chunk_theses: list[list[dict]] = [[] for _ in chunk_dicts]
+        groups = await workflow.execute_activity(
+            embed_and_group_activity,
+            args=[standalone_sentences, GROUPING_SIMILARITY_THRESHOLD,
+                  GROUPING_BRIDGE_MAX_WORDS],
+            start_to_close_timeout=timedelta(seconds=TIMEOUT_EMBED_AND_GROUP),
+            retry_policy=RetryPolicy(maximum_attempts=2),
+        )
 
-        async def synthesize_with_sem(idx: int, chunk_dict: dict, grp_result: dict):
-            claim_groups = [g for g in grp_result.get("groups", [])
-                            if g["disposition"] == "claim"]
-            if not claim_groups:
-                return  # no claims in this chunk
+        log.info(workflow.logger, MODULE, "grouping_done",
+                 "Embedding + grouping complete",
+                 transcript_id=transcript_id,
+                 group_count=len(groups))
+
+        # ---------------------------------------------------------------
+        # Phase 4: Synthesize claims (parallel per batch, sem=2)
+        # ---------------------------------------------------------------
+        # Batch groups into chunks of ~20 for LLM calls
+        group_batches = [groups[i:i+20] for i in range(0, len(groups), 20)]
+        batch_theses: list[list[dict]] = [[] for _ in group_batches]
+
+        async def synth_with_sem(idx: int, batch: list[dict]):
             async with sem:
                 result = await workflow.execute_activity(
                     synthesize_claims_activity,
-                    args=[transcript_meta, chunk_dict, grp_result,
-                          enriched_speakers, sentences_dict],
-                    start_to_close_timeout=timedelta(seconds=TIMEOUT_INJECT_CONTEXT),
+                    args=[transcript_meta, batch, enriched_speakers,
+                          standalone_sentences, sentences_dict],
+                    start_to_close_timeout=timedelta(seconds=TIMEOUT_SYNTHESIZE_BATCH),
                     retry_policy=RetryPolicy(maximum_attempts=2),
                 )
-                chunk_theses[idx] = result
+                batch_theses[idx] = result
 
         await asyncio.gather(*(
-            synthesize_with_sem(i, cd, grouping_results[i])
-            for i, cd in enumerate(chunk_dicts)
+            synth_with_sem(i, batch) for i, batch in enumerate(group_batches)
         ))
 
         # Flatten
         all_theses: list[dict] = []
-        for theses in chunk_theses:
+        for theses in batch_theses:
             all_theses.extend(theses)
 
-        log.info(workflow.logger, MODULE, "pass2_done",
-                 "Pass 2 complete — all claims synthesized",
+        log.info(workflow.logger, MODULE, "synthesis_done",
+                 "All claims synthesized",
                  transcript_id=transcript_id,
                  thesis_count=len(all_theses))
 
@@ -198,7 +225,7 @@ class ExtractClaimsWorkflow:
             }
 
         # ---------------------------------------------------------------
-        # Phase 3: Classify + Dedup (child workflow)
+        # Phase 5: Classify + Dedup (child workflow)
         # ---------------------------------------------------------------
         dedup_result = await workflow.execute_child_workflow(
             ClassifyAndDedupWorkflow.run,
@@ -219,7 +246,7 @@ class ExtractClaimsWorkflow:
             }
 
         # ---------------------------------------------------------------
-        # Phase 4: Synthesize (child workflow)
+        # Phase 6: Synthesize (child workflow)
         # ---------------------------------------------------------------
         speaker_descriptions = {}
         for s in enriched_speakers:

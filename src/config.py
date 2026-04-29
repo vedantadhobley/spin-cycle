@@ -77,6 +77,13 @@ EMBEDDING_TIMEOUT = 60.0               # seconds per embedding batch
 NUMERIC_SKELETON_JACCARD_THRESHOLD = 0.7  # word overlap to consider "structurally same"
 
 # ---------------------------------------------------------------------------
+# Embedding-based sentence grouping (extraction Phase 2)
+# ---------------------------------------------------------------------------
+
+GROUPING_SIMILARITY_THRESHOLD = 0.75   # cosine sim for topic continuity (tunable)
+GROUPING_BRIDGE_MAX_WORDS = 10         # short-sentence bridge heuristic ceiling
+
+# ---------------------------------------------------------------------------
 # Verification pipeline
 # ---------------------------------------------------------------------------
 
@@ -116,9 +123,10 @@ TIMEOUT_NOTIFY_FRONTEND = 10
 
 # Extraction workflow
 TIMEOUT_FETCH_TRANSCRIPT = 60
-TIMEOUT_EXTRACT_CHUNK = 2700  # 45 min — large chunks on slow model
-TIMEOUT_INJECT_CONTEXT = 600  # 10 min — simpler than extraction, smaller output
-TIMEOUT_CLASSIFY_CLAIMS = 600  # 10 min — 50-claim batches on local model
+TIMEOUT_DECONTEXTUALIZE = 600     # 10 min — reference resolution per chunk
+TIMEOUT_EMBED_AND_GROUP = 120     # 2 min — programmatic embedding + grouping
+TIMEOUT_SYNTHESIZE_BATCH = 600    # 10 min — synthesis LLM call per batch
+TIMEOUT_CLASSIFY_CLAIMS = 600     # 10 min — 50-claim batches on local model
 TIMEOUT_DEDUP_CLAIMS = 600    # 10 min — per-speaker embedding dedup
 TIMEOUT_SYNTHESIZE_CLAIM = 300
 TIMEOUT_ATTRIBUTE_SPEAKERS = 600  # 10 min — scales with unknown turn count

@@ -125,7 +125,7 @@ class TranscriptRecord(Base):
     __tablename__ = "transcripts"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    url = Column(String(2048), nullable=False, unique=True)
+    url = Column(String(2048), nullable=False)
     title = Column(String(512), nullable=False)
     date = Column(String(64), nullable=True)
     description = Column(Text, nullable=True)  # source blurb: rev.com description, editor's note, og:description

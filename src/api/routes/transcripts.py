@@ -102,20 +102,11 @@ async def submit_transcript(
     else:
         effective_url = body.url
 
-    # Build workflow args: (url, raw_text, title, date, stop_after)
-    workflow_args = [effective_url]
-    if body.raw_text or body.stop_after:
-        workflow_args.extend([
-            body.raw_text,  # None if not raw_text
-            body.title,
-            body.date,
-            body.stop_after,
-        ])
-
     # When stop_after is set, skip queuing/DB — just fire the workflow.
     # The workflow handles early exit; no DB record avoids stuck state.
     if body.stop_after:
         workflow_id = f"test-extract-{uuid.uuid4().hex[:8]}"
+        workflow_args = [effective_url, body.raw_text, body.title, body.date, body.stop_after, None]
 
         await temporal.start_workflow(
             TranscriptPipelineWorkflow.run,
@@ -137,14 +128,17 @@ async def submit_transcript(
 
     # --- Production path: idempotency check + queuing ---
 
-    # Check if this URL already exists
+    # Check if this URL is already active in the pipeline
     async with async_session() as session:
         result = await session.execute(
-            select(TranscriptRecord).where(TranscriptRecord.url == effective_url)
+            select(TranscriptRecord).where(
+                TranscriptRecord.url == effective_url,
+                TranscriptRecord.status.in_(["queued", "extracting", "verifying"]),
+            )
         )
-        existing = result.scalar_one_or_none()
+        existing = result.scalars().first()
 
-        if existing and existing.status in ("queued", "extracting", "verifying"):
+        if existing:
             log.info(logger, MODULE, "already_active",
                      "Transcript already in pipeline",
                      url=effective_url, status=existing.status)
@@ -154,30 +148,21 @@ async def submit_transcript(
                 status=existing.status,
             )
 
-    # New submission or re-submission of complete/failed transcript
+    # New submission or re-submission — always create a new record
     pipeline_busy = await _any_pipeline_running(temporal)
 
     if pipeline_busy:
         async with async_session() as session:
-            result = await session.execute(
-                select(TranscriptRecord).where(TranscriptRecord.url == effective_url)
+            record = TranscriptRecord(
+                url=effective_url,
+                title=body.title or "(pending extraction)",
+                speakers=[],
+                word_count=0,
+                segment_count=0,
+                display_text="",
+                status="queued",
             )
-            record = result.scalar_one_or_none()
-
-            if record:
-                record.status = "queued"
-            else:
-                record = TranscriptRecord(
-                    url=effective_url,
-                    title=body.title or "(pending extraction)",
-                    speakers=[],
-                    word_count=0,
-                    segment_count=0,
-                    display_text="",
-                    status="queued",
-                )
-                session.add(record)
-
+            session.add(record)
             await session.commit()
             transcript_id = str(record.id)
 
@@ -191,31 +176,23 @@ async def submit_transcript(
             status="queued",
         )
 
-    # Pipeline idle — start immediately
+    # Pipeline idle — create record and start immediately
     async with async_session() as session:
-        result = await session.execute(
-            select(TranscriptRecord).where(TranscriptRecord.url == effective_url)
+        record = TranscriptRecord(
+            url=effective_url,
+            title=body.title or "(pending extraction)",
+            speakers=[],
+            word_count=0,
+            segment_count=0,
+            display_text="",
+            status="extracting",
         )
-        record = result.scalar_one_or_none()
-
-        if record:
-            record.status = "extracting"
-        else:
-            record = TranscriptRecord(
-                url=effective_url,
-                title=body.title or "(pending extraction)",
-                speakers=[],
-                word_count=0,
-                segment_count=0,
-                display_text="",
-                status="extracting",
-            )
-            session.add(record)
-
+        session.add(record)
         await session.commit()
         transcript_id = str(record.id)
 
     workflow_id = f"extract-{transcript_id}"
+    workflow_args = [effective_url, body.raw_text, body.title, body.date, None, transcript_id]
 
     await temporal.start_workflow(
         TranscriptPipelineWorkflow.run,

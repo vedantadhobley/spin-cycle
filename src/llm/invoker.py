@@ -75,12 +75,23 @@ class InvocationResult(BaseModel):
     error: Optional[str] = None
 
 
+class StreamResult:
+    """Result of a streamed LLM call with token usage."""
+
+    __slots__ = ("text", "prompt_tokens", "completion_tokens")
+
+    def __init__(self, text: str, prompt_tokens: int = 0, completion_tokens: int = 0):
+        self.text = text
+        self.prompt_tokens = prompt_tokens
+        self.completion_tokens = completion_tokens
+
+
 async def _invoke_with_stream(
     llm,
     messages: list,
     activity_name: str,
     expect_json: bool = True,
-) -> str:
+) -> StreamResult:
     """Stream LLM response with idle timeout and sanity checks.
 
     Wraps llm.astream() with per-chunk idle timeout: if no token arrives
@@ -95,6 +106,8 @@ async def _invoke_with_stream(
     parts: list[str] = []
     token_count = 0
     found_json = False
+    prompt_tokens = 0
+    completion_tokens = 0
 
     stream = llm.astream(messages)
 
@@ -123,6 +136,12 @@ async def _invoke_with_stream(
                     f"{token_count} tokens"
                 )
 
+            # Extract token usage from final chunk (stream_usage=True)
+            usage = getattr(chunk, "usage_metadata", None)
+            if usage:
+                prompt_tokens = usage.get("input_tokens", 0)
+                completion_tokens = usage.get("output_tokens", 0)
+
             token_text = chunk.content if hasattr(chunk, "content") else str(chunk)
             if token_text:
                 parts.append(token_text)
@@ -149,7 +168,7 @@ async def _invoke_with_stream(
         if hasattr(stream, "aclose"):
             await stream.aclose()
 
-    return "".join(parts)
+    return StreamResult("".join(parts), prompt_tokens, completion_tokens)
 
 
 async def invoke_llm(
@@ -204,16 +223,18 @@ async def invoke_llm(
                 HumanMessage(content=user_prompt),
             ]
 
-            raw = await _invoke_with_stream(llm, messages, activity_name)
+            result = await _invoke_with_stream(llm, messages, activity_name)
 
             latency_ms = int((time.monotonic() - _t0) * 1000)
-            raw = raw.strip()
+            raw = result.text.strip()
             last_raw = raw
 
             log.debug(logger, MODULE, "llm_response",
                      f"LLM call complete for {activity_name}",
                      attempt=attempt + 1, latency_ms=latency_ms,
-                     raw_length=len(raw))
+                     raw_length=len(raw),
+                     prompt_tokens=result.prompt_tokens,
+                     completion_tokens=result.completion_tokens)
 
             # Extract JSON from raw response
             try:
@@ -250,7 +271,10 @@ async def invoke_llm(
             log.info(logger, MODULE, "invoke_success",
                     f"LLM invocation successful for {activity_name}",
                     attempts=attempt + 1, latency_ms=latency_ms,
-                    schema=schema.__name__)
+                    schema=schema.__name__,
+                    prompt_tokens=result.prompt_tokens,
+                    completion_tokens=result.completion_tokens,
+                    total_tokens=result.prompt_tokens + result.completion_tokens)
 
             return validated
 
@@ -334,15 +358,17 @@ async def invoke_llm_raw(
         HumanMessage(content=user_prompt),
     ]
 
-    raw = await _invoke_with_stream(
+    result = await _invoke_with_stream(
         llm, messages, activity_name, expect_json=False,
     )
 
     latency_ms = int((time.monotonic() - _t0) * 1000)
-    raw = raw.strip()
+    raw = result.text.strip()
 
     log.debug(logger, MODULE, "llm_raw_response",
              f"Raw LLM call complete for {activity_name}",
-             latency_ms=latency_ms, raw_length=len(raw))
+             latency_ms=latency_ms, raw_length=len(raw),
+             prompt_tokens=result.prompt_tokens,
+             completion_tokens=result.completion_tokens)
 
     return raw, latency_ms

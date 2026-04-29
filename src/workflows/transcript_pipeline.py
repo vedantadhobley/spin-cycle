@@ -73,18 +73,20 @@ class TranscriptPipelineWorkflow:
         title: str | None = None,
         date: str | None = None,
         stop_after: str | None = None,
+        transcript_id: str | None = None,
     ) -> dict:
         self._url = url
 
         log.info(workflow.logger, MODULE, "started",
                  "Starting transcript pipeline",
-                 url=url, stop_after=stop_after)
+                 url=url, stop_after=stop_after,
+                 transcript_id=transcript_id)
 
         # --- Phase 1: Fetch ---
         self._set_phase("fetching")
         fetch_result = await workflow.execute_child_workflow(
             FetchTranscriptWorkflow.run,
-            args=[url, raw_text, title, date],
+            args=[url, raw_text, title, date, transcript_id],
             id=f"fetch-{workflow.info().workflow_id}",
             task_queue=TASK_QUEUE,
         )

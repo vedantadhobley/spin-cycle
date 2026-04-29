@@ -59,37 +59,18 @@ class ThesisExtractionOutput(BaseModel):
 
 
 # =============================================================================
-# PASS 1: GROUPING + DISPOSITION (no thesis writing)
+# DECONTEXTUALIZATION OUTPUT (resolve references per sentence)
 # =============================================================================
 
-class SentenceGrouping(BaseModel):
-    """One entry per target sentence — assigns group number."""
+class DecontextualizedSentence(BaseModel):
+    """One sentence with references resolved to standalone form."""
     index: int
-    group: int
+    standalone: str
 
 
-class GroupDisposition(BaseModel):
-    """Disposition for a sentence group — claim or not_claim."""
-    group: int
-    disposition: Literal["claim", "not_claim"]
-    speakers: Optional[list[str]] = Field(default_factory=list)  # required for claims
-    reason: Optional[str] = ""  # required for not_claims
-
-    @field_validator("speakers", mode="before")
-    @classmethod
-    def speakers_none_to_list(cls, v):
-        return v or []
-
-    @field_validator("reason", mode="before")
-    @classmethod
-    def reason_none_to_empty(cls, v):
-        return v or ""
-
-
-class GroupingOutput(BaseModel):
-    """Pass 1 output: sentence groupings + per-group dispositions."""
-    sentences: list[SentenceGrouping] = Field(default_factory=list)
-    groups: list[GroupDisposition] = Field(default_factory=list)
+class DecontextualizeOutput(BaseModel):
+    """Output from decontextualization: one standalone sentence per target index."""
+    sentences: list[DecontextualizedSentence] = Field(default_factory=list)
 
 
 # =============================================================================

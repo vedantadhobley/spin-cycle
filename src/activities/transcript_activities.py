@@ -3,20 +3,21 @@
 Activities:
   1. fetch_transcript              — fetch + parse a C-SPAN transcript (Playwright WAF)
   2. fetch_raw_transcript          — parse raw text into TranscriptData
-  3. extract_dispositions_activity  — Pass 1: group + classify sentences in one chunk
-  3b. synthesize_claims_activity     — Pass 2: synthesize standalone claims from groups in one chunk
-  4. classify_claims_activity      — batch LLM classification (checkability)
-  5. dedup_claims_activity         — embedding-based dedup per speaker (Phase 2)
-  6. synthesize_claim_activity     — synthesize overarching claim per group
-  7. store_transcript              — persist cleaned transcript to DB
-  8. store_transcript_claims       — persist extracted claims linked to transcript
-  9. create_claims_for_transcript  — batch-create Claim records + link FKs
- 10. update_transcript_status      — set transcript status field
- 11. finish_transcript_and_start_next — mark transcript complete, start next queued
- 12. load_extract_inputs           — load DB state for ExtractClaimsWorkflow
- 13. load_classify_inputs          — load DB state for ClassifyAndDedupWorkflow
- 14. load_synthesize_inputs        — load DB state for SynthesizeClaimsWorkflow
- 15. load_verify_inputs            — load DB state for VerifyClaimsWorkflow
+  3. decontextualize_chunk_activity — resolve references per sentence in one chunk
+  4. embed_and_group_activity      — embed standalone sentences + programmatic grouping
+  5. synthesize_claims_activity    — synthesize standalone claims from groups
+  6. classify_claims_activity      — batch LLM classification (checkability)
+  7. dedup_claims_activity         — embedding-based dedup per speaker (Phase 2)
+  8. synthesize_claim_activity     — synthesize overarching claim per group
+  9. store_transcript              — persist cleaned transcript to DB
+ 10. store_transcript_claims       — persist extracted claims linked to transcript
+ 11. create_claims_for_transcript  — batch-create Claim records + link FKs
+ 12. update_transcript_status      — set transcript status field
+ 13. finish_transcript_and_start_next — mark transcript complete, start next queued
+ 14. load_extract_inputs           — load DB state for ExtractClaimsWorkflow
+ 15. load_classify_inputs          — load DB state for ClassifyAndDedupWorkflow
+ 16. load_synthesize_inputs        — load DB state for SynthesizeClaimsWorkflow
+ 17. load_verify_inputs            — load DB state for VerifyClaimsWorkflow
 
 Each chunk is a separate activity so it's visible in Temporal UI.
 The workflow orchestrates chunks — Temporal's max_concurrent_activities
@@ -441,99 +442,148 @@ def _rebuild_sentences_lookup(sentences_dict: dict):
 
 
 @activity.defn
-async def extract_dispositions_activity(
+async def decontextualize_chunk_activity(
     transcript_meta: dict,
     chunk_dict: dict,
     enriched_speakers: list[dict],
 ) -> dict:
-    """Pass 1: Group sentences and label claim/not_claim for one chunk.
+    """Decontextualize: resolve references per sentence in one chunk.
 
-    Returns serialized GroupingOutput dict: {"sentences": [...], "groups": [...]}.
+    Returns dict mapping global_index (str) → standalone text.
     """
-    from src.transcript.thesis_extractor import extract_dispositions
+    from src.transcript.thesis_extractor import decontextualize_chunk
 
     td = _rebuild_transcript_data(transcript_meta)
     chunk = _rebuild_chunk(chunk_dict)
 
-    log.info(activity.logger, "extract", "pass1_start",
-             "Starting Pass 1: grouping + disposition",
+    log.info(activity.logger, "extract", "decontext_start",
+             "Starting decontextualization",
              title=td.title,
              chunk_index=chunk.chunk_index,
              total_chunks=chunk.total_chunks,
              target_range=chunk.target_range)
 
     try:
-        grouping = await extract_dispositions(
+        output = await decontextualize_chunk(
             td, chunk, enriched_speakers,
             logger=activity.logger,
         )
     except Exception as e:
-        log.error(activity.logger, "extract", "pass1_failed",
-                  "Pass 1 failed",
+        log.error(activity.logger, "extract", "decontext_failed",
+                  "Decontextualization failed",
                   chunk_index=chunk.chunk_index, error=str(e))
         raise
 
-    # Serialize for Temporal transport
+    # Serialize: {str(global_index): standalone_text}
     result = {
-        "sentences": [{"index": s.index, "group": s.group} for s in grouping.sentences],
-        "groups": [
-            {
-                "group": g.group,
-                "disposition": g.disposition,
-                "speakers": g.speakers,
-                "reason": g.reason,
-            }
-            for g in grouping.groups
-        ],
+        str(s.index): s.standalone
+        for s in output.sentences
     }
 
-    claim_count = sum(1 for g in grouping.groups if g.disposition == "claim")
-    log.info(activity.logger, "extract", "pass1_done",
-             "Pass 1 complete",
+    log.info(activity.logger, "extract", "decontext_done",
+             "Decontextualization complete",
              chunk_index=chunk.chunk_index,
-             claim_groups=claim_count)
+             sentence_count=len(result))
 
     return result
 
 
 @activity.defn
+async def embed_and_group_activity(
+    standalone_sentences: dict,
+    threshold: float,
+    bridge_max_words: int,
+) -> list[dict]:
+    """Embed standalone sentences and group by cosine similarity.
+
+    Programmatic — no LLM call. Returns serialized SentenceGroup list:
+    [{"group_id": int, "sentence_indices": [int], "speaker": str}]
+    """
+    from src.llm.embeddings import embed_texts
+    from src.transcript.sentence_grouper import group_sentences
+
+    # Build ordered sentence list from the flat dict
+    # standalone_sentences: {str(global_index): {global_index, speaker, text, standalone}}
+    ordered = sorted(standalone_sentences.values(), key=lambda s: s["global_index"])
+
+    log.info(activity.logger, "extract", "embed_start",
+             "Embedding standalone sentences",
+             sentence_count=len(ordered))
+
+    # Embed the standalone text (not raw)
+    texts = [s["standalone"] for s in ordered]
+    embeddings = await embed_texts(texts)
+
+    log.info(activity.logger, "extract", "embed_done",
+             "Embedding complete",
+             shape=list(embeddings.shape))
+
+    # Programmatic grouping
+    groups = group_sentences(ordered, embeddings, threshold, bridge_max_words)
+
+    log.info(activity.logger, "extract", "group_done",
+             "Sentence grouping complete",
+             group_count=len(groups),
+             avg_group_size=round(len(ordered) / max(len(groups), 1), 1))
+
+    # Serialize for Temporal transport
+    return [
+        {
+            "group_id": g.group_id,
+            "sentence_indices": g.sentence_indices,
+            "speaker": g.speaker,
+        }
+        for g in groups
+    ]
+
+
+@activity.defn
 async def synthesize_claims_activity(
     transcript_meta: dict,
-    chunk_dict: dict,
-    grouping_result: dict,
+    group_batch: list[dict],
     enriched_speakers: list[dict],
+    standalone_sentences: dict,
     sentences_dict: dict,
 ) -> list[dict]:
-    """Pass 2: Synthesize standalone claims from claim groups for one chunk.
+    """Synthesize standalone claims from sentence groups.
 
     Returns list of ExtractedThesis dicts (same shape as downstream expects).
     """
     from src.transcript.thesis_extractor import synthesize_claims
-    from src.schemas.llm_outputs import GroupingOutput, SentenceGrouping, GroupDisposition
+    from src.transcript.sentence_grouper import SentenceGroup
 
     td = _rebuild_transcript_data(transcript_meta)
-    chunk = _rebuild_chunk(chunk_dict)
     sentences_lookup = _rebuild_sentences_lookup(sentences_dict)
 
-    # Reconstruct GroupingOutput from serialized dict
-    grouping = GroupingOutput(
-        sentences=[SentenceGrouping(**s) for s in grouping_result["sentences"]],
-        groups=[GroupDisposition(**g) for g in grouping_result["groups"]],
-    )
+    # Reconstruct SentenceGroup objects from serialized dicts
+    groups = [
+        SentenceGroup(
+            group_id=g["group_id"],
+            sentence_indices=g["sentence_indices"],
+            speaker=g["speaker"],
+        )
+        for g in group_batch
+    ]
 
-    log.info(activity.logger, "extract", "pass2_start",
-             "Starting Pass 2: claim synthesis",
-             chunk_index=chunk.chunk_index)
+    # Build standalone_sentences lookup with int keys
+    ss_lookup = {}
+    for k, v in standalone_sentences.items():
+        idx = int(k) if isinstance(k, str) else k
+        ss_lookup[idx] = v
+
+    log.info(activity.logger, "extract", "synthesis_start",
+             "Starting claim synthesis",
+             group_count=len(groups))
 
     try:
         theses = await synthesize_claims(
-            td, chunk, grouping, sentences_lookup, enriched_speakers,
+            td, groups, ss_lookup, sentences_lookup, enriched_speakers,
             logger=activity.logger,
         )
     except Exception as e:
-        log.error(activity.logger, "extract", "pass2_failed",
-                  "Pass 2 failed",
-                  chunk_index=chunk.chunk_index, error=str(e))
+        log.error(activity.logger, "extract", "synthesis_failed",
+                  "Claim synthesis failed",
+                  error=str(e))
         raise
 
     # Serialize for Temporal transport
@@ -545,9 +595,8 @@ async def synthesize_claims_activity(
             "original_quote": t.original_quote,
         })
 
-    log.info(activity.logger, "extract", "pass2_done",
-             "Pass 2 complete",
-             chunk_index=chunk.chunk_index,
+    log.info(activity.logger, "extract", "synthesis_done",
+             "Claim synthesis complete",
              thesis_count=len(result))
 
     return result
@@ -722,10 +771,11 @@ async def update_transcript_claims_dedup(
 
 
 @activity.defn
-async def store_transcript(transcript_data: dict) -> dict:
+async def store_transcript(transcript_data: dict, transcript_id: str | None = None) -> dict:
     """Persist cleaned transcript to the database.
 
-    Upserts by URL — if the transcript already exists, updates it.
+    If transcript_id is provided (production path), updates that record.
+    Otherwise creates a new record (test path / first run).
     Enriches speaker names with Wikidata descriptions before storing.
     Returns dict with transcript_id and enriched speakers.
     """
@@ -736,7 +786,8 @@ async def store_transcript(transcript_data: dict) -> dict:
 
     url = transcript_data["url"]
     log.info(activity.logger, "store", "start", "Storing transcript",
-             url=url, title=transcript_data.get("title"))
+             url=url, title=transcript_data.get("title"),
+             transcript_id=transcript_id)
 
     try:
         # Enrich speakers with Wikidata descriptions before storing
@@ -749,46 +800,39 @@ async def store_transcript(transcript_data: dict) -> dict:
                   url=url, error=str(e))
         raise
 
-    async with async_session() as session:
-        result = await session.execute(
-            select(TranscriptRecord).where(TranscriptRecord.url == url)
-        )
-        record = result.scalar_one_or_none()
+    fields = {
+        "title": transcript_data["title"],
+        "date": transcript_data.get("date"),
+        "description": transcript_data.get("description"),
+        "speakers": transcript_data["speakers"],
+        "enriched_speakers": enriched_speakers,
+        "word_count": transcript_data["word_count"],
+        "segment_count": len(transcript_data["turns"]),
+        "display_text": transcript_data["display_text"],
+        "status": "extracting",
+        "segments_data": transcript_data.get("turns"),
+        "source_format": transcript_data.get("source_format", "rev"),
+        "speaker_aliases": transcript_data.get("speaker_aliases"),
+    }
 
-        if record:
-            record.title = transcript_data["title"]
-            record.date = transcript_data.get("date")
-            record.description = transcript_data.get("description")
-            record.speakers = transcript_data["speakers"]
-            record.enriched_speakers = enriched_speakers
-            record.word_count = transcript_data["word_count"]
-            record.segment_count = len(transcript_data["turns"])
-            record.display_text = transcript_data["display_text"]
-            record.status = "extracting"
-            # v2 fields
-            if "turns" in transcript_data:
-                record.segments_data = transcript_data["turns"]
-            if "source_format" in transcript_data:
-                record.source_format = transcript_data["source_format"]
-            if "speaker_aliases" in transcript_data:
-                record.speaker_aliases = transcript_data["speaker_aliases"]
-        else:
-            record = TranscriptRecord(
-                url=url,
-                title=transcript_data["title"],
-                date=transcript_data.get("date"),
-                description=transcript_data.get("description"),
-                speakers=transcript_data["speakers"],
-                enriched_speakers=enriched_speakers,
-                word_count=transcript_data["word_count"],
-                segment_count=len(transcript_data["turns"]),
-                display_text=transcript_data["display_text"],
-                status="extracting",
-                # v2 fields
-                segments_data=transcript_data.get("turns"),
-                source_format=transcript_data.get("source_format", "rev"),
-                speaker_aliases=transcript_data.get("speaker_aliases"),
+    async with async_session() as session:
+        if transcript_id:
+            # Production path: update the skeleton record created by the API
+            tid = _uuid_mod.UUID(transcript_id)
+            result = await session.execute(
+                select(TranscriptRecord).where(TranscriptRecord.id == tid)
             )
+            record = result.scalar_one_or_none()
+            if record:
+                for key, value in fields.items():
+                    setattr(record, key, value)
+            else:
+                # Skeleton missing (shouldn't happen) — create new
+                record = TranscriptRecord(url=url, **fields)
+                session.add(record)
+        else:
+            # Test path / no pre-existing record — always create new
+            record = TranscriptRecord(url=url, **fields)
             session.add(record)
 
         await session.commit()
@@ -1048,7 +1092,7 @@ async def finish_transcript_and_start_next() -> str | None:
     temporal = await TemporalClient.connect(TEMPORAL_HOST)
     await temporal.start_workflow(
         TranscriptPipelineWorkflow.run,
-        args=[url],
+        args=[url, None, None, None, None, transcript_id],
         id=f"extract-{transcript_id}",
         task_queue=TASK_QUEUE,
     )

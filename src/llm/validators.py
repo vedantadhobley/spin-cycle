@@ -23,8 +23,7 @@ from src.schemas.llm_outputs import (
     ThesisExtractionOutput,
     SynthesizedClaim,
     AttributeSpeakersOutput,
-    GroupingOutput,
-    GroupDisposition,
+    DecontextualizeOutput,
     ClaimSynthesisOutput,
 )
 from src.utils.logging import log, get_logger
@@ -314,21 +313,17 @@ def validate_thesis_extraction(output: ThesisExtractionOutput) -> tuple[bool, st
     return True, ""
 
 
-def validate_grouping(
-    output: GroupingOutput,
+def validate_decontextualize(
+    output: DecontextualizeOutput,
     target_range: tuple[int, int],
-    sentence_speakers: dict[int, str] | None = None,
 ) -> tuple[bool, str]:
-    """Validate Pass 1 grouping + disposition output.
+    """Validate decontextualization output.
 
-    1. Sentence coverage: every target index has exactly one entry, no dupes, no OOR
-    2. Group integrity: every group number in sentences has a matching entry in groups
-    3. Speaker boundary: split groups that span multiple speakers (programmatic fix)
-    4. Speaker check: claim groups must have at least one speaker — downgrade if missing
+    1. Coverage: every target index present, no dupes, no out-of-range
+    2. Quality: each standalone text >= 10 chars
     """
     expected = set(range(target_range[0], target_range[1]))
 
-    # --- Check 1: Sentence coverage ---
     seen: set[int] = set()
     for s in output.sentences:
         if s.index not in expected:
@@ -344,81 +339,13 @@ def validate_grouping(
     # Strip out-of-range entries in place
     output.sentences = [s for s in output.sentences if s.index in expected]
 
-    # --- Check 2: Group integrity ---
-    sentence_groups = {s.group for s in output.sentences}
-    group_lookup = {g.group: g for g in output.groups}
-    missing_groups = sentence_groups - set(group_lookup.keys())
-    if missing_groups:
-        return False, f"Groups referenced in sentences but missing from groups list: {sorted(missing_groups)}"
-
-    # --- Fix 3: Speaker boundary — split groups spanning multiple speakers ---
-    if sentence_speakers:
-        # Build group → [sentence indices] mapping
-        group_sentences: dict[int, list[int]] = {}
-        for s in output.sentences:
-            group_sentences.setdefault(s.group, []).append(s.index)
-
-        next_group_num = max(g.group for g in output.groups) + 1
-        splits = 0
-
-        for grp_num, indices in list(group_sentences.items()):
-            sorted_indices = sorted(indices)
-            # Find speaker runs within this group
-            runs: list[tuple[str, list[int]]] = []
-            for idx in sorted_indices:
-                speaker = sentence_speakers.get(idx, "")
-                if runs and runs[-1][0] == speaker:
-                    runs[-1][1].append(idx)
-                else:
-                    runs.append((speaker, [idx]))
-
-            if len(runs) <= 1:
-                continue  # Single speaker — no split needed
-
-            # Split: first run keeps original group number, rest get new groups
-            orig_group = group_lookup.get(grp_num)
-            if not orig_group:
-                continue
-
-            for run_speaker, run_indices in runs[1:]:
-                new_num = next_group_num
-                next_group_num += 1
-                splits += 1
-
-                # Reassign sentences to new group
-                for idx in run_indices:
-                    for s in output.sentences:
-                        if s.index == idx:
-                            s.group = new_num
-
-                # Create new group entry (copy disposition from original)
-                new_group = GroupDisposition(
-                    group=new_num,
-                    disposition=orig_group.disposition,
-                    speakers=[run_speaker] if orig_group.disposition == "claim" else [],
-                    reason=orig_group.reason,
-                )
-                output.groups.append(new_group)
-
-            # Update original group's speakers to first run's speaker
-            if orig_group.disposition == "claim":
-                orig_group.speakers = [runs[0][0]]
-
-        if splits:
-            log.info(logger, MODULE, "speaker_boundary_splits",
-                     f"Split {splits} groups at speaker boundaries",
-                     splits=splits)
-            # Rebuild group_lookup after splits
-            group_lookup = {g.group: g for g in output.groups}
-
-    # --- Fix 4: Speaker check — downgrade claim groups without speakers ---
-    for g in output.groups:
-        if g.disposition == "claim" and not g.speakers:
-            log.warning(logger, MODULE, "group_downgraded",
-                        "Downgraded claim group with no speakers to not_claim",
-                        group=g.group)
-            g.disposition = "not_claim"
-            g.reason = "downgraded: no speakers"
+    # Quality: each standalone must be substantive
+    for s in output.sentences:
+        if not s.standalone or len(s.standalone.strip()) < 10:
+            return False, (
+                f"Sentence {s.index} standalone text too short (<10 chars): "
+                f"'{s.standalone}'"
+            )
 
     return True, ""
 
@@ -427,18 +354,24 @@ def validate_claim_synthesis(
     output: ClaimSynthesisOutput,
     expected_groups: list[int],
 ) -> tuple[bool, str]:
-    """Validate Pass 2 claim synthesis output.
+    """Validate claim synthesis output.
 
-    1. Every expected group has a matching entry in output.claims
-    2. Each synthesized claim meets minimum length (15 chars)
+    Tolerates small omissions (trivial groups like greetings/closings).
+    Empty claims are allowed (group had no factual content).
     """
     result_groups = {c.group for c in output.claims}
     missing = set(expected_groups) - result_groups
-    if missing:
+
+    # Allow up to 10% of groups to be omitted (trivial content)
+    max_missing = max(1, len(expected_groups) // 10)
+    if len(missing) > max_missing:
         return False, f"Missing synthesized groups: {sorted(missing)}"
 
     for c in output.claims:
-        if len(c.claim.strip()) < 15:
+        claim_text = c.claim.strip()
+        if not claim_text:
+            continue
+        if len(claim_text) < 15:
             return False, (
                 f"Group {c.group} claim too short (<15 chars): '{c.claim}'"
             )

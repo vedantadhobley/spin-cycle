@@ -1,20 +1,22 @@
-"""Two-pass claim extraction from parsed transcripts (Phase 1).
+"""Embedding-based claim extraction from parsed transcripts (Phase 1).
 
 Takes a TranscriptData (from parser registry) and extracts every verifiable
-factual claim via two focused LLM passes:
+factual claim via decontextualization + programmatic grouping + synthesis:
 
-  Pass 1 (Grouping): Group sentences by semantic continuity, label claim/not_claim.
-  Pass 2 (Synthesis): Distill each claim group into a standalone factual assertion.
+  Decontextualize: LLM resolves references so each sentence stands alone
+  Embed + group:   Programmatic cosine-similarity grouping (no LLM)
+  Synthesize:      LLM combines standalone sentences into one claim per group
 
 Flow:
   SpeakerTurn[] → sentencize → NumberedSentence[] → build_sentence_chunks
-  → SentenceChunk[] → [per chunk] extract_dispositions (Pass 1)
-  → GroupingOutput → [per chunk, claim groups only] synthesize_claims (Pass 2)
+  → SentenceChunk[] → [per chunk] decontextualize_chunk
+  → standalone sentences → embed + group_sentences (programmatic)
+  → SentenceGroup[] → [per batch] synthesize_claims
   → ClaimSynthesisOutput → _build_theses → ExtractedThesis[]
 
-SpaCy splits each turn into sentences with global indices. Pass 1 must
-account for every sentence in the target range. A programmatic validator
-enforces full coverage. original_quote is derived from sentence text.
+SpaCy splits each turn into sentences with global indices. Grouping is
+deterministic — same input always produces the same groups.
+original_quote is derived from raw sentence text.
 """
 
 from __future__ import annotations
@@ -23,17 +25,18 @@ from dataclasses import dataclass, field
 from datetime import date
 from functools import partial
 
-from src.llm import invoke_llm, LLMInvocationError, validate_grouping, validate_claim_synthesis
+from src.llm import invoke_llm, LLMInvocationError, validate_decontextualize, validate_claim_synthesis
 from src.prompts.extraction import (
-    GROUPING_SYSTEM, GROUPING_USER,
+    DECONTEXT_SYSTEM, DECONTEXT_USER,
     SYNTHESIS_SYSTEM, SYNTHESIS_USER,
     SYNTHESIS_RETRY_SYSTEM, SYNTHESIS_RETRY_USER,
 )
 from src.schemas.llm_outputs import (
-    ExtractedThesis, GroupingOutput, ClaimSynthesisOutput,
+    ExtractedThesis, DecontextualizeOutput, ClaimSynthesisOutput,
 )
 from src.utils.ner import extract_claim_entities, check_entity_coverage
 from src.transcript.parsers import TranscriptData, SpeakerTurn
+from src.transcript.sentence_grouper import SentenceGroup
 from src.utils.logging import log, get_logger
 
 MODULE = "thesis_extractor"
@@ -261,37 +264,39 @@ def _format_sentences_inline(sentences: list[NumberedSentence]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Bridge: GroupingOutput + ClaimSynthesisOutput → ExtractedThesis[]
+# Bridge: SentenceGroup[] + ClaimSynthesisOutput → ExtractedThesis[]
 # ---------------------------------------------------------------------------
 
 def _build_theses(
-    grouping: GroupingOutput,
+    groups: list[SentenceGroup],
     synthesis: ClaimSynthesisOutput,
     sentences_lookup: dict[int, NumberedSentence],
 ) -> list[ExtractedThesis]:
-    """Build ExtractedThesis list from Pass 1 + Pass 2 outputs.
+    """Build ExtractedThesis list from programmatic groups + synthesis output.
 
-    - thesis_statement: synthesized claim from Pass 2
-    - speakers: from Pass 1 group disposition
+    - thesis_statement: synthesized claim from synthesis LLM call
+    - speakers: from SentenceGroup.speaker
     - original_quote: programmatic join of raw sentence texts
     """
-    group_lookup = {g.group: g for g in grouping.groups}
     synthesis_lookup = {c.group: c for c in synthesis.claims}
 
-    group_indices: dict[int, list[int]] = {}
-    for s in grouping.sentences:
-        group_indices.setdefault(s.group, []).append(s.index)
-
     theses = []
-    for gid, indices in sorted(group_indices.items()):
-        group = group_lookup.get(gid)
-        synthesized = synthesis_lookup.get(gid)
-        if not group or group.disposition != "claim" or not synthesized:
+    for group in groups:
+        synthesized = synthesis_lookup.get(group.group_id)
+        if not synthesized:
+            continue
+
+        # Skip empty claims and meta-commentary (LLM saying "no claims")
+        claim_text = synthesized.claim.strip()
+        if not claim_text:
+            continue
+        claim_lower = claim_text.lower()
+        if "no factual claim" in claim_lower or "no verifiable" in claim_lower:
             continue
 
         # Build original_quote from raw sentence texts
         quote_parts = []
-        for idx in sorted(indices):
+        for idx in sorted(group.sentence_indices):
             sent = sentences_lookup.get(idx)
             if sent:
                 quote_parts.append(sent.text)
@@ -299,7 +304,7 @@ def _build_theses(
 
         theses.append(ExtractedThesis(
             thesis_statement=synthesized.claim,
-            speakers=group.speakers,
+            speakers=[group.speaker],
             original_quote=original_quote,
         ))
     return theses
@@ -333,145 +338,133 @@ def _build_context_note(transcript: TranscriptData) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Pass 1: Grouping + Disposition
+# Decontextualization (per chunk)
 # ---------------------------------------------------------------------------
 
-async def extract_dispositions(
+async def decontextualize_chunk(
     transcript: TranscriptData,
     chunk: SentenceChunk,
     enriched_speakers: list[dict],
     logger=None,
-) -> GroupingOutput:
-    """Pass 1: Group sentences and label each group claim/not_claim.
+) -> DecontextualizeOutput:
+    """Resolve references in each target sentence so it stands alone.
 
-    No thesis writing — the model only decides structure and disposition.
-    A coverage validator enforces that every target sentence has a group.
+    Uses the chunk's full_text (including context) for reference resolution,
+    but only outputs standalone text for target-range sentences.
 
-    Returns GroupingOutput (serialized to dict by the activity layer).
+    Returns DecontextualizeOutput (serialized to dict by the activity layer).
     """
     logger = logger or _default_logger
 
-    log.info(logger, MODULE, "pass1_start",
-             "Pass 1: grouping + disposition",
+    log.info(logger, MODULE, "decontext_start",
+             "Decontextualizing chunk",
              chunk_index=chunk.chunk_index,
              total_chunks=chunk.total_chunks,
              target_range=chunk.target_range,
              target_sentences=len(chunk.target_sentences))
 
-    sentence_speakers = {
-        s.global_index: s.speaker for s in chunk.target_sentences
-    }
     coverage_validator = partial(
-        validate_grouping,
+        validate_decontextualize,
         target_range=chunk.target_range,
-        sentence_speakers=sentence_speakers,
     )
 
     start = chunk.target_range[0]
     output = await invoke_llm(
-        system_prompt=GROUPING_SYSTEM.format(
+        system_prompt=DECONTEXT_SYSTEM.format(
             current_date=date.today().isoformat(),
         ),
-        user_prompt=GROUPING_USER.format(
+        user_prompt=DECONTEXT_USER.format(
             numbered_sentences=chunk.full_text,
             target_range_start=start,
             target_range_end=chunk.target_range[1] - 1,
             context_note=_build_context_note(transcript),
             speaker_descriptions=_build_speaker_desc(enriched_speakers),
             next_index=start + 1,
-            next_next_index=start + 2,
         ),
-        schema=GroupingOutput,
+        schema=DecontextualizeOutput,
         semantic_validator=coverage_validator,
-        activity_name=f"group_chunk_{chunk.chunk_index}",
+        activity_name=f"decontext_chunk_{chunk.chunk_index}",
     )
 
-    claim_count = sum(1 for g in output.groups if g.disposition == "claim")
-    not_claim_count = sum(1 for g in output.groups if g.disposition == "not_claim")
-    log.info(logger, MODULE, "pass1_done",
-             "Pass 1 complete",
+    log.info(logger, MODULE, "decontext_done",
+             "Decontextualization complete",
              chunk_index=chunk.chunk_index,
-             claim_groups=claim_count,
-             not_claim_groups=not_claim_count,
-             total_sentences=len(output.sentences))
+             sentence_count=len(output.sentences))
 
     return output
 
 
 # ---------------------------------------------------------------------------
-# Pass 2: Claim Synthesis
+# Claim Synthesis (per batch of groups)
 # ---------------------------------------------------------------------------
 
 async def synthesize_claims(
     transcript: TranscriptData,
-    chunk: SentenceChunk,
-    grouping: GroupingOutput,
+    groups: list[SentenceGroup],
+    standalone_sentences: dict[int, dict],
     sentences_lookup: dict[int, NumberedSentence],
     enriched_speakers: list[dict],
     logger=None,
 ) -> list[ExtractedThesis]:
-    """Pass 2: Synthesize standalone claim from each claim group.
+    """Synthesize standalone claims from programmatic sentence groups.
 
-    The model distills what is being asserted about the world — resolving
-    references and combining multi-sentence groups into a single checkable
-    claim statement. Speaker identity is in metadata, not the claim text.
+    The model distills what is being asserted about the world — combining
+    already-decontextualized sentences into a single checkable claim per group.
+    Speaker identity is in metadata, not the claim text.
 
     Two-phase approach:
-    1. Batch LLM call for all claim groups (with NER entity hints in prompt)
+    1. Batch LLM call for all groups (with NER entity hints in prompt)
     2. Per-group NER validation — groups missing entities get a targeted retry
 
     Returns list of ExtractedThesis (same downstream shape).
     """
     logger = logger or _default_logger
 
-    # Collect claim groups and their sentence texts
-    claim_groups = [g for g in grouping.groups if g.disposition == "claim"]
-    if not claim_groups:
+    if not groups:
         return []
-
-    # Build sentence indices per group
-    group_indices: dict[int, list[int]] = {}
-    for s in grouping.sentences:
-        group_indices.setdefault(s.group, []).append(s.index)
 
     # Extract NER entities per group for coverage checking
     group_entities: dict[int, list[str]] = {}
-    for g in claim_groups:
-        indices = sorted(group_indices.get(g.group, []))
+    for g in groups:
         raw_texts = [
             sentences_lookup[idx].text
-            for idx in indices if idx in sentences_lookup
+            for idx in sorted(g.sentence_indices) if idx in sentences_lookup
         ]
         entities = extract_claim_entities(raw_texts)
         if entities:
-            group_entities[g.group] = entities
+            group_entities[g.group_id] = entities
 
-    # Build claim groups text with entity hints
+    # Build claim groups text with standalone sentences + entity hints
     claim_groups_text_parts = []
     expected_groups = []
     group_raw_sentences: dict[int, list[str]] = {}
 
-    for g in claim_groups:
-        indices = sorted(group_indices.get(g.group, []))
-        raw_sentences = []
+    for g in groups:
+        indices = sorted(g.sentence_indices)
+        standalone_lines = []
+        raw_lines = []
         for idx in indices:
+            ss = standalone_sentences.get(idx)
+            if ss:
+                standalone_lines.append(f"[S{idx}] {ss['standalone']}")
             sent = sentences_lookup.get(idx)
             if sent:
-                raw_sentences.append(f"[S{idx}] {sent.text}")
-        if not raw_sentences:
+                raw_lines.append(f"[S{idx}] {sent.text}")
+
+        if not standalone_lines:
             continue
-        expected_groups.append(g.group)
-        group_raw_sentences[g.group] = raw_sentences
-        speakers_str = ", ".join(g.speakers) if g.speakers else "Unknown"
+
+        expected_groups.append(g.group_id)
+        group_raw_sentences[g.group_id] = raw_lines
 
         entity_hint = ""
-        entities = group_entities.get(g.group)
+        entities = group_entities.get(g.group_id)
         if entities:
             entity_hint = f"\nKey entities: {', '.join(entities)}"
 
         claim_groups_text_parts.append(
-            f"### Group {g.group} (speakers: {speakers_str})\n"
-            + "\n".join(raw_sentences)
+            f"### Group {g.group_id} (speaker: {g.speaker})\n"
+            + "\n".join(standalone_lines)
             + entity_hint
         )
 
@@ -480,10 +473,9 @@ async def synthesize_claims(
 
     claim_groups_text = "\n\n".join(claim_groups_text_parts)
 
-    log.info(logger, MODULE, "pass2_start",
-             "Pass 2: claim synthesis",
-             chunk_index=chunk.chunk_index,
-             claim_groups=len(expected_groups),
+    log.info(logger, MODULE, "synthesis_start",
+             "Claim synthesis",
+             group_count=len(expected_groups),
              groups_with_entities=len(group_entities))
 
     synthesis_validator = partial(
@@ -496,14 +488,13 @@ async def synthesize_claims(
             current_date=date.today().isoformat(),
         ),
         user_prompt=SYNTHESIS_USER.format(
-            full_text=chunk.full_text,
             context_note=_build_context_note(transcript),
             speaker_descriptions=_build_speaker_desc(enriched_speakers),
             claim_groups_text=claim_groups_text,
         ),
         schema=ClaimSynthesisOutput,
         semantic_validator=synthesis_validator,
-        activity_name=f"synthesize_chunk_{chunk.chunk_index}",
+        activity_name="synthesize_claims",
     )
 
     # Per-group NER entity coverage check
@@ -523,13 +514,12 @@ async def synthesize_claims(
     if failed_groups:
         log.info(logger, MODULE, "ner_coverage_gaps",
                  "Entity coverage gaps detected, retrying failed groups",
-                 chunk_index=chunk.chunk_index,
                  failed_count=len(failed_groups),
                  total_groups=len(expected_groups),
                  gaps={gid: info["missing"] for gid, info in failed_groups.items()})
 
         retry_output = await _retry_failed_groups(
-            transcript, chunk, grouping, sentences_lookup,
+            transcript, groups, sentences_lookup,
             enriched_speakers, group_raw_sentences, failed_groups, logger,
         )
 
@@ -555,14 +545,12 @@ async def synthesize_claims(
             if still_missing:
                 log.warning(logger, MODULE, "ner_gaps_after_retry",
                             "Some entity gaps remain after retry",
-                            chunk_index=chunk.chunk_index,
                             remaining_gaps=still_missing)
 
-    theses = _build_theses(grouping, output, sentences_lookup)
+    theses = _build_theses(groups, output, sentences_lookup)
 
-    log.info(logger, MODULE, "pass2_done",
-             "Pass 2 complete",
-             chunk_index=chunk.chunk_index,
+    log.info(logger, MODULE, "synthesis_done",
+             "Claim synthesis complete",
              thesis_count=len(theses),
              groups_retried=len(failed_groups))
 
@@ -571,8 +559,7 @@ async def synthesize_claims(
 
 async def _retry_failed_groups(
     transcript: TranscriptData,
-    chunk: SentenceChunk,
-    grouping: GroupingOutput,
+    groups: list[SentenceGroup],
     sentences_lookup: dict[int, NumberedSentence],
     enriched_speakers: list[dict],
     group_raw_sentences: dict[int, list[str]],
@@ -588,20 +575,20 @@ async def _retry_failed_groups(
 
     Returns ClaimSynthesisOutput with revised claims, or None on failure.
     """
+    group_lookup = {g.group_id: g for g in groups}
+
     retry_parts = []
     retry_expected = []
 
-    group_lookup = {g.group: g for g in grouping.groups}
     for gid, info in failed_groups.items():
         group = group_lookup.get(gid)
         if not group:
             continue
         retry_expected.append(gid)
-        speakers_str = ", ".join(group.speakers) if group.speakers else "Unknown"
         raw = "\n".join(group_raw_sentences.get(gid, []))
 
         retry_parts.append(
-            f"### Group {gid} (speakers: {speakers_str})\n"
+            f"### Group {gid} (speaker: {group.speaker})\n"
             f"Source sentences:\n{raw}\n"
             f"Your previous claim:\n{info.get('previous_claim', '')}\n"
             f"Key entities: {', '.join(info['all_entities'])}\n"
@@ -622,7 +609,6 @@ async def _retry_failed_groups(
                 current_date=date.today().isoformat(),
             ),
             user_prompt=SYNTHESIS_RETRY_USER.format(
-                full_text=chunk.full_text,
                 context_note=_build_context_note(transcript),
                 speaker_descriptions=_build_speaker_desc(enriched_speakers),
                 retry_groups_text="\n\n".join(retry_parts),
@@ -630,12 +616,11 @@ async def _retry_failed_groups(
             schema=ClaimSynthesisOutput,
             semantic_validator=retry_validator,
             max_retries=1,
-            activity_name=f"synthesis_retry_chunk_{chunk.chunk_index}",
+            activity_name="synthesis_retry",
         )
     except LLMInvocationError as e:
         log.warning(logger, MODULE, "ner_retry_failed",
                     "Targeted retry failed, keeping original output",
-                    chunk_index=chunk.chunk_index,
                     error=str(e),
                     failed_groups=list(failed_groups.keys()))
         return None

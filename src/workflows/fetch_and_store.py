@@ -38,6 +38,7 @@ class FetchTranscriptWorkflow:
         raw_text: str | None = None,
         title: str | None = None,
         date: str | None = None,
+        transcript_id: str | None = None,
     ) -> dict:
         log.info(workflow.logger, MODULE, "started",
                  "Fetching transcript", url=url)
@@ -71,7 +72,7 @@ class FetchTranscriptWorkflow:
         # Step 2: Store + enrich speakers
         store_result = await workflow.execute_activity(
             store_transcript,
-            args=[transcript_data],
+            args=[transcript_data, transcript_id],
             start_to_close_timeout=timedelta(seconds=TIMEOUT_FETCH_TRANSCRIPT),
             retry_policy=RetryPolicy(maximum_attempts=3),
         )
