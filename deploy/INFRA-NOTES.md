@@ -9,24 +9,39 @@ reproducible from one place.
 spin-cycle has **no public-facing component** (no Cloudflare tunnel
 ingress); the api / temporal-ui / adminer are tailnet-only.
 
-## 1. Caddyfile additions (luv)
+## 1. Caddy routes (luv)
 
-Append to `~/workspace/proxy/Caddyfile`:
+The Caddy config on luv is split per-project. This project's routes live in:
+
+```
+~/workspace/proxy/caddy/caddy.d/spin-cycle.caddy
+```
+
+Reference content (current source of truth is the file above):
 
 ```caddy
-# ─── spin-cycle (prod + dev) ───────────────────────────────────────────────
 # api standardized to internal :3000 in both envs (was :3500 prod / :4500 dev).
 
+# ─── prod ──────────────────────────────────────────────────────────────────
 http://spin-cycle-prod-api.{$BASE_DOMAIN}          { reverse_proxy spin-cycle-prod-api:3000 }
 http://spin-cycle-prod-temporal-ui.{$BASE_DOMAIN}  { reverse_proxy spin-cycle-prod-temporal-ui:8080 }
 http://spin-cycle-prod-adminer.{$BASE_DOMAIN}      { reverse_proxy spin-cycle-prod-adminer:8080 }
 
+# ─── dev ───────────────────────────────────────────────────────────────────
 http://spin-cycle-dev-api.{$BASE_DOMAIN}           { reverse_proxy spin-cycle-dev-api:3000 }
 http://spin-cycle-dev-temporal-ui.{$BASE_DOMAIN}   { reverse_proxy spin-cycle-dev-temporal-ui:8080 }
 http://spin-cycle-dev-adminer.{$BASE_DOMAIN}       { reverse_proxy spin-cycle-dev-adminer:8080 }
 ```
 
-Then: `docker compose -f ~/workspace/proxy/docker-compose.yml restart caddy`.
+After editing the file, reload Caddy without restarting the container:
+
+```bash
+docker exec proxy-caddy caddy reload --config /etc/caddy/Caddyfile
+```
+
+(The proxy stack uses a directory bind mount, so atomic-write edits to
+files inside `caddy/` flow through and `caddy reload` picks them up.
+See `~/workspace/proxy/README.md` for the gotcha mechanics.)
 
 ## 2. Cross-project network dependency
 
