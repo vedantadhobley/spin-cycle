@@ -1,18 +1,20 @@
 # Production Docker Compose
 #
-# Port allocation: spin-cycle uses 3500-3509 (production)
-#   3500: FastAPI (public API)
-#   3501: Temporal UI
-#   3502: Adminer (Postgres web UI)
+# HTTP services are reachable via Caddy on the `proxy` network.
+# See ~/workspace/proxy/Caddyfile for hostname routes:
+#   spin-cycle-prod-api.{$BASE_DOMAIN}         → api:3000
+#   spin-cycle-prod-temporal-ui.{$BASE_DOMAIN} → temporal-ui:8080
+#   spin-cycle-prod-adminer.{$BASE_DOMAIN}     → adminer:8080
 #
 # External services (LLM API via LLAMA_URL / LLAMA_EMBED_URL in .env):
 #   - LLM API (llama.cpp Qwen3.5-122B-A10B)
 #   - LLM embeddings API
 #
-# Internal ports (not exposed):
-#   - postgres:5432 (Application data)
+# Internal ports (not exposed to host, reachable via docker DNS):
+#   - api:3000             (FastAPI — standardized to 3000 across dev/prod)
+#   - postgres:5432        (Application data)
 #   - temporal-postgres:5432 (Temporal metadata)
-#   - temporal:7233 (gRPC)
+#   - temporal:7233        (gRPC)
 
 name: spin-cycle-prod
 
@@ -24,12 +26,10 @@ services:
       dockerfile: Dockerfile
     image: spin-cycle-prod-api:latest
     container_name: spin-cycle-prod-api
-    ports:
-      - "3500:3500"
     env_file: .env
     environment:
       APP_ENV: production
-      APP_PORT: "3500"
+      APP_PORT: "3000"
       POSTGRES_HOST: spin-cycle-prod-postgres
       POSTGRES_PORT: "5432"
       POSTGRES_DB: spincycle
@@ -52,6 +52,7 @@ services:
     networks:
       - spin-cycle-prod
       - luv-prod
+      - proxy
 
   # TEMPORAL WORKER - runs verification workflows + LangGraph agents
   worker:
@@ -113,17 +114,16 @@ services:
   temporal-ui:
     image: temporalio/ui:latest
     container_name: spin-cycle-prod-temporal-ui
-    ports:
-      - "3501:8080"
     environment:
       - TEMPORAL_ADDRESS=spin-cycle-prod-temporal:7233
-      - TEMPORAL_CORS_ORIGINS=http://localhost:3501
+      - TEMPORAL_CORS_ORIGINS=http://spin-cycle-prod-temporal-ui.${BASE_DOMAIN:-luv}
     depends_on:
       temporal:
         condition: service_healthy
     restart: unless-stopped
     networks:
       - spin-cycle-prod
+      - proxy
 
   # TEMPORAL POSTGRES - metadata storage for Temporal
   temporal-postgres:
@@ -168,8 +168,6 @@ services:
   adminer:
     image: adminer:latest
     container_name: spin-cycle-prod-adminer
-    ports:
-      - "3502:8080"
     environment:
       ADMINER_DEFAULT_SERVER: spin-cycle-prod-postgres
       ADMINER_DESIGN: dracula
@@ -179,6 +177,7 @@ services:
     restart: unless-stopped
     networks:
       - spin-cycle-prod
+      - proxy
 
 volumes:
   spin-cycle-prod-postgres:
@@ -191,4 +190,10 @@ networks:
     name: spin-cycle-prod
     driver: bridge
   luv-prod:
+    external: true
+
+  # Caddy reverse proxy fronts HTTP services here.
+  # See ~/workspace/proxy/Caddyfile for hostname routes.
+  proxy:
+    name: proxy
     external: true
